@@ -457,6 +457,46 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getAvatar(userId: string): Promise<Uint8Array | null>;
 
+  // --- Agent Shell APIs (feature flag: agentShell) ---
+
+  /**
+   * List all agent profiles owned by this user. Returns agents sorted by creation time (newest first).
+   */
+  listAgents(): Promise<AgentProfile[]>;
+
+  /**
+   * Create a new agent profile with the given properties. Returns the created agent with a
+   * generated ID and timestamps. The `defaultModelId` can be null for a human-only agent.
+   */
+  createAgent(name: string, title: string, description: string, defaultModelId: string | null,
+              avatar?: AvatarImage): Promise<AgentProfile>;
+
+  /**
+   * Update an existing agent profile. All fields except `id`, `created`, and `updated` can be
+   * modified. Pass `avatar: null` to remove the avatar. Throws if the agent doesn't exist or
+   * isn't owned by this user.
+   */
+  updateAgent(id: string, updates: {
+    name?: string;
+    title?: string;
+    description?: string;
+    defaultModelId?: string | null;
+    avatar?: AvatarImage | null;
+  }): Promise<AgentProfile>;
+
+  /**
+   * Delete an agent profile permanently. This also deletes the chat/transcript associated with
+   * this agent. Throws if the agent doesn't exist or isn't owned by this user.
+   */
+  deleteAgent(id: string): Promise<void>;
+
+  /**
+   * Get an agent profile by its workspace ID. Returns null if the workspace is not bound to an
+   * agent. Useful for determining if a workspace represents an agent chat for purposes of injecting
+   * the agent's defaultModelId and description into the chat.
+   */
+  getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null>;
+
   /**
    * Open an existing gadget.
    *
@@ -1286,6 +1326,39 @@ export type GadgetMetadataWithTimestamps = GadgetMetadata & {
   created: Date;
   lastActive: Date;
 }
+
+/**
+ * A Bot/Agent profile: a named persistent teammate with its own personality, model configuration,
+ * and chat history. Agents are stored on the User DO and are the primary entity in the agent-shell
+ * UI mode (feature flag `agentShell`).
+ */
+export type AgentProfile = {
+  /** Unique identifier for this agent (randomly generated). */
+  id: string;
+  /** Display name shown in the agent roster and chat header. */
+  name: string;
+  /** Short subtitle shown beneath the name in the roster (e.g., role or specialization). */
+  title: string;
+  /** Longer-form description of the agent's purpose and capabilities. */
+  description: string;
+  /** Optional avatar image for the agent. Reuses the AvatarImage type. */
+  avatar?: AvatarImage;
+  /** 
+   * Default model ID for this agent, or null for a human-only agent (no AI responses).
+   * When the user sends a message in this agent's chat, this model is used unless the composer
+   * overrides it for that specific send.
+   */
+  defaultModelId: string | null;
+  /**
+   * The workspace ID (gadget ID) that contains this agent's dedicated chat. Each agent has exactly
+   * one workspace created alongside it, and this field points to it.
+   */
+  workspaceId: string;
+  /** When this agent profile was created. */
+  created: Date;
+  /** When this agent profile was last updated. */
+  updated: Date;
+};
 
 /**
  * The icons an output format may be drawn with. A closed set because we want them to look consistent.

@@ -102,6 +102,12 @@ export type ProductAnalyticsInput =
       user_id: string;
       blueprint_id: string;
     }
+  | {
+      event_name: "agent_created";
+      user_id: string;
+      agent_id: string;
+      workspace_id: string;
+    }
   | ProductAnalyticsGadgetInput;
 
 export function recordAnalytics(

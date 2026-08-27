@@ -22,6 +22,7 @@ import {
 import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../composerDraft";
+import { useUiFeatureFlag } from "../FeatureFlagsContext";
 
 type HomeSearch = { prompt?: string };
 
@@ -35,7 +36,26 @@ export const Route = createFileRoute("/")({
 // The Home page is the "new workspace" launcher. Persistent navigation (recents, favorites) lives
 // in the AppShell rail, so this page focuses on a single thing: composing the first message of a
 // new gadget — a centered column with a hero, the prompt composer, and a few task suggestions.
+// When the agentShell feature flag is on, we redirect to the agent roster instead.
 function HomePage() {
+  const navigate = useNavigate();
+  const { enabled: agentShellEnabled, loading } = useUiFeatureFlag('agentShell');
+
+  useEffect(() => {
+    if (!loading && agentShellEnabled) {
+      // Redirect to agents page when feature flag is on
+      navigate({ to: '/agents', replace: true });
+    }
+  }, [agentShellEnabled, loading, navigate]);
+
+  if (loading || agentShellEnabled) {
+    return (
+      <div className="flex min-h-full items-center justify-center">
+        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
   return <HomePageContent prompt={Route.useSearch().prompt} />;
 }
 

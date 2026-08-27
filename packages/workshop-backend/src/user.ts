@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile } from '@gadgets/workshop-shared/api';
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -75,6 +75,8 @@ export type UserChatContext = {
   profile: AiChatAuthorInfo;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
+  /** If this chat belongs to an agent profile (agent-shell 1:1 chat), the agent's profile. */
+  agentProfile?: AgentProfile;
 }
 
 type LoginSessionRecord = {
@@ -96,6 +98,18 @@ type LibraryBlueprintRecord = {
   metadata: BlueprintMetadata;
   addedAt: Date;
   uploaded: boolean;
+};
+
+type AgentRecord = {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  avatar?: { url: string };
+  defaultModelId: string | null;
+  workspaceId: string;
+  created: Date;
+  updated: Date;
 };
 
 type GadgetRecord = GadgetMetadata & {
@@ -159,6 +173,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
     collections: {
       aiModels: collection<UserAiModelRecord>()({
         primaryKey: record => record.profile.id,
+      }),
+      agents: collection<AgentRecord>()({
+        primaryKey: "id"
       }),
       gadgets: collection<GadgetRecord>()({
         primaryKey: "id"
@@ -693,12 +710,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** DO NOT MAKE PUBLIC -- returns API keys. Pure read: call sites replay it across DO resets
    * via retryOnDoReset, so it must stay free of writes and side effects. */
-  async getChatContext(modelId: string | null): Promise<UserChatContext> {
+  async getChatContext(modelId: string | null, workspaceId?: string): Promise<UserChatContext> {
     let gwConfig = getAiGatewayConfig(this.env);
 
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
+
+    // If this chat belongs to an agent profile (1:1 agent chat), include it in the context.
+    // The agent's defaultModelId is used in the frontend picker seed, not as a backend fallback.
+    if (workspaceId) {
+      let agentProfile = await this.getAgentByWorkspaceId(workspaceId);
+      if (agentProfile) {
+        result.agentProfile = agentProfile;
+      }
+    }
+
     if (modelId) {
       // In AI Gateway mode, resolve gateway models first.
       if (gwConfig) {
@@ -723,6 +750,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         }
       }
     }
+
     return result;
   }
 
@@ -744,6 +772,108 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return result;
+  }
+
+  // --- Agent Shell methods ---
+
+  /** List all agent profiles, sorted by creation time (newest first). */
+  async listAgents(): Promise<AgentProfile[]> {
+    let agents = Array.from(this.storage.agents.list());
+    // Sort by created date, newest first
+    agents.sort((a, b) => b.created.getTime() - a.created.getTime());
+    return agents;
+  }
+
+  /** Create a new agent profile and register its workspace. Called from server.ts after creating the workspace. */
+  async createAgentRecord(
+    agentId: string,
+    workspaceId: string,
+    name: string,
+    title: string,
+    description: string,
+    defaultModelId: string | null,
+    avatar?: AvatarImage
+  ): Promise<AgentProfile> {
+    let now = new Date();
+    let agent: AgentRecord = {
+      id: agentId,
+      name,
+      title,
+      description,
+      avatar,
+      defaultModelId,
+      workspaceId,
+      created: now,
+      updated: now,
+    };
+    
+    this.storage.agents.put(agent);
+    return agent;
+  }
+
+  /** Update an existing agent profile. */
+  async updateAgentRecord(
+    id: string,
+    updates: {
+      name?: string;
+      title?: string;
+      description?: string;
+      defaultModelId?: string | null;
+      avatar?: AvatarImage | null;
+    }
+  ): Promise<AgentProfile> {
+    let agent = this.storage.agents.get(id);
+    if (!agent) {
+      throw new Error(`Agent not found: ${id}`);
+    }
+
+    // Apply updates
+    if (updates.name !== undefined) agent.name = updates.name;
+    if (updates.title !== undefined) agent.title = updates.title;
+    if (updates.description !== undefined) agent.description = updates.description;
+    if (updates.defaultModelId !== undefined) agent.defaultModelId = updates.defaultModelId;
+    if (updates.avatar !== undefined) {
+      if (updates.avatar === null) {
+        delete agent.avatar;
+      } else {
+        agent.avatar = updates.avatar;
+      }
+    }
+
+    agent.updated = new Date();
+    this.storage.agents.put(agent);
+
+    return agent;
+  }
+
+  /** Get an agent by ID. */
+  async getAgent(id: string): Promise<AgentRecord | null> {
+    return this.storage.agents.get(id) || null;
+  }
+
+  /** Get an agent by workspace ID. Returns null if the workspace is not bound to an agent. */
+  async getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null> {
+    for (let agent of this.storage.agents.list()) {
+      if (agent.workspaceId === workspaceId) {
+        return agent;
+      }
+    }
+    return null;
+  }
+
+  /** Delete an agent profile record. The workspace deletion is handled by the caller. */
+  async deleteAgentRecord(id: string): Promise<string | null> {
+    let agent = this.storage.agents.get(id);
+    if (!agent) {
+      throw new Error(`Agent not found: ${id}`);
+    }
+
+    let workspaceId = agent.workspaceId;
+    
+    // Delete the agent record
+    this.storage.agents.delete(id);
+    
+    return workspaceId;
   }
 
   async updateTitle(gadgetId: string, title: string) {

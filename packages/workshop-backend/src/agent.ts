@@ -110,6 +110,13 @@ export type AiChatAgentContext = {
   bindings?: Record<string, WorkpieceId>;
 
   /**
+   * If this chat belongs to an agent profile (agent-shell 1:1 chat), the agent's standing
+   * instructions. These are injected into the system prompt alongside instance instructions.
+   * Empty string means no agent-specific instructions.
+   */
+  agentInstructions?: string;
+
+  /**
    * Gatekeeper IDs for ambient capsules which were instantiated into this chat when it started.
    * This array predates the creation of per-chat named bindings; back then, ambient gatekeepers
    * were delivered as numbered "capsules", occupying the lowest numbers in the capsules array, and
@@ -2055,6 +2062,13 @@ export async function runAgent(
   // inside the Anthropic prompt cache window. "" when unset.
   let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
 
+  // Agent-specific instructions from the AgentProfile (agent-shell 1:1 chats). These are
+  // injected alongside instance instructions, treating the agent's description as standing
+  // instructions for the conversation.
+  let agentInstructions = agentContext.agentInstructions
+      ? `\n\n${agentContext.agentInstructions}`
+      : "";
+
   // The two system prompt slots: the non-project-specific parts, followed by the
   // project-specific parts. Kept as a two-part construction (static slot first) so the shared
   // prefix stays byte-stable for prompt caching; they are concatenated into pi's single
@@ -2083,8 +2097,8 @@ export async function runAgent(
 
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
-      instanceInstructions
-          ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}`
+      instanceInstructions || agentInstructions
+          ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}`
           : SPAWNER_SYSTEM_PROMPT,
       alwaysAvailableResourcesPrompt
           ? `${systemPromptBindings}\n\n${alwaysAvailableResourcesPrompt}`
@@ -2191,8 +2205,8 @@ export async function runAgent(
 
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
-      instanceInstructions
-          ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}`
+      instanceInstructions || agentInstructions
+          ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}`
           : SYSTEM_PROMPT,
       (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
