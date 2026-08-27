@@ -159,6 +159,8 @@ export type GatekeeperVendorFilter = {
 export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
   /** Ensure and include auto-provisioned accounts forced by deployment policy. */
   includeForcedAutoProvisionedAccounts?: boolean;
+  /** If set, filter to only accounts assigned to this workspace's agent profile. */
+  workspaceId?: string;
 };
 
 /**
@@ -3668,14 +3670,6 @@ export type GatekeeperCreationSpec = {
   type: "ambient";
   vendorId: string;        // the singleton gatekeeper's id (GATEKEEPER_<ID> suffix, lowercased)
   accountId: number;       // the owner's connected-account id for this singleton (in their user DO)
-} | {
-  /**
-   * Connected account assigned to an agent profile. Auto-provided to the agent's chat as an
-   * unnamed capsule. Agent-specific, not stored in blueprints.
-   */
-  type: "agentAccount";
-  vendorId: string;
-  accountId: number;
 };
 
 /**

@@ -1526,8 +1526,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // re-subscribes (e.g. on reconnect), matching other deployment config.
     let config = await readAdminConfig(this.env);
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
+    
+    let allowedAccountIds: Set<number> | undefined;
+    if (filter?.workspaceId) {
+      let agentProfile = await this.getAgentByWorkspaceId(filter.workspaceId);
+      if (agentProfile?.defaultBindings !== undefined) {
+        allowedAccountIds = new Set(agentProfile.defaultBindings);
+      }
+    }
 
     async function notifyAdd(record: ConnectedAccountRecord) {
+      if (allowedAccountIds && !allowedAccountIds.has(record.id)) {
+        return;
+      }
       // Ambient (auto-provisioned) accounts only appear in the Connectors list when their vendor is
       // "optional" — i.e. the user opted in and can manage/remove it. "enabled" (forced) accounts have
       // nothing to manage, and "disabled" ones are dormant, so both are hidden.
@@ -1796,21 +1807,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     record.credentialsExpired = false;
     record.credentialExpiresAt = expiresAt;
     this.storage.connectedAccounts.put(record);
-  }
-
-  async getGatekeeperClassForAccount(accountId: number)
-      : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string}> {
-    let account = this.storage.connectedAccounts.get(accountId);
-    if (!account) throw new Error("No such account.");
-    
-    let props = {
-      userId: this.ctx.id.toString(),
-      accountId,
-      vendorId: account.vendorId,
-    };
-    
-    let cls = await account.account.getGatekeeperClass(props);
-    return {class: cls, vendorId: account.vendorId};
   }
 
   async getGatekeeperClassFor(accountId: number, url: string)

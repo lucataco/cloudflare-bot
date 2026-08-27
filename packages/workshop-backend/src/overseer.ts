@@ -6258,40 +6258,6 @@ class OverseerImpl implements AgentHooks {
     }));
   }
 
-  async ensureAgentAccountGatekeepers(agentProfile: AgentProfile | null): Promise<void> {
-    if (!this.ownerId || !agentProfile?.defaultBindings?.length) return;
-    let ownerDo = this.#ownerUserDo();
-    
-    let assignedAccountIds = new Set(agentProfile.defaultBindings);
-    let bound = new Set<number>();
-    let existingGatekeepers = Array.from(this.storage.gatekeepers.list());
-    for (let gk of existingGatekeepers) {
-      if (gk.creationSpec?.type !== "agentAccount") continue;
-      if (assignedAccountIds.has(gk.creationSpec.accountId)) {
-        bound.add(gk.creationSpec.accountId);
-      } else {
-        this.removeGatekeeper(gk.id);
-      }
-    }
-    
-    let toAdd = agentProfile.defaultBindings.filter(accountId => !bound.has(accountId));
-    if (toAdd.length === 0) return;
-
-    await Promise.all(toAdd.map(async accountId => {
-      try {
-        let {class: cls, vendorId} = await ownerDo.getGatekeeperClassForAccount(accountId);
-        if (!cls) return;
-        await this.addGatekeeper(
-            cls,
-            {type: "agentAccount", vendorId, accountId});
-      } catch (err) {
-        this.logger.error("failed to provision agent account gatekeeper", {
-          event: "agent.account.provision.failed",
-          accountId, error: err,
-        });
-      }
-    }));
-  }
 
   // Derive the workspace's default binding list -- the seed binding layer for new (non-spawned)
   // chats. Deliberately *not stored*: reconstructed on demand (only at chat seeding time) from
@@ -6458,14 +6424,9 @@ class OverseerImpl implements AgentHooks {
     let dirty = false;
 
     if (context.alwaysAvailableCapsuleIds === undefined) {
-      // Freeze the ambient + agent-account set on first use. Ordered by gatekeeper id for determinism.
-      let assignedAccountIds = new Set(context.agentDefaultBindings ?? []);
-      let ambientAndAgentAccount = [...this.storage.gatekeepers.list()]
-          .filter(gk => gk.creationSpec?.type === "ambient" || 
-                        (gk.creationSpec?.type === "agentAccount" && 
-                         assignedAccountIds.has(gk.creationSpec.accountId)));
-      
-      context.alwaysAvailableCapsuleIds = ambientAndAgentAccount
+      // Freeze the ambient set on first use. Ordered by gatekeeper id for determinism.
+      context.alwaysAvailableCapsuleIds = [...this.storage.gatekeepers.list()]
+          .filter(gk => gk.creationSpec?.type === "ambient")
           .map(gk => gk.id)
           .toSorted((a, b) => a - b);
       dirty = true;
@@ -8361,20 +8322,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       });
     });
     
-    let agentProfile: AgentProfile | null = null;
-    if (isOwner) {
-      let owner = this.impl.users.get(this.impl.users.idFromString(userId));
-      agentProfile = await owner.getAgentByWorkspaceId(this.ctx.id.toString());
-    }
-    let ensureAgentAccounts = this.impl.ensureAgentAccountGatekeepers(agentProfile).catch((err) => {
-      this.impl.logger.error("failed to ensure agent account gatekeepers", {
-        event: "agent.accounts.ensure.failed", error: err,
-      });
-    });
-    
     if (firstOpen) {
       await ensureCapsules;
-      await ensureAgentAccounts;
     }
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
@@ -9440,6 +9389,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
+    let workspaceId = this.impl.ctx.id.toString();
+    let ownerDo = wrapDoStubForTelemetry(
+        this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!)), this.impl.logger);
+    let agentProfile = await retryOnDoReset(() => 
+        ownerDo.getAgentByWorkspaceId(workspaceId), this.impl.logger);
+    
+    if (agentProfile?.defaultBindings !== undefined && 
+        !agentProfile.defaultBindings.includes(accountId)) {
+      throw new Error("This account is not assigned to this agent.");
+    }
+    
     let {class: cls, vendorId, typeUrlPattern} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
     let creationSpec: GatekeeperCreationSpec = {
