@@ -1,18 +1,27 @@
 import { useState, useEffect } from 'react'
 import { useAuthenticatedApi } from '../AuthContext'
-import { AgentProfile } from '@gadgets/workshop-shared/api'
+import { AgentProfile, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { Plus, User } from '@phosphor-icons/react'
+import CreateAgentModal from './CreateAgentModal'
 
 /**
  * Agent roster sidebar component. Shows the list of agent profiles in a messenger-like UI.
  * Each agent is a named persistent teammate with their own chat history.
  */
-export default function AgentRoster() {
+export default function AgentRoster({
+  onAgentCreated,
+  selectedAgentId,
+}: {
+  onAgentCreated?: (agentId: string, workspaceId: string) => void
+  selectedAgentId?: string
+}) {
   const { authenticatedApi } = useAuthenticatedApi()
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [loading, setLoading] = useState(true)
+  const [createModalVisible, setCreateModalVisible] = useState(false)
+  const [models, setModels] = useState<AiChatAuthorInfo[]>([])
 
-  useEffect(() => {
+  const loadAgents = () => {
     authenticatedApi
       .listAgents()
       .then((agentList: AgentProfile[]) => {
@@ -23,7 +32,30 @@ export default function AgentRoster() {
         console.error('Failed to load agents:', err)
         setLoading(false)
       })
+  }
+
+  useEffect(() => {
+    loadAgents()
+    
+    // Load models for the create modal
+    authenticatedApi.listModels()
+      .then((modelList: AiChatAuthorInfo[]) => {
+        setModels(modelList)
+      })
+      .catch((err: unknown) => {
+        console.error('Failed to load models:', err)
+      })
   }, [authenticatedApi])
+
+  const handleCreateClick = () => {
+    setCreateModalVisible(true)
+  }
+
+  const handleAgentCreated = (agentId: string, workspaceId: string) => {
+    setCreateModalVisible(false)
+    loadAgents()
+    onAgentCreated?.(agentId, workspaceId)
+  }
 
   if (loading) {
     return (
@@ -39,10 +71,7 @@ export default function AgentRoster() {
       <div className="flex items-center justify-between border-b border-kumo-border px-4 py-3">
         <h2 className="text-sm font-semibold text-kumo-default">Agents</h2>
         <button
-          onClick={() => {
-            // TODO: Open create agent modal
-            console.log('Create new agent')
-          }}
+          onClick={handleCreateClick}
           className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-well hover:text-kumo-default transition-colors"
           title="Create new agent"
         >
@@ -64,10 +93,7 @@ export default function AgentRoster() {
               </p>
             </div>
             <button
-              onClick={() => {
-                // TODO: Open create agent modal
-                console.log('Create first agent')
-              }}
+              onClick={handleCreateClick}
               className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-kumo-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-kumo-brand-hover transition-colors"
             >
               <Plus size={12} weight="bold" />
@@ -80,7 +106,11 @@ export default function AgentRoster() {
               <a
                 key={agent.id}
                 href={`/workspace/${agent.workspaceId}`}
-                className="group flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-kumo-well transition-colors"
+                className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors ${
+                  selectedAgentId === agent.id
+                    ? 'bg-kumo-brand/10'
+                    : 'hover:bg-kumo-well'
+                }`}
               >
                 {/* Avatar */}
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-kumo-brand text-white">
@@ -107,6 +137,15 @@ export default function AgentRoster() {
           </div>
         )}
       </div>
+
+      {/* Create Agent Modal */}
+      <CreateAgentModal
+        visible={createModalVisible}
+        onCancel={() => setCreateModalVisible(false)}
+        onSuccess={handleAgentCreated}
+        authenticatedApi={authenticatedApi}
+        models={models}
+      />
     </div>
   )
 }

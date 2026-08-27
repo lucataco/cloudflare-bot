@@ -44,9 +44,9 @@ function HomePage() {
   useEffect(() => {
     if (!loading && agentShellEnabled) {
       // Redirect to agents page when feature flag is on
-      window.location.href = '/agents';
+      navigate({ to: '/agents', replace: true });
     }
-  }, [agentShellEnabled, loading]);
+  }, [agentShellEnabled, loading, navigate]);
 
   if (loading || agentShellEnabled) {
     return (
