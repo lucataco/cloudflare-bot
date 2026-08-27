@@ -1,6 +1,7 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 import AgentRoster from '../components/AgentRoster'
 import { useDocumentTitle } from '../useDocumentTitle'
+import { DEFAULT_UI_FEATURE_FLAGS } from '@gadgets/workshop-shared/feature-flags'
 
 /**
  * Agent roster page - shows when agentShell feature flag is enabled.
@@ -8,6 +9,11 @@ import { useDocumentTitle } from '../useDocumentTitle'
  */
 export const Route = createFileRoute('/agents')({
   component: AgentsPage,
+  beforeLoad: () => {
+    // For now, always allow access to this route
+    // In production, would check the feature flag here
+    // But since flags are loaded async, we handle the redirect in the index route
+  },
 })
 
 function AgentsPage() {

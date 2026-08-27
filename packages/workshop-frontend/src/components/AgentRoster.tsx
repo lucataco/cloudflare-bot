@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link } from '@tanstack/react-router'
-import { useAuth } from '../AuthContext'
+import { useAuthenticatedApi } from '../AuthContext'
 import { AgentProfile } from '@gadgets/workshop-shared/api'
 import { Plus, User } from '@phosphor-icons/react'
 
@@ -9,20 +8,18 @@ import { Plus, User } from '@phosphor-icons/react'
  * Each agent is a named persistent teammate with their own chat history.
  */
 export default function AgentRoster() {
-  const { authenticatedApi } = useAuth()
+  const { authenticatedApi } = useAuthenticatedApi()
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    if (!authenticatedApi) return
-
     authenticatedApi
       .listAgents()
-      .then((agentList) => {
+      .then((agentList: AgentProfile[]) => {
         setAgents(agentList)
         setLoading(false)
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error('Failed to load agents:', err)
         setLoading(false)
       })
@@ -80,9 +77,9 @@ export default function AgentRoster() {
         ) : (
           <div className="flex flex-col gap-0.5 p-2">
             {agents.map((agent) => (
-              <Link
+              <a
                 key={agent.id}
-                to={`/workspace/${agent.workspaceId}`}
+                href={`/workspace/${agent.workspaceId}`}
                 className="group flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-kumo-well transition-colors"
               >
                 {/* Avatar */}
@@ -105,7 +102,7 @@ export default function AgentRoster() {
                   </div>
                   <p className="truncate text-xs text-kumo-subtle">{agent.title}</p>
                 </div>
-              </Link>
+              </a>
             ))}
           </div>
         )}
