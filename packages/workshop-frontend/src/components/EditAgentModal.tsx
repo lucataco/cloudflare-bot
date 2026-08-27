@@ -107,7 +107,7 @@ export default function EditAgentModal({
         title: title.trim(),
         description: description.trim(),
         defaultModelId,
-        defaultBindings: selectedAccountIds.length > 0 ? selectedAccountIds : [],
+        defaultBindings: selectedAccountIds,
       })
 
       toasts.add({
@@ -274,7 +274,7 @@ export default function EditAgentModal({
                 <p className="text-xs text-kumo-subtle mb-2">
                   Select which connected accounts this agent can access. Empty means no accounts.
                 </p>
-                <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
+                <div className="flex flex-col gap-2 max-h-48 overflow-y-auto mb-2">
                   {connectedAccounts.map((account) => {
                     const vendorsByAccountId = new Map<number, string>()
                     connectedAccounts.forEach(acc => vendorsByAccountId.set(acc.id, acc.vendor.displayName))
@@ -302,6 +302,9 @@ export default function EditAgentModal({
                     )
                   })}
                 </div>
+                <p className="text-xs text-kumo-subtle">
+                  To add another account of the same service, go to Connectors and connect it. Switch identity in the OAuth popup to connect a different account.
+                </p>
               </div>
             )}
           </div>

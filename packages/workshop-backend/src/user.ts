@@ -1798,6 +1798,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.connectedAccounts.put(record);
   }
 
+  async getGatekeeperClassForAccount(accountId: number)
+      : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string}> {
+    let account = this.storage.connectedAccounts.get(accountId);
+    if (!account) throw new Error("No such account.");
+    
+    let props = {
+      userId: this.ctx.id.toString(),
+      accountId,
+      vendorId: account.vendorId,
+    };
+    
+    let cls = await account.account.getGatekeeperClass(props);
+    return {class: cls, vendorId: account.vendorId};
+  }
+
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
                   typeUrlPattern: string}> {

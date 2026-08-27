@@ -3668,6 +3668,14 @@ export type GatekeeperCreationSpec = {
   type: "ambient";
   vendorId: string;        // the singleton gatekeeper's id (GATEKEEPER_<ID> suffix, lowercased)
   accountId: number;       // the owner's connected-account id for this singleton (in their user DO)
+} | {
+  /**
+   * Connected account assigned to an agent profile. Auto-provided to the agent's chat as an
+   * unnamed capsule. Agent-specific, not stored in blueprints.
+   */
+  type: "agentAccount";
+  vendorId: string;
+  accountId: number;
 };
 
 /**

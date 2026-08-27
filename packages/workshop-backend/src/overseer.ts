@@ -5300,11 +5300,12 @@ class OverseerImpl implements AgentHooks {
       this.storage.chatMeta.put(meta);
 
       // If this chat belongs to an agent profile (agent-shell 1:1 chat), store the agent's
-      // standing instructions in the chat context.
-      if (userMeta.agentProfile?.description) {
+      // standing instructions and assigned accounts in the chat context.
+      if (userMeta.agentProfile) {
         this.storage.chatContext.put({
           chatId,
           agentInstructions: userMeta.agentProfile.description,
+          agentDefaultBindings: userMeta.agentProfile.defaultBindings,
         });
       }
 
@@ -5387,10 +5388,12 @@ class OverseerImpl implements AgentHooks {
     // Backfill agent instructions if this chat belongs to an agent profile and the instructions
     // are not yet set (for existing chats or when the agent's description is edited).
     let chatContext = this.storage.chatContext.get(chatId);
-    if (userMeta.agentProfile?.description && !chatContext?.agentInstructions) {
+    if (userMeta.agentProfile && (!chatContext?.agentInstructions || 
+        chatContext.agentDefaultBindings !== userMeta.agentProfile.defaultBindings)) {
       this.storage.chatContext.put({
         ...(chatContext || { chatId }),
         agentInstructions: userMeta.agentProfile.description,
+        agentDefaultBindings: userMeta.agentProfile.defaultBindings,
       });
     }
 
@@ -6255,6 +6258,41 @@ class OverseerImpl implements AgentHooks {
     }));
   }
 
+  async ensureAgentAccountGatekeepers(agentProfile: AgentProfile | null): Promise<void> {
+    if (!this.ownerId || !agentProfile?.defaultBindings?.length) return;
+    let ownerDo = this.#ownerUserDo();
+    
+    let assignedAccountIds = new Set(agentProfile.defaultBindings);
+    let bound = new Set<number>();
+    let existingGatekeepers = Array.from(this.storage.gatekeepers.list());
+    for (let gk of existingGatekeepers) {
+      if (gk.creationSpec?.type !== "agentAccount") continue;
+      if (assignedAccountIds.has(gk.creationSpec.accountId)) {
+        bound.add(gk.creationSpec.accountId);
+      } else {
+        this.removeGatekeeper(gk.id);
+      }
+    }
+    
+    let toAdd = agentProfile.defaultBindings.filter(accountId => !bound.has(accountId));
+    if (toAdd.length === 0) return;
+
+    await Promise.all(toAdd.map(async accountId => {
+      try {
+        let {class: cls, vendorId} = await ownerDo.getGatekeeperClassForAccount(accountId);
+        if (!cls) return;
+        await this.addGatekeeper(
+            cls,
+            {type: "agentAccount", vendorId, accountId});
+      } catch (err) {
+        this.logger.error("failed to provision agent account gatekeeper", {
+          event: "agent.account.provision.failed",
+          accountId, error: err,
+        });
+      }
+    }));
+  }
+
   // Derive the workspace's default binding list -- the seed binding layer for new (non-spawned)
   // chats. Deliberately *not stored*: reconstructed on demand (only at chat seeding time) from
   // non-pending gadget records in ID order -- first every gadget under its bindingName (unique,
@@ -6420,30 +6458,14 @@ class OverseerImpl implements AgentHooks {
     let dirty = false;
 
     if (context.alwaysAvailableCapsuleIds === undefined) {
-      // Freeze the ambient set + order on first use. Ordered by gatekeeper id (immutable) for
-      // determinism. New singletons the owner gains only appear in chats started afterwards; a
-      // since-disconnected one stays in the frozen list but becomes inert.
-      let allAmbient = [...this.storage.gatekeepers.list()]
-          .filter(gk => gk.creationSpec?.type === "ambient");
+      // Freeze the ambient + agent-account set on first use. Ordered by gatekeeper id for determinism.
+      let assignedAccountIds = new Set(context.agentDefaultBindings ?? []);
+      let ambientAndAgentAccount = [...this.storage.gatekeepers.list()]
+          .filter(gk => gk.creationSpec?.type === "ambient" || 
+                        (gk.creationSpec?.type === "agentAccount" && 
+                         assignedAccountIds.has(gk.creationSpec.accountId)));
       
-      // If this chat belongs to an agent profile with assigned accounts, filter to only those.
-      let meta = this.storage.chatMeta.get(chatId);
-      let agentProfile: AgentProfile | null = null;
-      if (meta && this.ownerId) {
-        let ownerDo = wrapDoStubForTelemetry(
-            this.users.get(this.users.idFromString(this.ownerId)), this.logger);
-        agentProfile = await retryOnDoReset(() => 
-            ownerDo.getAgentByWorkspaceId(this.ctx.id.toString()));
-      }
-      
-      if (agentProfile?.defaultBindings !== undefined) {
-        let assignedAccountIds = new Set(agentProfile.defaultBindings);
-        allAmbient = allAmbient.filter(gk => 
-          gk.creationSpec?.type === "ambient" && 
-          assignedAccountIds.has(gk.creationSpec.accountId));
-      }
-      
-      context.alwaysAvailableCapsuleIds = allAmbient
+      context.alwaysAvailableCapsuleIds = ambientAndAgentAccount
           .map(gk => gk.id)
           .toSorted((a, b) => a - b);
       dirty = true;
@@ -8338,8 +8360,21 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         event: "singleton.capsules.ensure.failed", error: err,
       });
     });
+    
+    let agentProfile: AgentProfile | null = null;
+    if (isOwner) {
+      let owner = this.impl.users.get(this.impl.users.idFromString(userId));
+      agentProfile = await owner.getAgentByWorkspaceId(this.ctx.id.toString());
+    }
+    let ensureAgentAccounts = this.impl.ensureAgentAccountGatekeepers(agentProfile).catch((err) => {
+      this.impl.logger.error("failed to ensure agent account gatekeepers", {
+        event: "agent.accounts.ensure.failed", error: err,
+      });
+    });
+    
     if (firstOpen) {
       await ensureCapsules;
+      await ensureAgentAccounts;
     }
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
