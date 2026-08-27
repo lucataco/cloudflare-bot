@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
+import { Link } from '@tanstack/react-router'
 import { useAuthenticatedApi } from '../AuthContext'
 import { AgentProfile, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
-import { Plus, User } from '@phosphor-icons/react'
+import { Plus, User, Gear } from '@phosphor-icons/react'
 import CreateAgentModal from './CreateAgentModal'
+import EditAgentModal from './EditAgentModal'
 
 /**
  * Agent roster sidebar component. Shows the list of agent profiles in a messenger-like UI.
@@ -19,6 +21,8 @@ export default function AgentRoster({
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [loading, setLoading] = useState(true)
   const [createModalVisible, setCreateModalVisible] = useState(false)
+  const [editModalVisible, setEditModalVisible] = useState(false)
+  const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null)
   const [models, setModels] = useState<AiChatAuthorInfo[]>([])
 
   const loadAgents = () => {
@@ -55,6 +59,19 @@ export default function AgentRoster({
     setCreateModalVisible(false)
     loadAgents()
     onAgentCreated?.(agentId, workspaceId)
+  }
+
+  const handleEditClick = (agent: AgentProfile, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setEditingAgent(agent)
+    setEditModalVisible(true)
+  }
+
+  const handleAgentUpdated = () => {
+    setEditModalVisible(false)
+    setEditingAgent(null)
+    loadAgents()
   }
 
   if (loading) {
@@ -103,10 +120,11 @@ export default function AgentRoster({
         ) : (
           <div className="flex flex-col gap-0.5 p-2">
             {agents.map((agent) => (
-              <a
+              <Link
                 key={agent.id}
-                href={`/workspace/${agent.workspaceId}`}
-                className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors ${
+                to="/workspace/$id"
+                params={{ id: agent.workspaceId }}
+                className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors relative ${
                   selectedAgentId === agent.id
                     ? 'bg-kumo-brand/10'
                     : 'hover:bg-kumo-well'
@@ -132,7 +150,16 @@ export default function AgentRoster({
                   </div>
                   <p className="truncate text-xs text-kumo-subtle">{agent.title}</p>
                 </div>
-              </a>
+
+                {/* Edit button */}
+                <button
+                  onClick={(e) => handleEditClick(agent, e)}
+                  className="ml-auto rounded-lg p-1.5 text-kumo-subtle opacity-0 group-hover:opacity-100 hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
+                  title="Edit agent"
+                >
+                  <Gear size={16} weight="bold" />
+                </button>
+              </Link>
             ))}
           </div>
         )}
@@ -146,6 +173,21 @@ export default function AgentRoster({
         authenticatedApi={authenticatedApi}
         models={models}
       />
+
+      {/* Edit Agent Modal */}
+      {editingAgent && (
+        <EditAgentModal
+          visible={editModalVisible}
+          onCancel={() => {
+            setEditModalVisible(false)
+            setEditingAgent(null)
+          }}
+          onSuccess={handleAgentUpdated}
+          authenticatedApi={authenticatedApi}
+          agent={editingAgent}
+          models={models}
+        />
+      )}
     </div>
   )
 }
