@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile } from '@gadgets/workshop-shared/api';
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -98,6 +98,18 @@ type LibraryBlueprintRecord = {
   uploaded: boolean;
 };
 
+type AgentRecord = {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  avatar?: { url: string };
+  defaultModelId: string | null;
+  workspaceId: string;
+  created: Date;
+  updated: Date;
+};
+
 type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
@@ -159,6 +171,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
     collections: {
       aiModels: collection<UserAiModelRecord>()({
         primaryKey: record => record.profile.id,
+      }),
+      agents: collection<AgentRecord>()({
+        primaryKey: "id"
       }),
       gadgets: collection<GadgetRecord>()({
         primaryKey: "id"
@@ -744,6 +759,98 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return result;
+  }
+
+  // --- Agent Shell methods ---
+
+  /** List all agent profiles, sorted by creation time (newest first). */
+  async listAgents(): Promise<AgentProfile[]> {
+    let agents = Array.from(this.storage.agents.list());
+    // Sort by created date, newest first
+    agents.sort((a, b) => b.created.getTime() - a.created.getTime());
+    return agents;
+  }
+
+  /** Create a new agent profile and register its workspace. Called from server.ts after creating the workspace. */
+  async createAgentRecord(
+    agentId: string,
+    workspaceId: string,
+    name: string,
+    title: string,
+    description: string,
+    defaultModelId: string | null,
+    avatar?: AvatarImage
+  ): Promise<AgentProfile> {
+    let now = new Date();
+    let agent: AgentRecord = {
+      id: agentId,
+      name,
+      title,
+      description,
+      avatar,
+      defaultModelId,
+      workspaceId,
+      created: now,
+      updated: now,
+    };
+    
+    this.storage.agents.put(agent);
+    return agent;
+  }
+
+  /** Update an existing agent profile. */
+  async updateAgentRecord(
+    id: string,
+    updates: {
+      name?: string;
+      title?: string;
+      description?: string;
+      defaultModelId?: string | null;
+      avatar?: AvatarImage | null;
+    }
+  ): Promise<AgentProfile> {
+    let agent = this.storage.agents.get(id);
+    if (!agent) {
+      throw new Error(`Agent not found: ${id}`);
+    }
+
+    // Apply updates
+    if (updates.name !== undefined) agent.name = updates.name;
+    if (updates.title !== undefined) agent.title = updates.title;
+    if (updates.description !== undefined) agent.description = updates.description;
+    if (updates.defaultModelId !== undefined) agent.defaultModelId = updates.defaultModelId;
+    if (updates.avatar !== undefined) {
+      if (updates.avatar === null) {
+        delete agent.avatar;
+      } else {
+        agent.avatar = updates.avatar;
+      }
+    }
+
+    agent.updated = new Date();
+    this.storage.agents.put(agent);
+
+    return agent;
+  }
+
+  /** Get an agent by ID. */
+  async getAgent(id: string): Promise<AgentRecord | null> {
+    return this.storage.agents.get(id) || null;
+  }
+
+  /** Delete an agent profile record. The workspace deletion is handled by the caller. */
+  async deleteAgentRecord(id: string): Promise<string | null> {
+    let agent = this.storage.agents.get(id);
+    if (!agent) {
+      throw new Error(`Agent not found: ${id}`);
+    }
+
+    let workspaceId = agent.workspaceId;
+    
+    // Delete the agent record
+    this.storage.agents.delete(id);
+    
+    return workspaceId;
   }
 
   async updateTitle(gadgetId: string, title: string) {

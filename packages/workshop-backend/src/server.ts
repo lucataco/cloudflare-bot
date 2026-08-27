@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -13,7 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -302,6 +302,77 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   listOutputs(): Promise<ListOutputsResult> {
     return this.#user.listOutputs();
+  }
+
+  // --- Agent Shell methods ---
+
+  async listAgents(): Promise<AgentProfile[]> {
+    return retryOnDoReset(() => this.#user.listAgents());
+  }
+
+  async createAgent(
+    name: string,
+    title: string,
+    description: string,
+    defaultModelId: string | null,
+    avatar?: AvatarImage
+  ): Promise<AgentProfile> {
+    // Generate unique IDs
+    let agentId = crypto.randomUUID();
+    let workspaceId = this.overseers.newUniqueId().toString();
+
+    // Create the workspace for this agent
+    await this.#user.newGadget(workspaceId, name);
+
+    // Create the agent record
+    let agent = await this.#user.createAgentRecord(
+      agentId,
+      workspaceId,
+      name,
+      title,
+      description,
+      defaultModelId,
+      avatar
+    );
+
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "agent_created",
+      user_id: this.#userId.toString(),
+      agent_id: agentId,
+      workspace_id: workspaceId,
+    });
+
+    return agent;
+  }
+
+  async updateAgent(
+    id: string,
+    updates: {
+      name?: string;
+      title?: string;
+      description?: string;
+      defaultModelId?: string | null;
+      avatar?: AvatarImage | null;
+    }
+  ): Promise<AgentProfile> {
+    let agent = await this.#user.updateAgentRecord(id, updates);
+
+    // If name changed, update the workspace title too
+    if (updates.name !== undefined) {
+      await this.#user.updateTitle(agent.workspaceId, updates.name);
+    }
+
+    return agent;
+  }
+
+  async deleteAgent(id: string): Promise<void> {
+    // Get the workspace ID before deleting the agent record
+    let workspaceId = await this.#user.deleteAgentRecord(id);
+
+    // Delete the associated workspace if it exists
+    if (workspaceId) {
+      await this.#user.deleteGadget(workspaceId);
+    }
   }
 
   async listOutputFormats(): Promise<OutputFormatOffer[]> {
