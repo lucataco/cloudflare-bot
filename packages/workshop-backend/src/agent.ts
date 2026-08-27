@@ -117,12 +117,6 @@ export type AiChatAgentContext = {
   agentInstructions?: string;
 
   /**
-   * Connected account IDs assigned to this agent profile. Only these accounts are introduced
-   * into the agent's chats. Empty array means no accounts introduced.
-   */
-  agentDefaultBindings?: number[];
-
-  /**
    * Gatekeeper IDs for ambient capsules which were instantiated into this chat when it started.
    * This array predates the creation of per-chat named bindings; back then, ambient gatekeepers
    * were delivered as numbered "capsules", occupying the lowest numbers in the capsules array, and
