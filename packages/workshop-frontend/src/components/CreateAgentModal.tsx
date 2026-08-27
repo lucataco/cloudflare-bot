@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
-import { Dialog, Button, Input, Textarea, Select, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
+import { Dialog, Button, Input, Textarea, Select, Collapsible, useKumoToastManager, Checkbox } from '@cloudflare/kumo'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { AccountsSubscriberAdapter, AccountEvent } from '../accountsSubscriber'
+import { logRpcFailure } from '../rpcErrors'
 
 interface CreateAgentModalProps {
   visible: boolean
@@ -28,6 +30,8 @@ export default function CreateAgentModal({
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [connectedAccounts, setConnectedAccounts] = useState<AccountEvent[]>([])
+  const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
 
   // Reset all state when dialog closes
   useEffect(() => {
@@ -38,8 +42,43 @@ export default function CreateAgentModal({
       setDefaultModelId(null)
       setErrors({})
       setAdvancedOpen(false)
+      setSelectedAccountIds([])
     }
   }, [visible])
+
+  // Subscribe to connected accounts
+  useEffect(() => {
+    let cancelled = false
+    const accounts = new Map<number, AccountEvent>()
+
+    const subscriber = new AccountsSubscriberAdapter({
+      add(event: AccountEvent) {
+        if (!cancelled) {
+          accounts.set(event.id, event)
+          setConnectedAccounts(Array.from(accounts.values()))
+        }
+      },
+      remove(id: number) {
+        if (!cancelled) {
+          accounts.delete(id)
+          setConnectedAccounts(Array.from(accounts.values()))
+          setSelectedAccountIds(prev => prev.filter(accountId => accountId !== id))
+        }
+      },
+      ready() {},
+    })
+
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    subscription.catch((err) => {
+      if (cancelled) return
+      logRpcFailure('Failed to subscribe to connected accounts:', err)
+    })
+
+    return () => {
+      cancelled = true
+      subscription[Symbol.dispose]()
+    }
+  }, [authenticatedApi])
 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {}
@@ -66,6 +105,8 @@ export default function CreateAgentModal({
         title.trim(),
         description.trim() || '',
         defaultModelId,
+        undefined,
+        selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
       )
 
       toasts.add({
@@ -197,6 +238,46 @@ export default function CreateAgentModal({
                 The AI model this agent uses by default. You can override it per message.
               </p>
             </div>
+
+            {/* Connected Accounts */}
+            {connectedAccounts.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-kumo-default mb-1.5">
+                  Connected Accounts
+                </label>
+                <p className="text-xs text-kumo-subtle mb-2">
+                  Select which connected accounts this agent can access. Empty means no accounts.
+                </p>
+                <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
+                  {connectedAccounts.map((account) => {
+                    const vendorsByAccountId = new Map<number, string>()
+                    connectedAccounts.forEach(acc => vendorsByAccountId.set(acc.id, acc.vendor.displayName))
+                    
+                    const samVendorAccounts = connectedAccounts.filter(acc => acc.vendor.displayName === account.vendor.displayName)
+                    const accountLabel = samVendorAccounts.length > 1
+                      ? `${account.vendor.displayName} (${account.description.displayName || account.description.uniqueName || `Account ${account.id}`})`
+                      : account.vendor.displayName
+                    
+                    return (
+                      <label key={account.id} className="flex items-center gap-2 p-2 rounded hover:bg-kumo-border/20 cursor-pointer">
+                        <Checkbox
+                          checked={selectedAccountIds.includes(account.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setSelectedAccountIds(prev => [...prev, account.id])
+                            } else {
+                              setSelectedAccountIds(prev => prev.filter(id => id !== account.id))
+                            }
+                          }}
+                          disabled={loading}
+                        />
+                        <span className="text-sm text-kumo-default">{accountLabel}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

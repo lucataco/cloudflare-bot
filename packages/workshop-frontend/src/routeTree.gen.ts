@@ -222,6 +222,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
+  AgentsRoute: typeof AgentsRoute
   BlueprintsRoute: typeof BlueprintsRoute
   ContextRoute: typeof ContextRoute
   ExploreRoute: typeof ExploreRoute
@@ -357,6 +358,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
+  AgentsRoute: AgentsRoute,
   BlueprintsRoute: BlueprintsRoute,
   ContextRoute: ContextRoute,
   ExploreRoute: ExploreRoute,

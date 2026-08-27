@@ -108,6 +108,7 @@ type AgentRecord = {
   avatar?: { url: string };
   defaultModelId: string | null;
   workspaceId: string;
+  defaultBindings?: number[];
   created: Date;
   updated: Date;
 };
@@ -792,7 +793,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     title: string,
     description: string,
     defaultModelId: string | null,
-    avatar?: AvatarImage
+    avatar?: AvatarImage,
+    defaultBindings?: number[]
   ): Promise<AgentProfile> {
     let now = new Date();
     let agent: AgentRecord = {
@@ -803,6 +805,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       avatar,
       defaultModelId,
       workspaceId,
+      defaultBindings,
       created: now,
       updated: now,
     };
@@ -820,6 +823,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       description?: string;
       defaultModelId?: string | null;
       avatar?: AvatarImage | null;
+      defaultBindings?: number[];
     }
   ): Promise<AgentProfile> {
     let agent = this.storage.agents.get(id);
@@ -839,6 +843,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         agent.avatar = updates.avatar;
       }
     }
+    if (updates.defaultBindings !== undefined) agent.defaultBindings = updates.defaultBindings;
 
     agent.updated = new Date();
     this.storage.agents.put(agent);

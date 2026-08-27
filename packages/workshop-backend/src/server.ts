@@ -315,7 +315,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     title: string,
     description: string,
     defaultModelId: string | null,
-    avatar?: AvatarImage
+    avatar?: AvatarImage,
+    defaultBindings?: number[]
   ): Promise<AgentProfile> {
     // Generate unique IDs
     let agentId = crypto.randomUUID();
@@ -332,7 +333,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       title,
       description,
       defaultModelId,
-      avatar
+      avatar,
+      defaultBindings
     );
 
     recordAnalytics(this.ctx, this.env, {
@@ -353,6 +355,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       description?: string;
       defaultModelId?: string | null;
       avatar?: AvatarImage | null;
+      defaultBindings?: number[];
     }
   ): Promise<AgentProfile> {
     let agent = await this.#user.updateAgentRecord(id, updates);
