@@ -127,14 +127,13 @@ export default function EditAgentModal({
   ]
 
   return (
-    <Dialog
-      open={visible}
-      onOpenChange={(open) => {
-        if (!open && !loading) onCancel()
-      }}
-      title="Edit Agent"
-      description={`Update ${agent.name}'s settings`}
-    >
+    <Dialog open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
+      <Dialog.Content title="Edit Agent">
+        <Dialog.Header
+          title="Edit Agent"
+          description={`Update ${agent.name}'s settings`}
+        />
+        <Dialog.Body>
       <form
         onSubmit={(e) => {
           e.preventDefault()
@@ -184,28 +183,26 @@ export default function EditAgentModal({
           <label htmlFor="edit-agent-description" className="block text-sm font-medium text-kumo-default mb-1.5">
             Description
           </label>
-          <TextArea
+          <Textarea
             id="edit-agent-description"
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)}
             disabled={loading}
             rows={3}
           />
         </div>
 
         {/* Advanced Settings */}
-        <Collapsible
-          open={advancedOpen}
-          onOpenChange={setAdvancedOpen}
-          trigger={
-            <button
-              type="button"
-              className="text-sm font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
-            >
-              {advancedOpen ? '▼' : '▶'} Advanced
-            </button>
-          }
-        >
+        <div>
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen(!advancedOpen)}
+            className="text-sm font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
+          >
+            {advancedOpen ? '▼' : '▶'} Advanced
+          </button>
+        </div>
+        {advancedOpen && (
           <div className="mt-4 flex flex-col gap-4 rounded-lg border border-kumo-border bg-kumo-well p-4">
             {/* Default Model */}
             <div>
@@ -234,7 +231,7 @@ export default function EditAgentModal({
               </p>
             </div>
           </div>
-        </Collapsible>
+        )}
 
         {/* Actions */}
         <div className="flex justify-between gap-2 pt-2">

@@ -12,14 +12,6 @@ interface CreateAgentModalProps {
   models: AiChatAuthorInfo[]
 }
 
-const PROVIDER_LABELS: Record<AiModelProvider, string> = {
-  anthropic: 'Anthropic',
-  openai: 'OpenAI',
-  google: 'Google',
-  cloudflare: 'Cloudflare Workers AI',
-  ollama: 'Ollama',
-}
-
 export default function CreateAgentModal({
   visible,
   onCancel,
@@ -105,14 +97,13 @@ export default function CreateAgentModal({
   ]
 
   return (
-    <Dialog
-      open={visible}
-      onOpenChange={(open) => {
-        if (!open && !loading) onCancel()
-      }}
-      title="Create Agent"
-      description="Create a new AI teammate with its own personality and chat history"
-    >
+    <Dialog open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
+      <Dialog.Content title="Create Agent">
+        <Dialog.Header
+          title="Create Agent"
+          description="Create a new AI teammate with its own personality and chat history"
+        />
+        <Dialog.Body>
       <form
         onSubmit={(e) => {
           e.preventDefault()
@@ -164,10 +155,10 @@ export default function CreateAgentModal({
           <label htmlFor="agent-description" className="block text-sm font-medium text-kumo-default mb-1.5">
             Description
           </label>
-          <TextArea
+          <Textarea
             id="agent-description"
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)}
             placeholder="What does this agent do? What's its personality?"
             disabled={loading}
             rows={3}
@@ -175,18 +166,16 @@ export default function CreateAgentModal({
         </div>
 
         {/* Advanced Settings */}
-        <Collapsible
-          open={advancedOpen}
-          onOpenChange={setAdvancedOpen}
-          trigger={
-            <button
-              type="button"
-              className="text-sm font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
-            >
-              {advancedOpen ? '▼' : '▶'} Advanced
-            </button>
-          }
-        >
+        <div>
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen(!advancedOpen)}
+            className="text-sm font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
+          >
+            {advancedOpen ? '▼' : '▶'} Advanced
+          </button>
+        </div>
+        {advancedOpen && (
           <div className="mt-4 flex flex-col gap-4 rounded-lg border border-kumo-border bg-kumo-well p-4">
             {/* Default Model */}
             <div>
@@ -215,7 +204,7 @@ export default function CreateAgentModal({
               </p>
             </div>
           </div>
-        </Collapsible>
+        )}
 
         {/* Actions */}
         <div className="flex justify-end gap-2 pt-2">
