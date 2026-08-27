@@ -134,13 +134,7 @@ export default function EditAgentModal({
           description={`Update ${agent.name}'s settings`}
         />
         <Dialog.Body>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          handleSave()
-        }}
-        className="flex flex-col gap-4"
-      >
+      <div className="flex flex-col gap-4">
         {/* Name */}
         <div>
           <label htmlFor="edit-agent-name" className="block text-sm font-medium text-kumo-default mb-1.5">
@@ -232,6 +226,7 @@ export default function EditAgentModal({
             </div>
           </div>
         )}
+      </div>
         </Dialog.Body>
 
         {/* Actions */}

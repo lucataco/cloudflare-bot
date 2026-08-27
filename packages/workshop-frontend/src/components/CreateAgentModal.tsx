@@ -104,13 +104,7 @@ export default function CreateAgentModal({
           description="Create a new AI teammate with its own personality and chat history"
         />
         <Dialog.Body>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          handleCreate()
-        }}
-        className="flex flex-col gap-4"
-      >
+      <div className="flex flex-col gap-4">
         {/* Name */}
         <div>
           <label htmlFor="agent-name" className="block text-sm font-medium text-kumo-default mb-1.5">
@@ -205,6 +199,7 @@ export default function CreateAgentModal({
             </div>
           </div>
         )}
+      </div>
         </Dialog.Body>
 
         {/* Actions */}

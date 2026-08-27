@@ -718,8 +718,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
 
     // If this chat belongs to an agent profile (1:1 agent chat), include it in the context.
-    // This must be fetched before model resolution so we can use the agent's defaultModelId
-    // as a fallback when no explicit model is chosen.
+    // The agent's defaultModelId is used in the frontend picker seed, not as a backend fallback.
     if (workspaceId) {
       let agentProfile = await this.getAgentByWorkspaceId(workspaceId);
       if (agentProfile) {
@@ -727,26 +726,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
 
-    // If no model was explicitly chosen, try the agent's defaultModelId (for agent-shell chats),
-    // falling back to the user's preferred model otherwise. This makes the agent's profile
-    // default the initial selection for 1:1 chats with that agent.
-    let effectiveModelId = modelId;
-    if (!effectiveModelId && result.agentProfile?.defaultModelId) {
-      effectiveModelId = result.agentProfile.defaultModelId;
-    }
-    if (!effectiveModelId) {
-      effectiveModelId = this.storage.preferredModel.get();
-    }
-
-    if (effectiveModelId) {
+    if (modelId) {
       // In AI Gateway mode, resolve gateway models first.
       if (gwConfig) {
-        result.aiModel = gwConfig.resolveModel(effectiveModelId);
+        result.aiModel = gwConfig.resolveModel(modelId);
       }
       if (!result.aiModel) {
-        result.aiModel = this.storage.aiModels.get(effectiveModelId);
+        result.aiModel = this.storage.aiModels.get(modelId);
       }
-      if (!result.aiModel) throw new Error(`No such model: ${effectiveModelId}`);
+      if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).

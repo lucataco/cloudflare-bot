@@ -1,9 +1,31 @@
-import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, AgentProfile } from "@gadgets/workshop-shared/api";
 
 const LAST_SELECTED_MODEL_KEY = "lastSelectedModel";
 
 /** Sentinel used for UI values and localStorage so an explicit null choice can persist. */
 export const NO_AGENT_OPTION_VALUE = "__gadgets_no_agent__";
+
+/**
+ * Get the initial model selection for a chat, considering agent defaults.
+ * 
+ * Priority:
+ * 1. Agent's defaultModelId (if this workspace is bound to an agent)
+ * 2. Last selected model from localStorage (if valid)
+ * 3. First available model
+ * 4. null (human-only)
+ */
+export function getInitialSelectedModel(
+  models: AiChatAuthorInfo[],
+  agentProfile?: AgentProfile | null,
+): string | null {
+  // If this workspace is bound to an agent with a default model, use it
+  if (agentProfile?.defaultModelId) {
+    return agentProfile.defaultModelId;
+  }
+
+  // Fall back to stored selection
+  return getStoredSelectedModel(models);
+}
 
 export function getStoredSelectedModel(
   models: AiChatAuthorInfo[],

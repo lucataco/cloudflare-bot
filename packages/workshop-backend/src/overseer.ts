@@ -5383,6 +5383,17 @@ class OverseerImpl implements AgentHooks {
     if (runsAgentTurn && userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
+
+    // Backfill agent instructions if this chat belongs to an agent profile and the instructions
+    // are not yet set (for existing chats or when the agent's description is edited).
+    let chatContext = this.storage.chatContext.get(chatId);
+    if (userMeta.agentProfile?.description && !chatContext?.agentInstructions) {
+      this.storage.chatContext.put({
+        ...(chatContext || { chatId }),
+        agentInstructions: userMeta.agentProfile.description,
+      });
+    }
+
     this.ctx.storage.transactionSync(() => {
       this.storage.chatMeta.put(meta);
       let promptSequence = this.#commitPreparedChatMessage(

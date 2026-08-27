@@ -61,6 +61,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
 import {
+  getInitialSelectedModel,
   getStoredSelectedModel,
   persistSelectedModel,
 } from "./modelSelection";
@@ -73,6 +74,7 @@ import {
   AiChatSubscriber,
   ActionLogEntry,
   AiChatAuthorInfo,
+  AgentProfile,
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
@@ -4628,7 +4630,7 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
-  const { currentUser } = useAuthenticatedApi();
+  const { currentUser, authenticatedApi } = useAuthenticatedApi();
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -4728,6 +4730,7 @@ function ChatInterface({
     [],
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -5266,7 +5269,7 @@ function ChatInterface({
   // Update selected model when switching chats
   useEffect(() => {
     if (selectedChatId === null) {
-      setSelectedModel(getStoredSelectedModel(availableModels));
+      setSelectedModel(getInitialSelectedModel(availableModels, currentAgentProfile));
     } else {
       // For existing threads:
       // 1. If an AI agent is currently active, use that agent's model
@@ -5731,7 +5734,19 @@ function ChatInterface({
 
           setAvailableModels(models);
 
-          setSelectedModel(getStoredSelectedModel(models));
+          // Fetch agent profile if this workspace is bound to an agent
+          let agentProfile: AgentProfile | null = null;
+          if (workspaceId) {
+            try {
+              agentProfile = await authenticatedApi.getAgentByWorkspaceId(workspaceId);
+              setCurrentAgentProfile(agentProfile);
+            } catch (err) {
+              // Not a critical error; workspace may not be bound to an agent
+              console.debug("No agent profile for workspace", workspaceId);
+            }
+          }
+
+          setSelectedModel(getInitialSelectedModel(models, agentProfile));
 
           forceUpdate();
         }
