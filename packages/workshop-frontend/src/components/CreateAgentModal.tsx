@@ -32,6 +32,7 @@ export default function CreateAgentModal({
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [connectedAccounts, setConnectedAccounts] = useState<AccountEvent[]>([])
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
+  const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
 
   // Reset all state when dialog closes
   useEffect(() => {
@@ -276,9 +277,40 @@ export default function CreateAgentModal({
                     )
                   })}
                 </div>
-                <p className="text-xs text-kumo-subtle">
-                  To add another account of the same service, go to Connectors and connect it. Switch identity in the OAuth popup to connect a different account.
-                </p>
+                {connectedAccounts.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {Array.from(new Set(connectedAccounts.map(acc => acc.vendor.displayName)))
+                      .map(vendorName => {
+                        const vendorId = connectedAccounts.find(acc => acc.vendor.displayName === vendorName)?.vendorId
+                        return vendorId ? (
+                          <Button
+                            key={vendorId}
+                            size="sm"
+                            variant="secondary"
+                            onClick={async () => {
+                              try {
+                                setConnectingVendor(vendorId)
+                                const result = await authenticatedApi.connectAccount(vendorId)
+                                window.open(result.url, '_blank', 'noopener,noreferrer')
+                                toasts.add({
+                                  title: `Switch identity in the popup to connect a different ${vendorName} account`,
+                                  variant: 'success',
+                                })
+                              } catch (error) {
+                                logRpcFailure('Failed to start account connection:', error)
+                                toasts.add({ title: 'Failed to start connection', variant: 'error' })
+                              } finally {
+                                setConnectingVendor(null)
+                              }
+                            }}
+                            disabled={loading || connectingVendor === vendorId}
+                          >
+                            Add another {vendorName} account
+                          </Button>
+                        ) : null
+                      })}
+                  </div>
+                )}
               </div>
             )}
           </div>

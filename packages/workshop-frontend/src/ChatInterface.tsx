@@ -3392,6 +3392,7 @@ export const ChatInput = ({
                 activeIndex={overlayIndex}
                 onItems={handleOverlayItems}
                 activateRef={overlayActivateRef}
+                workspaceId={workspaceId}
               />
             )}
             <ComposerMirror
@@ -3734,6 +3735,7 @@ export const ChatInput = ({
         onClose={() => setAttachModalOpen(false)}
         getOverseer={getOverseer}
         onCreated={handleAttachCreated}
+        workspaceId={workspaceId}
       />
     </div>
   );
@@ -8430,6 +8432,7 @@ function ChatInterface({
         onClose={() => setConnectionAccept(null)}
         getOverseer={getOverseer}
         onCreated={handleConnectionCreated}
+        workspaceId={workspaceId}
         initialVendorId={connectionAccept?.vendorId}
         initialResourceUrl={connectionAccept?.resourceUrl}
         initialResourceUrlPattern={connectionAccept?.resourceUrlPattern}
