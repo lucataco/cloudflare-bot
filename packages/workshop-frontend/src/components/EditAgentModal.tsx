@@ -232,9 +232,10 @@ export default function EditAgentModal({
             </div>
           </div>
         )}
+        </Dialog.Body>
 
         {/* Actions */}
-        <div className="flex justify-between gap-2 pt-2">
+        <Dialog.Footer>
           <Button
             variant="secondary"
             onClick={handleDelete}
@@ -243,16 +244,16 @@ export default function EditAgentModal({
           >
             Delete Agent
           </Button>
-          <div className="flex gap-2">
+          <div className="flex gap-2 ml-auto">
             <Button variant="secondary" onClick={onCancel} disabled={loading}>
               Cancel
             </Button>
-            <Button type="submit" loading={loading}>
+            <Button type="submit" loading={loading} onClick={handleSave}>
               Save Changes
             </Button>
           </div>
-        </div>
-      </form>
+        </Dialog.Footer>
+      </Dialog.Content>
     </Dialog>
   )
 }

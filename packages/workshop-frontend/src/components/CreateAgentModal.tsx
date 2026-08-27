@@ -205,17 +205,18 @@ export default function CreateAgentModal({
             </div>
           </div>
         )}
+        </Dialog.Body>
 
         {/* Actions */}
-        <div className="flex justify-end gap-2 pt-2">
+        <Dialog.Footer>
           <Button variant="secondary" onClick={onCancel} disabled={loading}>
             Cancel
           </Button>
-          <Button type="submit" loading={loading}>
+          <Button type="submit" loading={loading} onClick={handleCreate}>
             Create Agent
           </Button>
-        </div>
-      </form>
+        </Dialog.Footer>
+      </Dialog.Content>
     </Dialog>
   )
 }

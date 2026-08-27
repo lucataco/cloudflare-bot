@@ -5299,6 +5299,15 @@ class OverseerImpl implements AgentHooks {
       }
       this.storage.chatMeta.put(meta);
 
+      // If this chat belongs to an agent profile (agent-shell 1:1 chat), store the agent's
+      // standing instructions in the chat context.
+      if (userMeta.agentProfile?.description) {
+        this.storage.chatContext.put({
+          chatId,
+          agentInstructions: userMeta.agentProfile.description,
+        });
+      }
+
       let promptSequence = this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats);
       if (responseTargetRegistration) {
@@ -10097,8 +10106,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                 formats?: MessageFormatRef[]): Promise<number> {
+    let workspaceId = this.impl.ctx.id.toString();
     let userMeta = await retryOnDoReset(
-        () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
+        () => this.#clientUser.getChatContext(chosenModelId, workspaceId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
                              undefined, undefined, formats);
   }
@@ -10107,8 +10117,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[]): Promise<void> {
+    let workspaceId = this.impl.ctx.id.toString();
     let userMeta = await retryOnDoReset(
-        () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
+        () => this.#clientUser.getChatContext(chosenModelId, workspaceId), this.impl.logger);
     return this.impl.sendChatMessage(
         this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
   }

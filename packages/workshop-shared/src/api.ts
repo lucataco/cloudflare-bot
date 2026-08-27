@@ -491,6 +491,13 @@ export interface AuthenticatedApi extends RpcTarget {
   deleteAgent(id: string): Promise<void>;
 
   /**
+   * Get an agent profile by its workspace ID. Returns null if the workspace is not bound to an
+   * agent. Useful for determining if a workspace represents an agent chat for purposes of injecting
+   * the agent's defaultModelId and description into the chat.
+   */
+  getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null>;
+
+  /**
    * Open an existing gadget.
    *
    * If `shareKey` is provided, the server redeems it before opening, adding the caller as a

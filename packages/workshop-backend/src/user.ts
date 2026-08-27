@@ -75,6 +75,8 @@ export type UserChatContext = {
   profile: AiChatAuthorInfo;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
+  /** If this chat belongs to an agent profile (agent-shell 1:1 chat), the agent's profile. */
+  agentProfile?: AgentProfile;
 }
 
 type LoginSessionRecord = {
@@ -708,21 +710,43 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** DO NOT MAKE PUBLIC -- returns API keys. Pure read: call sites replay it across DO resets
    * via retryOnDoReset, so it must stay free of writes and side effects. */
-  async getChatContext(modelId: string | null): Promise<UserChatContext> {
+  async getChatContext(modelId: string | null, workspaceId?: string): Promise<UserChatContext> {
     let gwConfig = getAiGatewayConfig(this.env);
 
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
-    if (modelId) {
+
+    // If this chat belongs to an agent profile (1:1 agent chat), include it in the context.
+    // This must be fetched before model resolution so we can use the agent's defaultModelId
+    // as a fallback when no explicit model is chosen.
+    if (workspaceId) {
+      let agentProfile = await this.getAgentByWorkspaceId(workspaceId);
+      if (agentProfile) {
+        result.agentProfile = agentProfile;
+      }
+    }
+
+    // If no model was explicitly chosen, try the agent's defaultModelId (for agent-shell chats),
+    // falling back to the user's preferred model otherwise. This makes the agent's profile
+    // default the initial selection for 1:1 chats with that agent.
+    let effectiveModelId = modelId;
+    if (!effectiveModelId && result.agentProfile?.defaultModelId) {
+      effectiveModelId = result.agentProfile.defaultModelId;
+    }
+    if (!effectiveModelId) {
+      effectiveModelId = this.storage.preferredModel.get();
+    }
+
+    if (effectiveModelId) {
       // In AI Gateway mode, resolve gateway models first.
       if (gwConfig) {
-        result.aiModel = gwConfig.resolveModel(modelId);
+        result.aiModel = gwConfig.resolveModel(effectiveModelId);
       }
       if (!result.aiModel) {
-        result.aiModel = this.storage.aiModels.get(modelId);
+        result.aiModel = this.storage.aiModels.get(effectiveModelId);
       }
-      if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
+      if (!result.aiModel) throw new Error(`No such model: ${effectiveModelId}`);
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
@@ -738,6 +762,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         }
       }
     }
+
     return result;
   }
 
@@ -836,6 +861,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Get an agent by ID. */
   async getAgent(id: string): Promise<AgentRecord | null> {
     return this.storage.agents.get(id) || null;
+  }
+
+  /** Get an agent by workspace ID. Returns null if the workspace is not bound to an agent. */
+  async getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null> {
+    for (let agent of this.storage.agents.list()) {
+      if (agent.workspaceId === workspaceId) {
+        return agent;
+      }
+    }
+    return null;
   }
 
   /** Delete an agent profile record. The workspace deletion is handled by the caller. */

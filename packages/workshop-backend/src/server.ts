@@ -375,6 +375,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
   }
 
+  async getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null> {
+    return retryOnDoReset(() => this.#user.getAgentByWorkspaceId(workspaceId));
+  }
+
   async listOutputFormats(): Promise<OutputFormatOffer[]> {
     let offers = await listFormatOffers(this.env, await readAdminConfig(this.env));
     // Neither the agent's hint nor the binding details are part of what a user is offered here.
