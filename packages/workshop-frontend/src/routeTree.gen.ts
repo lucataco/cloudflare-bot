@@ -110,6 +110,7 @@ const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/agents': typeof AgentsRoute
   '/blueprints': typeof BlueprintsRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
@@ -127,6 +128,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/agents': typeof AgentsRoute
   '/blueprints': typeof BlueprintsRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
@@ -145,6 +147,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/agents': typeof AgentsRoute
   '/blueprints': typeof BlueprintsRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
