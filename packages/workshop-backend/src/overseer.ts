@@ -10127,10 +10127,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                formats?: MessageFormatRef[]): Promise<number> {
+                formats?: MessageFormatRef[], agentId?: string): Promise<number> {
     let workspaceId = this.impl.ctx.id.toString();
     let userMeta = await retryOnDoReset(
-        () => this.#clientUser.getChatContext(chosenModelId, workspaceId), this.impl.logger);
+        () => this.#clientUser.getChatContext(chosenModelId, workspaceId, agentId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
                              undefined, undefined, formats);
   }
@@ -10138,10 +10138,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async sendChatMessage(
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-      formats?: MessageFormatRef[]): Promise<void> {
+      formats?: MessageFormatRef[], agentId?: string): Promise<void> {
     let workspaceId = this.impl.ctx.id.toString();
     let userMeta = await retryOnDoReset(
-        () => this.#clientUser.getChatContext(chosenModelId, workspaceId), this.impl.logger);
+        () => this.#clientUser.getChatContext(chosenModelId, workspaceId, agentId), this.impl.logger);
     return this.impl.sendChatMessage(
         this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
   }

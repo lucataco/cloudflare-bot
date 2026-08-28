@@ -723,14 +723,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** DO NOT MAKE PUBLIC -- returns API keys. Pure read: call sites replay it across DO resets
    * via retryOnDoReset, so it must stay free of writes and side effects. */
-  async getChatContext(modelId: string | null, workspaceId?: string): Promise<UserChatContext> {
+  async getChatContext(modelId: string | null, workspaceId?: string, agentId?: string): Promise<UserChatContext> {
     let gwConfig = getAiGatewayConfig(this.env);
 
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
 
-    if (workspaceId) {
+    if (agentId) {
+      let agentProfile = await this.getAgent(agentId);
+      if (agentProfile) {
+        result.agentProfile = agentProfile;
+      }
+    } else if (workspaceId) {
       let agentProfile = await this.getAgentByWorkspaceId(workspaceId);
       if (agentProfile) {
         result.agentProfile = agentProfile;
@@ -1613,7 +1618,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     
     let allowedAccountIds: Set<number> | undefined;
     if (filter?.workspaceId) {
-      let agentProfile = await this.getAgentByWorkspaceId(filter.workspaceId);
+      let agentProfile = filter.agentId
+        ? await this.getAgent(filter.agentId)
+        : await this.getAgentByWorkspaceId(filter.workspaceId);
       if (agentProfile?.defaultBindings !== undefined) {
         allowedAccountIds = new Set(agentProfile.defaultBindings);
       }

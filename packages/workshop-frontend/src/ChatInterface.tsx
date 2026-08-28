@@ -3742,6 +3742,7 @@ export const ChatInput = ({
         getOverseer={getOverseer}
         onCreated={handleAttachCreated}
         workspaceId={workspaceId}
+        agentId={selectedMemberAgentId || undefined}
       />
     </div>
   );
@@ -5978,12 +5979,10 @@ function ChatInterface({
 
     try {
       if (selectedChatId === null) {
-        // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments, formats);
+            message, model, capsules, attachments, formats, selectedMemberAgentId || undefined);
         onNavigateToChatRef.current(newChatId);
       } else {
-        // Send message to existing chat.
         await overseer.sendChatMessage(
           selectedChatId,
           message,
@@ -5991,6 +5990,7 @@ function ChatInterface({
           capsules || undefined,
           attachments || undefined,
           formats,
+          selectedMemberAgentId || undefined,
         );
       }
     } catch (err) {
@@ -6014,7 +6014,7 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
       const newChatId = await overseer.newChat(
-          message, model, capsules, attachments, formats);
+          message, model, capsules, attachments, formats, selectedMemberAgentId || undefined);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
@@ -8498,6 +8498,7 @@ function ChatInterface({
         getOverseer={getOverseer}
         onCreated={handleConnectionCreated}
         workspaceId={workspaceId}
+        agentId={selectedMemberAgentId || undefined}
         initialVendorId={connectionAccept?.vendorId}
         initialResourceUrl={connectionAccept?.resourceUrl}
         initialResourceUrlPattern={connectionAccept?.resourceUrlPattern}

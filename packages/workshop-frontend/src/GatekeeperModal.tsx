@@ -190,7 +190,7 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
 
 export default function GatekeeperModal({
   open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
-  initialVendorId, initialResourceUrl, initialResourceUrlPattern, workspaceId,
+  initialVendorId, initialResourceUrl, initialResourceUrlPattern, workspaceId, agentId,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -425,7 +425,7 @@ export default function GatekeeperModal({
       },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(
-      subscriber, workspaceId ? { workspaceId } : undefined)
+      subscriber, workspaceId ? { workspaceId, agentId } : undefined)
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)

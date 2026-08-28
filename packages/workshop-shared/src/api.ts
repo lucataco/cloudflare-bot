@@ -161,6 +161,8 @@ export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
   includeForcedAutoProvisionedAccounts?: boolean;
   /** If set, filter to only accounts assigned to this workspace's agent profile. */
   workspaceId?: string;
+  /** If set, use this specific agent profile to filter bindings (overrides workspace lookup). */
+  agentId?: string;
 };
 
 /**
@@ -2043,7 +2045,7 @@ export interface Overseer extends RpcTarget {
    */
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                  formats?: MessageFormatRef[]): Promise<void>;
+                  formats?: MessageFormatRef[], agentId?: string): Promise<void>;
 
   /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to
