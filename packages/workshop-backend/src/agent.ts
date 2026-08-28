@@ -110,9 +110,6 @@ export type AiChatAgentContext = {
    */
   bindings?: Record<string, WorkpieceId>;
 
-  /**
-   * If this chat belongs to an agent profile (agent-shell 1:1 chat), the agent ID.
-   */
   agentId?: string;
 
   /**
@@ -2541,161 +2538,6 @@ export async function runAgent(
       }
     }),
 
-    computerNavigate: defineTool({
-      name: "computerNavigate",
-      label: "Navigate browser",
-      description: "Navigate the agent's web browser to a URL.",
-      parameters: Type.Object({
-        url: Type.String({description: "The URL to navigate to."}),
-      }),
-      execute: async (toolCallId, {url}) => {
-        try {
-          let agentContext = hooks.getChatAgentContext(chatId);
-          if (!agentContext.agentId) {
-            throw new Error("Computer tools are only available in agent chats.");
-          }
-          let session = await hooks.getComputerSession(agentContext.agentId);
-          await session.navigate(url);
-          await hooks.recordAgentObservation(
-              chatId,
-              `Computer navigate: ${url}`,
-              url,
-              {
-                title: `Navigated to ${url}`,
-                description: `Browser navigated to \`${url}\``,
-              });
-          return toolResult(`Navigated to ${url}`);
-        } catch (error) {
-          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
-          throw error;
-        }
-      }
-    }),
-
-    computerScreenshot: defineTool({
-      name: "computerScreenshot",
-      label: "Screenshot browser",
-      description: "Take a screenshot of the agent's web browser.",
-      parameters: Type.Object({}),
-      execute: async (toolCallId, {}) => {
-        try {
-          let agentContext = hooks.getChatAgentContext(chatId);
-          if (!agentContext.agentId) {
-            throw new Error("Computer tools are only available in agent chats.");
-          }
-          let session = await hooks.getComputerSession(agentContext.agentId);
-          let screenshotBytes = await session.screenshot();
-          await hooks.recordAgentObservation(
-              chatId,
-              `Computer screenshot`,
-              undefined,
-              {
-                title: `Screenshot captured`,
-                description: `Browser screenshot captured (${screenshotBytes.length} bytes)`,
-              });
-          return toolResult("Screenshot captured", {
-            image: { type: "png" as const, data: screenshotBytes }
-          } as Partial<AiToolCall>);
-        } catch (error) {
-          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
-          throw error;
-        }
-      }
-    }),
-
-    computerClick: defineTool({
-      name: "computerClick",
-      label: "Click in browser",
-      description: "Click at coordinates in the agent's web browser.",
-      parameters: Type.Object({
-        x: Type.Number({description: "X coordinate of the click."}),
-        y: Type.Number({description: "Y coordinate of the click."}),
-      }),
-      execute: async (toolCallId, {x, y}) => {
-        try {
-          let agentContext = hooks.getChatAgentContext(chatId);
-          if (!agentContext.agentId) {
-            throw new Error("Computer tools are only available in agent chats.");
-          }
-          let session = await hooks.getComputerSession(agentContext.agentId);
-          await session.click(x, y);
-          await hooks.recordAgentObservation(
-              chatId,
-              `Computer click: (${x}, ${y})`,
-              undefined,
-              {
-                title: `Clicked at (${x}, ${y})`,
-                description: `Browser clicked at coordinates (${x}, ${y})`,
-              });
-          return toolResult(`Clicked at (${x}, ${y})`);
-        } catch (error) {
-          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
-          throw error;
-        }
-      }
-    }),
-
-    computerType: defineTool({
-      name: "computerType",
-      label: "Type in browser",
-      description: "Type text in the agent's web browser.",
-      parameters: Type.Object({
-        text: Type.String({description: "The text to type."}),
-      }),
-      execute: async (toolCallId, {text}) => {
-        try {
-          let agentContext = hooks.getChatAgentContext(chatId);
-          if (!agentContext.agentId) {
-            throw new Error("Computer tools are only available in agent chats.");
-          }
-          let session = await hooks.getComputerSession(agentContext.agentId);
-          await session.type(text);
-          await hooks.recordAgentObservation(
-              chatId,
-              `Computer type: ${text.slice(0, 50)}${text.length > 50 ? '...' : ''}`,
-              undefined,
-              {
-                title: `Typed text`,
-                description: `Typed ${text.length} characters in browser`,
-              });
-          return toolResult(`Typed: ${text}`);
-        } catch (error) {
-          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
-          throw error;
-        }
-      }
-    }),
-
-    computerGetState: defineTool({
-      name: "computerGetState",
-      label: "Get browser state",
-      description: "Get the current state of the agent's web browser.",
-      parameters: Type.Object({}),
-      execute: async (toolCallId, {}) => {
-        try {
-          let agentContext = hooks.getChatAgentContext(chatId);
-          if (!agentContext.agentId) {
-            throw new Error("Computer tools are only available in agent chats.");
-          }
-          let session = await hooks.getComputerSession(agentContext.agentId);
-          let state = await session.getState();
-          let stateStr = JSON.stringify(state, null, 2);
-          await hooks.recordAgentObservation(
-              chatId,
-              `Computer state`,
-              state.currentUrl || undefined,
-              {
-                title: `Browser state`,
-                description: `Current URL: ${state.currentUrl || 'none'}\nLast activity: ${state.lastActivityAt}`,
-              });
-          return toolResult(stateStr);
-        } catch (error) {
-          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
-          throw error;
-        }
-      }
-    }),
-
     observeUserChanges: defineTool({
       name: "observeUserChanges",
       label: "Observe user changes",
@@ -3045,6 +2887,143 @@ export async function runAgent(
       execute: async (_toolCallId, {error}) => {
         hooks.rejectAllAgentCallbacks(chatId, error);
         return toolResult(jsonToolResultText({rejected: true}));
+      }
+    });
+  }
+
+  if (agentContext.agentId) {
+    tools.computerNavigate = defineTool({
+      name: "computerNavigate",
+      label: "Navigate browser",
+      description: "Navigate the agent's web browser to a URL.",
+      parameters: Type.Object({
+        url: Type.String({description: "The URL to navigate to."}),
+      }),
+      execute: async (toolCallId, {url}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          await session.navigate(url);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer navigate: ${url}`,
+              url,
+              {
+                title: `Navigated to ${url}`,
+                description: `Browser navigated to \`${url}\``,
+              });
+          return toolResult(`Navigated to ${url}`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.computerScreenshot = defineTool({
+      name: "computerScreenshot",
+      label: "Screenshot browser",
+      description: "Take a screenshot of the agent's web browser.",
+      parameters: Type.Object({}),
+      execute: async (toolCallId, {}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          let screenshotBytes = await session.screenshot();
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer screenshot`,
+              undefined,
+              {
+                title: `Screenshot captured`,
+                description: `Browser screenshot captured (${screenshotBytes.length} bytes)`,
+              });
+          return toolResult("Screenshot captured", {
+            image: { type: "png" as const, data: screenshotBytes }
+          } as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.computerClick = defineTool({
+      name: "computerClick",
+      label: "Click in browser",
+      description: "Click at coordinates in the agent's web browser.",
+      parameters: Type.Object({
+        x: Type.Number({description: "X coordinate of the click."}),
+        y: Type.Number({description: "Y coordinate of the click."}),
+      }),
+      execute: async (toolCallId, {x, y}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          await session.click(x, y);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer click: (${x}, ${y})`,
+              undefined,
+              {
+                title: `Clicked at (${x}, ${y})`,
+                description: `Browser clicked at coordinates (${x}, ${y})`,
+              });
+          return toolResult(`Clicked at (${x}, ${y})`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.computerType = defineTool({
+      name: "computerType",
+      label: "Type in browser",
+      description: "Type text in the agent's web browser.",
+      parameters: Type.Object({
+        text: Type.String({description: "The text to type."}),
+      }),
+      execute: async (toolCallId, {text}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          await session.type(text);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer type: ${text.slice(0, 50)}${text.length > 50 ? '...' : ''}`,
+              undefined,
+              {
+                title: `Typed text`,
+                description: `Typed ${text.length} characters in browser`,
+              });
+          return toolResult(`Typed: ${text}`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.computerGetState = defineTool({
+      name: "computerGetState",
+      label: "Get browser state",
+      description: "Get the current state of the agent's web browser.",
+      parameters: Type.Object({}),
+      execute: async (toolCallId, {}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          let state = await session.getState();
+          let stateStr = JSON.stringify(state, null, 2);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer state`,
+              state.currentUrl || undefined,
+              {
+                title: `Browser state`,
+                description: `Current URL: ${state.currentUrl || 'none'}\nLast activity: ${state.lastActivityAt}`,
+              });
+          return toolResult(stateStr);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
       }
     });
   }

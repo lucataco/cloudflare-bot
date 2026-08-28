@@ -5310,7 +5310,7 @@ class OverseerImpl implements AgentHooks {
 
       // If this chat belongs to an agent profile (agent-shell 1:1 chat), store the agent's
       // standing instructions in the chat context.
-      if (userMeta.agentProfile?.description) {
+      if (userMeta.agentProfile) {
         this.storage.chatContext.put({
           chatId,
           agentId: userMeta.agentProfile.id,
@@ -5397,7 +5397,7 @@ class OverseerImpl implements AgentHooks {
     // Backfill agent instructions if this chat belongs to an agent profile and the instructions
     // are not yet set (for existing chats or when the agent's description is edited).
     let chatContext = this.storage.chatContext.get(chatId);
-    if (userMeta.agentProfile?.description && !chatContext?.agentInstructions) {
+    if (userMeta.agentProfile) {
       this.storage.chatContext.put({
         ...(chatContext || { chatId }),
         agentId: userMeta.agentProfile.id,
