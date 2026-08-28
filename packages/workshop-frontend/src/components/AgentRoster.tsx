@@ -7,7 +7,7 @@ import CreateAgentModal from './CreateAgentModal'
 import EditAgentModal from './EditAgentModal'
 import CreateGroupModal from './CreateGroupModal'
 import EditGroupModal from './EditGroupModal'
-import { useUiFeatureFlag } from '../featureFlags'
+import { useUiFeatureFlag } from '../FeatureFlagsContext'
 
 export default function AgentRoster({
   onAgentCreated,

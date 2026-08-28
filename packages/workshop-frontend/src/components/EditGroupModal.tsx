@@ -186,7 +186,7 @@ export default function EditGroupModal({
         </Dialog.Body>
 
         <Dialog.Footer className="flex justify-between">
-          <Button variant="danger" onClick={handleDelete} loading={deleting} disabled={loading}>
+          <Button variant="destructive" onClick={handleDelete} loading={deleting} disabled={loading}>
             Delete
           </Button>
           <div className="flex gap-2">
