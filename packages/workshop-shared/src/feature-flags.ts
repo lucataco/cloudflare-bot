@@ -8,7 +8,7 @@ type UiFeatureFlagDefinition = {
 export const UI_FEATURE_FLAGS = [
   // Replace this placeholder with the first real feature flag.
   { key: "placeholder-flag", dev: false, default: false },
-  { key: "agentShell", dev: false, default: false },
+  { key: "agentShell", dev: true, default: true },
 ] as const satisfies readonly UiFeatureFlagDefinition[];
 
 type UiFeatureFlag = (typeof UI_FEATURE_FLAGS)[number];
