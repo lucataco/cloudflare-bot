@@ -10275,8 +10275,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     const computerSessions = this.impl.ctx.exports.ComputerSessionImpl;
-    const userId = this.#clientUser.id.toString();
-    const sessionKey = `${userId}:${agentId}`;
+    const sessionKey = `${this.clientUserId}:${agentId}`;
     const id = computerSessions.idFromName(sessionKey);
     const stub = computerSessions.get(id);
     return stub;

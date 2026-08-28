@@ -14,7 +14,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
   const [error, setError] = useState<string | null>(null);
   const [url, setUrl] = useState('about:blank');
   const [currentUrl, setCurrentUrl] = useState('about:blank');
-  const [session, setSession] = useState<RpcStub<ComputerSession> | null>(null);
+  const sessionRef = useRef<RpcStub<ComputerSession> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -24,7 +24,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
       try {
         const computerSession = await overseer.getComputerSession(agentId);
         if (mounted) {
-          setSession(computerSession);
+          sessionRef.current = computerSession;
           loadScreenshot(computerSession);
         }
       } catch (err) {
@@ -41,8 +41,8 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
       if (screenshot) {
         URL.revokeObjectURL(screenshot);
       }
-      if (session) {
-        session[Symbol.dispose]();
+      if (sessionRef.current) {
+        sessionRef.current[Symbol.dispose]();
       }
     };
   }, [agentId, overseer]);
@@ -70,12 +70,12 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
   }
 
   async function handleNavigate() {
-    if (!session) return;
+    if (!sessionRef.current) return;
     try {
       setLoading(true);
       setError(null);
-      await session.navigate(url);
-      await loadScreenshot(session);
+      await sessionRef.current.navigate(url);
+      await loadScreenshot(sessionRef.current);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Navigation failed');
       setLoading(false);
@@ -83,12 +83,12 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
   }
 
   async function handleRefresh() {
-    if (!session) return;
-    await loadScreenshot(session);
+    if (!sessionRef.current) return;
+    await loadScreenshot(sessionRef.current);
   }
 
   async function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
-    if (!session || !canvasRef.current) return;
+    if (!sessionRef.current || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     const scaleX = 1280 / rect.width;
@@ -97,8 +97,8 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     const y = (e.clientY - rect.top) * scaleY;
     
     try {
-      await session.click(Math.round(x), Math.round(y));
-      await loadScreenshot(session);
+      await sessionRef.current.click(Math.round(x), Math.round(y));
+      await loadScreenshot(sessionRef.current);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Click failed');
     }
