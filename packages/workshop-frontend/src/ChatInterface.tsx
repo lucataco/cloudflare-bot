@@ -60,6 +60,8 @@ import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
+import { ComputerView } from "./components/ComputerView";
+import { useUiFeatureFlag } from "./FeatureFlagsContext";
 import {
   getInitialSelectedModel,
   getStoredSelectedModel,
@@ -4748,6 +4750,8 @@ function ChatInterface({
   const [currentGroup, setCurrentGroup] = useState<Group | null>(null);
   const [groupMemberAgents, setGroupMemberAgents] = useState<AgentProfile[]>([]);
   const [selectedMemberAgentId, setSelectedMemberAgentId] = useState<string | null>(null);
+  const [showComputer, setShowComputer] = useState(false);
+  const { enabled: agentShellEnabled } = useUiFeatureFlag('agentShell');
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -7470,6 +7474,17 @@ function ChatInterface({
                     </>
                   )}
 
+                  {agentShellEnabled && (currentAgentProfile?.id || selectedMemberAgentId) && (
+                    <WorkshopIconButton
+                      onClick={() => setShowComputer(true)}
+                      className="!h-8 !w-8 flex-shrink-0 text-kumo-inactive hover:text-kumo-subtle"
+                      title="Open computer"
+                      aria-label="Open computer"
+                    >
+                      <Terminal size={14} />
+                    </WorkshopIconButton>
+                  )}
+
                   <WorkshopIconButton
                     onClick={() => handleDeleteChat()}
                     danger
@@ -8515,6 +8530,13 @@ function ChatInterface({
         open={usageModalOpen}
         onClose={() => setUsageModalOpen(false)}
       />
+      {showComputer && (currentAgentProfile?.id || selectedMemberAgentId) && (
+        <ComputerView
+          agentId={selectedMemberAgentId || currentAgentProfile?.id || ''}
+          overseer={getOverseer()}
+          onClose={() => setShowComputer(false)}
+        />
+      )}
     </div>
   );
 }

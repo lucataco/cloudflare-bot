@@ -2161,6 +2161,10 @@ export interface Overseer extends RpcTarget {
   /** Delete a chat thread. */
   deleteChat(chatId: number): Promise<void>;
 
+  getComputerSession(agentId: string): Promise<RpcStub<ComputerSession>>;
+
+  computerScreenshot(agentId: string): Promise<Uint8Array>;
+
   /**
    * Request that any ongoing LLM session in the given chat immediately stop.
    *
@@ -3650,6 +3654,15 @@ export type PreApprovableAction = {
   /** Vendor of the gatekeeper holding this connection. Absent for vendorless gatekeepers. */
   vendorId?: string;
 };
+
+export interface ComputerSession extends RpcTarget {
+  navigate(url: string): Promise<void>;
+  screenshot(): Promise<Uint8Array>;
+  click(x: number, y: number): Promise<void>;
+  type(text: string): Promise<void>;
+  getState(): Promise<{ agentId: string; currentUrl: string | null; lastActivityAt: Date }>;
+  close(): Promise<void>;
+}
 
 // =======================================================================================
 // Blueprint types

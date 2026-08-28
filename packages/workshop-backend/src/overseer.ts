@@ -10266,6 +10266,26 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
+  async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+    const agent = await retryOnDoReset(
+      () => this.#clientUser.getAgent(agentId), this.impl.logger);
+    
+    if (!agent) {
+      throw new Error("Agent not found or does not belong to you");
+    }
+
+    const computerSessions = this.impl.ctx.exports.ComputerSessionImpl;
+    const sessionKey = `${this.clientUserId}:${agentId}`;
+    const id = computerSessions.idFromName(sessionKey);
+    const stub = computerSessions.get(id);
+    return stub;
+  }
+
+  async computerScreenshot(agentId: string): Promise<Uint8Array> {
+    const session = await this.getComputerSession(agentId);
+    return await session.screenshot();
+  }
+
   async stopAgent(chatId: number): Promise<void> {
     this.impl.cancelAgent(chatId);
   }
@@ -10791,6 +10811,14 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async finalizeChatDraft(_chatId: number): Promise<void> { this.#deny(); }
   async discardChatDraftChanges(_chatId: number): Promise<void> { this.#deny(); }
   async deleteChat(_chatId: number): Promise<void> { this.#deny(); }
+  async getComputerSession(_agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+    this.#deny();
+    throw new Error("Not authorized");
+  }
+  async computerScreenshot(_agentId: string): Promise<Uint8Array> {
+    this.#deny();
+    throw new Error("Not authorized");
+  }
   async stopAgent(_chatId: number): Promise<void> { this.#deny(); }
   async retryAgent(_chatId: number, _modelId: string): Promise<void> { this.#deny(); }
   async subscribeToConsoleLogs(_subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
