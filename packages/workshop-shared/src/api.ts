@@ -502,6 +502,11 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null>;
 
+  listRoutines(agentId: string): Promise<AgentRoutine[]>;
+  createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<AgentRoutine>;
+  updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine>;
+  deleteRoutine(agentId: string, routineId: string): Promise<void>;
+
   listGroups(): Promise<Group[]>;
   createGroup(name: string, memberAgentIds: string[]): Promise<Group>;
   updateGroup(id: string, updates: { name?: string; memberAgentIds?: string[]; }): Promise<Group>;
@@ -1343,6 +1348,22 @@ export type GadgetMetadataWithTimestamps = GadgetMetadata & {
  * and chat history. Agents are stored on the User DO and are the primary entity in the agent-shell
  * UI mode (feature flag `agentShell`).
  */
+export type AgentRoutineSchedule =
+  | { kind: "interval"; everyMs: number }
+  | { kind: "calendar"; timeZone: string; freq: "hourly" | "daily" | "weekly"; interval?: number; byDay?: ("SU" | "MO" | "TU" | "WE" | "TH" | "FR" | "SA")[]; hour?: number; minute: number }
+  | { kind: "once"; fireAt: number; timeZone: string };
+
+export type AgentRoutine = {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule: AgentRoutineSchedule;
+  paused: boolean;
+  scheduleId?: string;
+  created: Date;
+  updated: Date;
+};
+
 export type AgentProfile = {
   /** Unique identifier for this agent (randomly generated). */
   id: string;
