@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule, AgentSkill } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -134,6 +134,16 @@ type RoutineRecord = {
   updated: Date;
 };
 
+type SkillRecord = {
+  id: string;
+  agentId: string;
+  name: string;
+  description: string;
+  body: string;
+  created: Date;
+  updated: Date;
+};
+
 type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
@@ -203,6 +213,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: "id"
       }),
       routines: collection<RoutineRecord>()({
+        primaryKey: "id"
+      }),
+      skills: collection<SkillRecord>()({
         primaryKey: "id"
       }),
       gadgets: collection<GadgetRecord>()({
@@ -990,6 +1003,57 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getRoutineById(routineId: string): Promise<RoutineRecord | undefined> {
     return this.storage.routines.get(routineId);
+  }
+
+  async listSkills(agentId: string): Promise<AgentSkill[]> {
+    let agent = this.storage.agents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    let skills = Array.from(this.storage.skills.list()).filter(s => s.agentId === agentId);
+    skills.sort((a, b) => b.created.getTime() - a.created.getTime());
+    return skills;
+  }
+
+  async createSkill(agentId: string, name: string, description: string, body: string): Promise<AgentSkill> {
+    let agent = this.storage.agents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    let now = new Date();
+    let skill: SkillRecord = {
+      id: crypto.randomUUID(),
+      agentId,
+      name,
+      description,
+      body,
+      created: now,
+      updated: now,
+    };
+    this.storage.skills.put(skill);
+    return skill;
+  }
+
+  async updateSkill(agentId: string, skillId: string, updates: { name?: string; description?: string; body?: string }): Promise<AgentSkill> {
+    let skill = this.storage.skills.get(skillId);
+    if (!skill || skill.agentId !== agentId) {
+      throw new Error(`Skill not found: ${skillId}`);
+    }
+    let updated: SkillRecord = {
+      ...skill,
+      ...updates,
+      updated: new Date(),
+    };
+    this.storage.skills.put(updated);
+    return updated;
+  }
+
+  async deleteSkill(agentId: string, skillId: string): Promise<void> {
+    let skill = this.storage.skills.get(skillId);
+    if (!skill || skill.agentId !== agentId) {
+      throw new Error(`Skill not found: ${skillId}`);
+    }
+    this.storage.skills.delete(skillId);
   }
 
   async listGroups(): Promise<Group[]> {

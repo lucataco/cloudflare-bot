@@ -119,6 +119,8 @@ export type AiChatAgentContext = {
    */
   agentInstructions?: string;
 
+  agentSkills?: Array<{ name: string; description: string; body: string }>;
+
   /**
    * Gatekeeper IDs for ambient capsules which were instantiated into this chat when it started.
    * This array predates the creation of per-chat named bindings; back then, ambient gatekeepers
@@ -505,6 +507,8 @@ export interface AgentHooks {
    * "" when none are set. Read on each turn so admin edits take effect promptly.
    */
   getInstanceInstructions(): Promise<string>;
+
+  getAgentSkills(agentId: string): Promise<Array<{ name: string; description: string; body: string }>>;
 
   /**
    * Connection-request hooks for the agent.
@@ -2074,10 +2078,17 @@ export async function runAgent(
       ? `\n\n${agentContext.agentInstructions}`
       : "";
 
-  // The two system prompt slots: the non-project-specific parts, followed by the
-  // project-specific parts. Kept as a two-part construction (static slot first) so the shared
-  // prefix stays byte-stable for prompt caching; they are concatenated into pi's single
-  // Context.systemPrompt string below.
+  let agentSkillsText = "";
+  if (agentContext.agentId) {
+    let skills = await hooks.getAgentSkills(agentContext.agentId);
+    if (skills.length > 0) {
+      let skillsFormatted = skills.map(skill =>
+          `## ${skill.name}\n\n${skill.description}\n\n${skill.body}`
+      ).join("\n\n");
+      agentSkillsText = `\n\n<agent_skills>\nYou have access to the following skills (reusable recipes). Use them when appropriate:\n\n${skillsFormatted}\n</agent_skills>`;
+    }
+  }
+
   let systemPromptSlots: [string, string];
 
   if (agentContext.spawnerConfig) {
@@ -2102,8 +2113,8 @@ export async function runAgent(
 
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
-      instanceInstructions || agentInstructions
-          ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}`
+      instanceInstructions || agentInstructions || agentSkillsText
+          ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}${agentSkillsText}`
           : SPAWNER_SYSTEM_PROMPT,
       alwaysAvailableResourcesPrompt
           ? `${systemPromptBindings}\n\n${alwaysAvailableResourcesPrompt}`
@@ -2210,8 +2221,8 @@ export async function runAgent(
 
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
-      instanceInstructions || agentInstructions
-          ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}`
+      instanceInstructions || agentInstructions || agentSkillsText
+          ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}${agentSkillsText}`
           : SYSTEM_PROMPT,
       (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +

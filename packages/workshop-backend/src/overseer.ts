@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, AgentProfile, AgentRoutineSchedule } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, AgentProfile, AgentRoutineSchedule, AgentSkill } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -5156,7 +5156,8 @@ class OverseerImpl implements AgentHooks {
   // message. A result without a message suppresses only the generated message, not the invocation.
   async #prepareChatMessage(
       message: string | SlashCommandRequest,
-      hasAttachments: boolean): Promise<PreparedChatMessage> {
+      hasAttachments: boolean,
+      agentId?: string): Promise<PreparedChatMessage> {
     if (typeof message !== "string") {
       // A built-in command is handled by the Workshop, not a Gatekeeper: there is nothing to invoke
       // here. Committing the event is what makes the turn a compaction turn (see isCompactionTurn).
@@ -5183,6 +5184,31 @@ class OverseerImpl implements AgentHooks {
         throw new Error("Slash command returned an empty message.");
       }
       return {slashCommand: message, message: result.message, skillName: result.skillName};
+    }
+    if (typeof message === "string" && message.trim().startsWith("/") && agentId && this.ownerId) {
+      let match = message.trim().match(/^\/([a-zA-Z0-9_-]+)(?:\s|$)/);
+      if (match) {
+        let skillName = match[1];
+        try {
+          let owner = wrapDoStubForTelemetry(
+              this.users.get(this.users.idFromString(this.ownerId)),
+              this.logger);
+          let skills: AgentSkill[] = await retryOnDoReset(() => owner.listSkills(agentId), this.logger);
+          let skill = skills.find(s => s.name.toLowerCase() === skillName.toLowerCase());
+          if (skill) {
+            let remainingMessage = message.slice(match[0].length).trim();
+            let fullMessage = remainingMessage
+                ? `${skill.body}\n\n${remainingMessage}`
+                : skill.body;
+            return {message: fullMessage, skillName: skill.name};
+          }
+        } catch (err) {
+          this.logger.warn(`failed to fetch skill for invocation: ${skillName}`, {
+            event: "skill.invocation.failed",
+            error: err,
+          });
+        }
+      }
     }
     if (!message.trim() && !hasAttachments) {
       throw new Error("Cannot send an empty chat message.");
@@ -5288,7 +5314,7 @@ class OverseerImpl implements AgentHooks {
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
         attachments, userMeta.aiModel?.config.provider);
     let prepared = await this.#prepareChatMessage(
-        initialMessage, (canonicalAttachments?.length ?? 0) > 0);
+        initialMessage, (canonicalAttachments?.length ?? 0) > 0, userMeta.agentProfile?.id);
 
     // No code base is established at creation: gadgets pin lazily, when their code is first
     // modified in the chat (see ChatCodeBase). Until then the chat reads committed code live at
@@ -5381,7 +5407,7 @@ class OverseerImpl implements AgentHooks {
     this.assertChatNotActive(chatId);
     using _chatMessageReservation = this.reserveChatMessagePreparation(chatId);
     let prepared = await this.#prepareChatMessage(
-        message, (canonicalAttachments?.length ?? 0) > 0);
+        message, (canonicalAttachments?.length ?? 0) > 0, userMeta.agentProfile?.id);
 
     let meta = this.assertChatNotActive(chatId, true);
     let result = this.materializeChatChanges(chatId, meta);
@@ -7430,13 +7456,29 @@ class OverseerImpl implements AgentHooks {
 
   async getInstanceInstructions(): Promise<string> {
     try {
-      // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
       return (await readAdminConfig(this.env)).instanceInstructions;
     } catch (err) {
       this.logger.warn("failed to read instance instructions", {
         event: "instance.instructions.read.failed", error: err,
       });
       return "";
+    }
+  }
+
+  async getAgentSkills(agentId: string): Promise<Array<{ name: string; description: string; body: string }>> {
+    if (!this.ownerId) return [];
+    try {
+      let owner = wrapDoStubForTelemetry(
+          this.users.get(this.users.idFromString(this.ownerId)),
+          this.logger);
+      let skills = await retryOnDoReset(() => owner.listSkills(agentId), this.logger);
+      return skills.map(s => ({ name: s.name, description: s.description, body: s.body }));
+    } catch (err) {
+      this.logger.warn(`failed to fetch agent skills for agent ${agentId}`, {
+        event: "agent.skills.fetch.failed",
+        error: err,
+      });
+      return [];
     }
   }
 
