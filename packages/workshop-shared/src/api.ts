@@ -159,6 +159,8 @@ export type GatekeeperVendorFilter = {
 export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
   /** Ensure and include auto-provisioned accounts forced by deployment policy. */
   includeForcedAutoProvisionedAccounts?: boolean;
+  /** If set, filter to only accounts assigned to this workspace's agent profile. */
+  workspaceId?: string;
 };
 
 /**
@@ -469,7 +471,7 @@ export interface AuthenticatedApi extends RpcTarget {
    * generated ID and timestamps. The `defaultModelId` can be null for a human-only agent.
    */
   createAgent(name: string, title: string, description: string, defaultModelId: string | null,
-              avatar?: AvatarImage): Promise<AgentProfile>;
+              avatar?: AvatarImage, defaultBindings?: number[]): Promise<AgentProfile>;
 
   /**
    * Update an existing agent profile. All fields except `id`, `created`, and `updated` can be
@@ -482,6 +484,7 @@ export interface AuthenticatedApi extends RpcTarget {
     description?: string;
     defaultModelId?: string | null;
     avatar?: AvatarImage | null;
+    defaultBindings?: number[];
   }): Promise<AgentProfile>;
 
   /**
@@ -1354,6 +1357,11 @@ export type AgentProfile = {
    * one workspace created alongside it, and this field points to it.
    */
   workspaceId: string;
+  /**
+   * Connected account IDs this agent is assigned. The agent's chat only introduces these specific
+   * accounts. Empty array means no accounts are introduced. Undefined (not set) means legacy behavior.
+   */
+  defaultBindings?: number[];
   /** When this agent profile was created. */
   created: Date;
   /** When this agent profile was last updated. */

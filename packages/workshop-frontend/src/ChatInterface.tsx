@@ -1915,6 +1915,7 @@ export const ChatInput = ({
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
+  workspaceId,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1968,6 +1969,10 @@ export const ChatInput = ({
   onStop?: () => void;
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
+  /**
+   * Workspace ID for filtering connected accounts to only those assigned to this workspace's agent.
+   */
+  workspaceId?: string;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
   /** Open the pre-approval dialog (owned by the parent). */
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
@@ -3392,6 +3397,7 @@ export const ChatInput = ({
                 activeIndex={overlayIndex}
                 onItems={handleOverlayItems}
                 activateRef={overlayActivateRef}
+                workspaceId={workspaceId}
               />
             )}
             <ComposerMirror
@@ -3734,6 +3740,7 @@ export const ChatInput = ({
         onClose={() => setAttachModalOpen(false)}
         getOverseer={getOverseer}
         onCreated={handleAttachCreated}
+        workspaceId={workspaceId}
       />
     </div>
   );
@@ -7279,6 +7286,7 @@ function ChatInterface({
             draftStorageKey={currentUser && workspaceId
               ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
               : undefined}
+            workspaceId={workspaceId}
           />
           {/* Reserve the same height as the token/cost row to avoid layout shift. */}
           <div aria-hidden className="min-h-[1rem]" />
@@ -8430,6 +8438,7 @@ function ChatInterface({
         onClose={() => setConnectionAccept(null)}
         getOverseer={getOverseer}
         onCreated={handleConnectionCreated}
+        workspaceId={workspaceId}
         initialVendorId={connectionAccept?.vendorId}
         initialResourceUrl={connectionAccept?.resourceUrl}
         initialResourceUrlPattern={connectionAccept?.resourceUrlPattern}

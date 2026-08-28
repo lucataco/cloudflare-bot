@@ -52,6 +52,11 @@ export interface GatekeeperModalProps {
    */
   onCreated: (gk: RpcStub<GatekeeperClient<any>>) => Promise<void>
   /**
+   * Workspace ID for filtering connected accounts to only those assigned to this workspace's agent.
+   * Omit for settings/global context where all user accounts should be visible.
+   */
+  workspaceId?: string
+  /**
    * Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
    * normally the gadget the spawner is being created for plus that gadget's own bindings. All are
    * enabled by default, reproducing the pre-multi-gadget "spawned agents inherit everything"
@@ -185,7 +190,7 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
 
 export default function GatekeeperModal({
   open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
-  initialVendorId, initialResourceUrl, initialResourceUrlPattern,
+  initialVendorId, initialResourceUrl, initialResourceUrlPattern, workspaceId,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -419,7 +424,8 @@ export default function GatekeeperModal({
         setAccounts(Array.from(accountMap.values()))
       },
     })
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    const subscription = authenticatedApi.subscribeConnectedAccounts(
+      subscriber, workspaceId ? { workspaceId } : undefined)
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)

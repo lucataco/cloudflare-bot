@@ -23,6 +23,10 @@ export interface CapsuleOverlayProps {
    * with that line rather than above the whole composer.
    */
   lineOffset?: number
+  /**
+   * Workspace ID for filtering connected accounts to only those assigned to this workspace's agent.
+   */
+  workspaceId?: string
 }
 
 // Minimum URL length to trigger showing the overlay (show once the scheme is complete).
@@ -39,7 +43,7 @@ const OVERLAY_VIEWPORT_MARGIN = 24
 // Below this the panel is more frustrating than useful, so it is allowed to overflow instead.
 const MIN_OVERLAY_HEIGHT = 160
 
-export default function CapsuleOverlay({ url, onSelectAccount, onRefine, onDismiss, activeIndex, onItems, activateRef, lineOffset }: CapsuleOverlayProps) {
+export default function CapsuleOverlay({ url, onSelectAccount, onRefine, onDismiss, activeIndex, onItems, activateRef, lineOffset, workspaceId }: CapsuleOverlayProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const overlayRef = useRef<HTMLDivElement>(null)
   // A list that fills in row by row moves under the pointer and shuffles what Tab is aimed at, so
@@ -97,6 +101,7 @@ export default function CapsuleOverlay({ url, onSelectAccount, onRefine, onDismi
         activeIndex={activeIndex}
         onItems={onItems}
         activateRef={activateRef}
+        workspaceId={workspaceId}
       />
     </div>
   )
