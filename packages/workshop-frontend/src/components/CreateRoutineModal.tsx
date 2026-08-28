@@ -15,12 +15,18 @@ export default function CreateRoutineModal({
   const { authenticatedApi } = useAuthenticatedApi()
   const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
-  const [scheduleKind, setScheduleKind] = useState<'interval' | 'calendar' | 'once'>('interval')
+  const [scheduleKind, setScheduleKind] = useState<'interval' | 'calendar' | 'once' | 'slack' | 'github'>('interval')
   const [intervalMinutes, setIntervalMinutes] = useState(60)
   const [calendarFreq, setCalendarFreq] = useState<'hourly' | 'daily' | 'weekly'>('daily')
   const [hour, setHour] = useState(9)
   const [minute, setMinute] = useState(0)
   const [timeZone, setTimeZone] = useState('America/New_York')
+  const [slackChannelId, setSlackChannelId] = useState('')
+  const [slackMatchKind, setSlackMatchKind] = useState<'mention' | 'keyword' | 'message'>('mention')
+  const [slackKeyword, setSlackKeyword] = useState('')
+  const [githubOwner, setGithubOwner] = useState('')
+  const [githubRepo, setGithubRepo] = useState('')
+  const [githubEvents, setGithubEvents] = useState<('pr-opened' | 'pr-merged' | 'pr-comment' | 'review-requested')[]>(['pr-opened'])
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -51,12 +57,26 @@ export default function CreateRoutineModal({
         minute,
         ...(calendarFreq !== 'hourly' ? { hour } : {}),
       }
-    } else {
+    } else if (scheduleKind === 'once') {
       const fireAt = Date.now() + 60 * 60 * 1000
       schedule = {
         kind: 'once',
         fireAt,
         timeZone,
+      }
+    } else if (scheduleKind === 'slack') {
+      schedule = {
+        kind: 'slack',
+        channelId: slackChannelId,
+        matchKind: slackMatchKind,
+        ...(slackMatchKind === 'keyword' ? { keyword: slackKeyword } : {}),
+      }
+    } else {
+      schedule = {
+        kind: 'github',
+        owner: githubOwner,
+        repo: githubRepo,
+        events: githubEvents,
       }
     }
 
@@ -113,18 +133,127 @@ export default function CreateRoutineModal({
 
           <div>
             <label className="block text-sm font-medium text-kumo-default mb-1">
-              Schedule Type
+              Trigger Type
             </label>
             <select
               value={scheduleKind}
-              onChange={(e) => setScheduleKind(e.target.value as 'interval' | 'calendar' | 'once')}
+              onChange={(e) => setScheduleKind(e.target.value as 'interval' | 'calendar' | 'once' | 'slack' | 'github')}
               className="w-full px-3 py-2 bg-kumo-surface border border-kumo-border rounded text-kumo-default"
             >
               <option value="interval">Interval (every N minutes)</option>
               <option value="calendar">Calendar (specific time)</option>
               <option value="once">Once (one-time)</option>
+              <option value="slack">Slack Event</option>
+              <option value="github">GitHub Event</option>
             </select>
           </div>
+
+          {scheduleKind === 'slack' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-kumo-default mb-1">
+                  Channel ID
+                </label>
+                <input
+                  type="text"
+                  value={slackChannelId}
+                  onChange={(e) => setSlackChannelId(e.target.value)}
+                  className="w-full px-3 py-2 bg-kumo-surface border border-kumo-border rounded text-kumo-default"
+                  placeholder="C1234567890"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-kumo-default mb-1">
+                  Match Type
+                </label>
+                <select
+                  value={slackMatchKind}
+                  onChange={(e) => setSlackMatchKind(e.target.value as 'mention' | 'keyword' | 'message')}
+                  className="w-full px-3 py-2 bg-kumo-surface border border-kumo-border rounded text-kumo-default"
+                >
+                  <option value="mention">Bot Mention</option>
+                  <option value="keyword">Keyword</option>
+                  <option value="message">Any Message</option>
+                </select>
+              </div>
+
+              {slackMatchKind === 'keyword' && (
+                <div>
+                  <label className="block text-sm font-medium text-kumo-default mb-1">
+                    Keyword
+                  </label>
+                  <input
+                    type="text"
+                    value={slackKeyword}
+                    onChange={(e) => setSlackKeyword(e.target.value)}
+                    className="w-full px-3 py-2 bg-kumo-surface border border-kumo-border rounded text-kumo-default"
+                    placeholder="keyword"
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {scheduleKind === 'github' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-kumo-default mb-1">
+                  Owner
+                </label>
+                <input
+                  type="text"
+                  value={githubOwner}
+                  onChange={(e) => setGithubOwner(e.target.value)}
+                  className="w-full px-3 py-2 bg-kumo-surface border border-kumo-border rounded text-kumo-default"
+                  placeholder="username or org"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-kumo-default mb-1">
+                  Repository
+                </label>
+                <input
+                  type="text"
+                  value={githubRepo}
+                  onChange={(e) => setGithubRepo(e.target.value)}
+                  className="w-full px-3 py-2 bg-kumo-surface border border-kumo-border rounded text-kumo-default"
+                  placeholder="repo-name"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-kumo-default mb-1">
+                  Events
+                </label>
+                <div className="space-y-2">
+                  {(['pr-opened', 'pr-merged', 'pr-comment', 'review-requested'] as const).map((event) => (
+                    <label key={event} className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={githubEvents.includes(event)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setGithubEvents([...githubEvents, event])
+                          } else {
+                            setGithubEvents(githubEvents.filter((ev) => ev !== event))
+                          }
+                        }}
+                        className="rounded border-kumo-border"
+                      />
+                      <span className="text-sm text-kumo-default">
+                        {event === 'pr-opened' && 'PR Opened'}
+                        {event === 'pr-merged' && 'PR Merged'}
+                        {event === 'pr-comment' && 'PR Comment'}
+                        {event === 'review-requested' && 'Review Requested'}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
 
           {scheduleKind === 'interval' && (
             <div>

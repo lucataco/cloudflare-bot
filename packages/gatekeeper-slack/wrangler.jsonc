@@ -19,6 +19,10 @@
         "SlackConversationGatekeeperImpl",
         "SlackThreadGatekeeperImpl"
       ]
+    },
+    {
+      "tag": "v1-event-hooks",
+      "new_sqlite_classes": ["SlackEventHookDriver"]
     }
   ]
 }

@@ -183,3 +183,14 @@ export interface SlackThread {
   /** List up to 1,000 thread messages, oldest first, including the root as the first element. */
   listReplies(): Promise<SlackMessage[]>;
 }
+
+export type SlackEventFiring = {
+  channelId: string;
+  message: SlackMessage;
+  matchedMention?: boolean;
+  matchedKeyword?: string;
+};
+
+export interface SlackEventHook {
+  onMessage(event: SlackEventFiring): Promise<void>;
+}

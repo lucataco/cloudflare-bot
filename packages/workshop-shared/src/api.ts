@@ -1351,7 +1351,9 @@ export type GadgetMetadataWithTimestamps = GadgetMetadata & {
 export type AgentRoutineSchedule =
   | { kind: "interval"; everyMs: number }
   | { kind: "calendar"; timeZone: string; freq: "hourly" | "daily" | "weekly"; interval?: number; byDay?: ("SU" | "MO" | "TU" | "WE" | "TH" | "FR" | "SA")[]; hour?: number; minute: number }
-  | { kind: "once"; fireAt: number; timeZone: string };
+  | { kind: "once"; fireAt: number; timeZone: string }
+  | { kind: "slack"; channelId: string; matchKind: "mention" | "keyword" | "message"; keyword?: string }
+  | { kind: "github"; owner: string; repo: string; events: ("pr-opened" | "pr-merged" | "pr-comment" | "review-requested")[] };
 
 export type AgentRoutine = {
   id: string;

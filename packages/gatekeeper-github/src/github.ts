@@ -2,6 +2,9 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
+  HookController,
+  HookInitiator,
+  HookTargetMetadata,
   stripTrailingSlashes,
   type ActionDescription,
   type AccountDescription,
@@ -997,6 +1000,69 @@ export default {
       return new Response(SELF_CLOSING_HTML, {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
+    }
+
+    if (relPath === "/webhook" && req.method === "POST") {
+      let eventType = req.headers.get("X-GitHub-Event");
+      if (!eventType) return new Response("OK");
+      
+      let body = await req.json() as any;
+      let repo = body.repository?.full_name;
+      if (!repo) return new Response("OK");
+      
+      let event: any = null;
+      
+      if (eventType === "pull_request") {
+        if (body.action === "opened") {
+          event = {
+            eventType: "pr-opened",
+            prNumber: body.pull_request?.number,
+            prTitle: body.pull_request?.title,
+            prAuthor: body.pull_request?.user?.login,
+          };
+        } else if (body.action === "closed" && body.pull_request?.merged) {
+          event = {
+            eventType: "pr-merged",
+            prNumber: body.pull_request?.number,
+            prTitle: body.pull_request?.title,
+            prAuthor: body.pull_request?.user?.login,
+          };
+        } else if (body.action === "review_requested") {
+          event = {
+            eventType: "review-requested",
+            prNumber: body.pull_request?.number,
+            prTitle: body.pull_request?.title,
+            prAuthor: body.pull_request?.user?.login,
+          };
+        }
+      } else if (eventType === "issue_comment" && body.issue?.pull_request) {
+        event = {
+          eventType: "pr-comment",
+          prNumber: body.issue?.number,
+          prTitle: body.issue?.title,
+          prAuthor: body.comment?.user?.login,
+        };
+      } else if (eventType === "pull_request_review_comment") {
+        event = {
+          eventType: "pr-comment",
+          prNumber: body.pull_request?.number,
+          prTitle: body.pull_request?.title,
+          prAuthor: body.comment?.user?.login,
+        };
+      }
+      
+      if (event) {
+        try {
+          let driver = (ctx.exports.GitHubEventHookDriver as any).getByName(repo);
+          await driver.deliverEvent({
+            repo,
+            ...event,
+          });
+        } catch (e) {
+        }
+      }
+      
+      return new Response("OK");
     }
 
     return new Response("Not Found", { status: 404 });
@@ -3794,6 +3860,77 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async removeObserver(_id: string): Promise<void> {}
+
+  createEventHookController(owner: string, repo: string, events: string[]): Fetcher<HookController<RpcTarget>> {
+    let hookId = crypto.randomUUID();
+    let props: GitHubEventHookControllerProps = {
+      owner,
+      repo,
+      events,
+      hookId,
+    };
+    return this.ctx.exports.GitHubEventHookController({ props });
+  }
+}
+
+type GitHubEventHookControllerProps = {
+  owner: string;
+  repo: string;
+  events: string[];
+  hookId: string;
+};
+
+@validateRpc()
+export class GitHubEventHookController
+  extends WorkerEntrypoint<Env, GitHubEventHookControllerProps>
+  implements HookController<RpcTarget>
+{
+  async enable(initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata): Promise<void> {
+    let driver = (this.ctx.exports.GitHubEventHookDriver as any).getByName(`${this.ctx.props.owner}/${this.ctx.props.repo}`);
+    await driver.enable(this.ctx.props.hookId, initiator, target, this.ctx.props);
+  }
+
+  async disable(): Promise<void> {
+    let driver = (this.ctx.exports.GitHubEventHookDriver as any).getByName(`${this.ctx.props.owner}/${this.ctx.props.repo}`);
+    await driver.disable(this.ctx.props.hookId);
+  }
+}
+
+@validateRpc()
+export class GitHubEventHookDriver extends DurableObject<Env> {
+  async enable(hookId: string, initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata, props: GitHubEventHookControllerProps): Promise<void> {
+    this.ctx.storage.kv.put(`hook:${hookId}:initiator`, initiator);
+    this.ctx.storage.kv.put(`hook:${hookId}:target`, target);
+    this.ctx.storage.kv.put(`hook:${hookId}:props`, props);
+  }
+
+  async disable(hookId: string): Promise<void> {
+    this.ctx.storage.kv.delete(`hook:${hookId}:initiator`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:target`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:props`);
+  }
+
+  async deliverEvent(event: any): Promise<void> {
+    for (let [key, props] of this.ctx.storage.kv.list<GitHubEventHookControllerProps>({ prefix: "hook:" })) {
+      if (!key.endsWith(":props")) continue;
+      let hookId = key.slice(5, -6);
+      
+      if (!props.events.includes(event.eventType)) continue;
+      
+      let initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RpcTarget>>>(`hook:${hookId}:initiator`);
+      if (!initiator) continue;
+      
+      let { callback, approvalQueue } = await initiator.startHook();
+      await (callback as any).onEvent({
+        owner: props.owner,
+        repo: props.repo,
+        eventType: event.eventType,
+        prNumber: event.prNumber,
+        prTitle: event.prTitle,
+        prAuthor: event.prAuthor,
+      });
+    }
+  }
 }
 
 @validateRpc()

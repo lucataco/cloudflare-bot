@@ -4,7 +4,7 @@ import {
   GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription,
   ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions,
   AccountDescription, SupportedResource, ResourceConfiguratorFrame, ActionKind, Cursor,
-  GatekeeperUserVerifier, ObservationDescription,
+  GatekeeperUserVerifier, ObservationDescription, HookController, HookInitiator, HookTargetMetadata,
   stripTrailingSlashes,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -60,6 +60,7 @@ type Env = Cloudflare.Env & {
   // OAuth app credentials (wrangler secrets / .dev.vars); not in wrangler.jsonc.
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
+  SIGNING_SECRET?: string;
 };
 
 function getBaseUrl(env: Env) {
@@ -269,6 +270,37 @@ export default {
       }
       return new Response(SELF_CLOSING_HTML,
           { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    } else if (relPath === "/events" && req.method === "POST") {
+      let body = await req.json() as any;
+      
+      if (body.type === "url_verification") {
+        return new Response(JSON.stringify({ challenge: body.challenge }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      if (body.type === "event_callback" && body.event?.type === "message") {
+        let event = body.event;
+        if (event.subtype) return new Response("OK");
+        
+        let teamId = body.team_id;
+        if (!teamId) return new Response("OK");
+        
+        try {
+          let driver = (ctx.exports.SlackEventHookDriver as any).getByName(teamId);
+          await driver.deliverMessage({
+            channelId: event.channel,
+            text: event.text || "",
+            user: event.user,
+            ts: event.ts,
+          });
+        } catch (e) {
+        }
+        
+        return new Response("OK");
+      }
+      
+      return new Response("OK");
     } else {
       return new Response("Not Found", { status: 404 });
     }
@@ -1008,9 +1040,103 @@ export class SlackWorkspaceGatekeeperImpl extends DurableObject<Env, SlackWorksp
     this.ctx.storage.kv.delete(this.#observerKey(id));
   }
 
+  async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
+    let hookId = crypto.randomUUID();
+    let account = this.#account();
+    let teamId = await account.getTeamId();
+    let authedUserId = await account.getUserId();
+    let props: SlackEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      teamId,
+      authedUserId,
+      channelId,
+      matchKind,
+      keyword,
+      hookId,
+    };
+    return this.ctx.exports.SlackEventHookController({ props });
+  }
+
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }
   revertAction(): Promise<void> { return unreachableAction(); }
+}
+
+type SlackEventHookControllerProps = {
+  userObjectId: string;
+  teamId: string;
+  authedUserId: string;
+  channelId: string;
+  matchKind: string;
+  keyword?: string;
+  hookId: string;
+};
+
+@validateRpc()
+export class SlackEventHookController
+  extends WorkerEntrypoint<Env, SlackEventHookControllerProps>
+  implements HookController<RpcTarget>
+{
+  async enable(initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata): Promise<void> {
+    let driver = (this.ctx.exports.SlackEventHookDriver as any).getByName(this.ctx.props.teamId);
+    await driver.enable(this.ctx.props.hookId, initiator, target, this.ctx.props);
+  }
+
+  async disable(): Promise<void> {
+    let driver = (this.ctx.exports.SlackEventHookDriver as any).getByName(this.ctx.props.teamId);
+    await driver.disable(this.ctx.props.hookId);
+  }
+}
+
+@validateRpc()
+export class SlackEventHookDriver extends DurableObject<Env> {
+  async enable(hookId: string, initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata, props: SlackEventHookControllerProps): Promise<void> {
+    this.ctx.storage.kv.put(`hook:${hookId}:initiator`, initiator);
+    this.ctx.storage.kv.put(`hook:${hookId}:target`, target);
+    this.ctx.storage.kv.put(`hook:${hookId}:props`, props);
+  }
+
+  async disable(hookId: string): Promise<void> {
+    this.ctx.storage.kv.delete(`hook:${hookId}:initiator`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:target`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:props`);
+  }
+
+  async deliverMessage(message: any): Promise<void> {
+    for (let [key, props] of this.ctx.storage.kv.list<SlackEventHookControllerProps>({ prefix: "hook:" })) {
+      if (!key.endsWith(":props")) continue;
+      let hookId = key.slice(5, -6);
+      
+      if (props.channelId !== message.channelId) continue;
+      
+      let shouldFire = false;
+      let matchedMention = false;
+      let matchedKeyword: string | undefined;
+      
+      if (props.matchKind === "message") {
+        shouldFire = true;
+      } else if (props.matchKind === "mention" && message.text?.includes(`<@${props.authedUserId}>`)) {
+        shouldFire = true;
+        matchedMention = true;
+      } else if (props.matchKind === "keyword" && props.keyword && message.text?.toLowerCase().includes(props.keyword.toLowerCase())) {
+        shouldFire = true;
+        matchedKeyword = props.keyword;
+      }
+      
+      if (!shouldFire) continue;
+      
+      let initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RpcTarget>>>(`hook:${hookId}:initiator`);
+      if (!initiator) continue;
+      
+      let { callback, approvalQueue } = await initiator.startHook();
+      await (callback as any).onMessage({
+        channelId: message.channelId,
+        message: message,
+        matchedMention,
+        matchedKeyword,
+      });
+    }
+  }
 }
 
 type SlackConversationGatekeeperImplProps = {
@@ -1078,6 +1204,23 @@ export class SlackConversationGatekeeperImpl
   }
 
   async removeObserver(_id: string): Promise<void> {}
+
+  async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
+    let hookId = crypto.randomUUID();
+    let account = this.#account();
+    let teamId = await account.getTeamId();
+    let authedUserId = await account.getUserId();
+    let props: SlackEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      teamId,
+      authedUserId,
+      channelId,
+      matchKind,
+      keyword,
+      hookId,
+    };
+    return this.ctx.exports.SlackEventHookController({ props });
+  }
 
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }
@@ -1153,6 +1296,23 @@ export class SlackThreadGatekeeperImpl extends DurableObject<Env, SlackThreadGat
   }
 
   async removeObserver(_id: string): Promise<void> {}
+
+  async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
+    let hookId = crypto.randomUUID();
+    let account = this.#account();
+    let teamId = await account.getTeamId();
+    let authedUserId = await account.getUserId();
+    let props: SlackEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      teamId,
+      authedUserId,
+      channelId,
+      matchKind,
+      keyword,
+      hookId,
+    };
+    return this.ctx.exports.SlackEventHookController({ props });
+  }
 
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }

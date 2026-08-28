@@ -480,3 +480,18 @@ export type GitHubPullRequestMergeOptions = {
    *  current HEAD doesn't match, preventing races with concurrent pushes. */
   expectedHeadSha?: string;
 }
+
+export type GitHubEventType = "pr-opened" | "pr-merged" | "pr-comment" | "review-requested";
+
+export type GitHubEventFiring = {
+  owner: string;
+  repo: string;
+  eventType: GitHubEventType;
+  prNumber: number;
+  prTitle: string;
+  prAuthor: string;
+};
+
+export interface GitHubEventHook {
+  onEvent(event: GitHubEventFiring): Promise<void>;
+}
