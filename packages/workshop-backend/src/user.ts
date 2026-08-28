@@ -75,8 +75,8 @@ export type UserChatContext = {
   profile: AiChatAuthorInfo;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
-  /** If this chat belongs to an agent profile (agent-shell 1:1 chat), the agent's profile. */
   agentProfile?: AgentProfile;
+  group?: Group;
 }
 
 type LoginSessionRecord = {
@@ -730,12 +730,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       profile: this.storage.profile.get()
     };
 
-    // If this chat belongs to an agent profile (1:1 agent chat), include it in the context.
-    // The agent's defaultModelId is used in the frontend picker seed, not as a backend fallback.
     if (workspaceId) {
       let agentProfile = await this.getAgentByWorkspaceId(workspaceId);
       if (agentProfile) {
         result.agentProfile = agentProfile;
+      }
+
+      let group = await this.getGroupByWorkspaceId(workspaceId);
+      if (group) {
+        result.group = group;
       }
     }
 
