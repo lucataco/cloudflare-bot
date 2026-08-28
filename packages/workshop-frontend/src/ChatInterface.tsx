@@ -75,6 +75,7 @@ import {
   ActionLogEntry,
   AiChatAuthorInfo,
   AgentProfile,
+  Group,
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
@@ -1916,6 +1917,7 @@ export const ChatInput = ({
   showThinkingTraces = true,
   onToggleThinkingTraces,
   workspaceId,
+  agentId,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1973,6 +1975,10 @@ export const ChatInput = ({
    * Workspace ID for filtering connected accounts to only those assigned to this workspace's agent.
    */
   workspaceId?: string;
+  /**
+   * If set, use this specific agent profile to filter bindings (overrides workspace lookup).
+   */
+  agentId?: string;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
   /** Open the pre-approval dialog (owned by the parent). */
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
@@ -3741,6 +3747,7 @@ export const ChatInput = ({
         getOverseer={getOverseer}
         onCreated={handleAttachCreated}
         workspaceId={workspaceId}
+        agentId={agentId}
       />
     </div>
   );
@@ -4738,6 +4745,9 @@ function ChatInterface({
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
+  const [currentGroup, setCurrentGroup] = useState<Group | null>(null);
+  const [groupMemberAgents, setGroupMemberAgents] = useState<AgentProfile[]>([]);
+  const [selectedMemberAgentId, setSelectedMemberAgentId] = useState<string | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -5292,7 +5302,20 @@ function ChatInterface({
         );
       }
     }
-  }, [selectedChatId, availableModels, currentMessages, activeAgent]);
+  }, [selectedChatId, availableModels, currentMessages, activeAgent, currentAgentProfile]);
+
+  // Update currentAgentProfile when selected member changes in a group
+  useEffect(() => {
+    if (currentGroup && selectedMemberAgentId && groupMemberAgents.length > 0) {
+      const selectedMember = groupMemberAgents.find(a => a.id === selectedMemberAgentId);
+      if (selectedMember) {
+        setCurrentAgentProfile(selectedMember);
+        if (selectedChatId === null) {
+          setSelectedModel(getInitialSelectedModel(availableModels, selectedMember));
+        }
+      }
+    }
+  }, [selectedMemberAgentId, currentGroup, groupMemberAgents, selectedChatId, availableModels]);
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {
@@ -5743,13 +5766,37 @@ function ChatInterface({
 
           // Fetch agent profile if this workspace is bound to an agent
           let agentProfile: AgentProfile | null = null;
+          let group: Group | null = null;
+          let memberAgents: AgentProfile[] = [];
+          
           if (workspaceId) {
             try {
               agentProfile = await authenticatedApi.getAgentByWorkspaceId(workspaceId);
               setCurrentAgentProfile(agentProfile);
             } catch (err) {
-              // Not a critical error; workspace may not be bound to an agent
               console.debug("No agent profile for workspace", workspaceId);
+            }
+
+            try {
+              group = await authenticatedApi.getGroupByWorkspaceId(workspaceId);
+              if (group) {
+                setCurrentGroup(group);
+                const agents = await Promise.all(
+                  group.memberAgentIds.map(id => 
+                    authenticatedApi.listAgents().then(all => all.find(a => a.id === id))
+                  )
+                );
+                memberAgents = agents.filter((a): a is AgentProfile => a !== undefined);
+                setGroupMemberAgents(memberAgents);
+                if (memberAgents.length > 0) {
+                  const firstMemberId = memberAgents[0].id;
+                  setSelectedMemberAgentId(firstMemberId);
+                  agentProfile = memberAgents[0];
+                  setCurrentAgentProfile(agentProfile);
+                }
+              }
+            } catch (err) {
+              console.debug("No group for workspace", workspaceId);
             }
           }
 
@@ -5937,12 +5984,10 @@ function ChatInterface({
 
     try {
       if (selectedChatId === null) {
-        // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments, formats);
+            message, model, capsules, attachments, formats, selectedMemberAgentId || undefined);
         onNavigateToChatRef.current(newChatId);
       } else {
-        // Send message to existing chat.
         await overseer.sendChatMessage(
           selectedChatId,
           message,
@@ -5950,6 +5995,7 @@ function ChatInterface({
           capsules || undefined,
           attachments || undefined,
           formats,
+          selectedMemberAgentId || undefined,
         );
       }
     } catch (err) {
@@ -5973,7 +6019,7 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
       const newChatId = await overseer.newChat(
-          message, model, capsules, attachments, formats);
+          message, model, capsules, attachments, formats, selectedMemberAgentId || undefined);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
@@ -7271,7 +7317,7 @@ function ChatInterface({
           <ChatInput
             key={workspaceId}
             createCapsuleGatekeeper={(accountId, url) =>
-              overseer.newGatekeeper(accountId, url)
+              overseer.newGatekeeper(accountId, url, selectedMemberAgentId || undefined)
             }
             getOverseer={getOverseer}
             onSend={handleNewChatSend}
@@ -7287,6 +7333,7 @@ function ChatInterface({
               ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
               : undefined}
             workspaceId={workspaceId}
+            agentId={selectedMemberAgentId || undefined}
           />
           {/* Reserve the same height as the token/cost row to avoid layout shift. */}
           <div aria-hidden className="min-h-[1rem]" />
@@ -7449,6 +7496,24 @@ function ChatInterface({
                   <div
                     className={`flex flex-col px-3 pt-5 sm:px-6 sm:pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
                   >
+                    {/* Member picker for groups */}
+                    {currentGroup && groupMemberAgents.length > 0 && (
+                      <div className="mb-4 flex items-center gap-3 rounded-lg border border-kumo-border bg-kumo-elevated px-4 py-2.5">
+                        <span className="text-sm font-medium text-kumo-default">Active member:</span>
+                        <select
+                          value={selectedMemberAgentId || ''}
+                          onChange={(e) => setSelectedMemberAgentId(e.target.value)}
+                          className="flex-1 rounded border border-kumo-border bg-kumo-base px-3 py-1.5 text-sm text-kumo-default focus:border-kumo-brand focus:outline-none focus:ring-1 focus:ring-kumo-brand"
+                        >
+                          {groupMemberAgents.map((agent) => (
+                            <option key={agent.id} value={agent.id}>
+                              {agent.name} - {agent.title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
                     {isLoadingEarlier && (
                       <div className="mx-auto mb-6 text-[12px] leading-4 font-medium text-kumo-inactive">
                         Loading earlier messages…
@@ -8244,7 +8309,7 @@ function ChatInterface({
                     key={`${workspaceId}:${selectedChatId}`}
                     chatKey={selectedChatId}
                     createCapsuleGatekeeper={(accountId, url) =>
-                      overseer.newGatekeeper(accountId, url)
+                      overseer.newGatekeeper(accountId, url, selectedMemberAgentId || undefined)
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
@@ -8320,6 +8385,8 @@ function ChatInterface({
                         </div>
                       );
                     })()}
+                    workspaceId={workspaceId}
+                    agentId={selectedMemberAgentId || undefined}
                   />
 
                   {/* Token / cost summary. */}
@@ -8439,6 +8506,7 @@ function ChatInterface({
         getOverseer={getOverseer}
         onCreated={handleConnectionCreated}
         workspaceId={workspaceId}
+        agentId={selectedMemberAgentId || undefined}
         initialVendorId={connectionAccept?.vendorId}
         initialResourceUrl={connectionAccept?.resourceUrl}
         initialResourceUrlPattern={connectionAccept?.resourceUrlPattern}

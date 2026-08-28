@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, Group, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -380,6 +380,60 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null> {
     return retryOnDoReset(() => this.#user.getAgentByWorkspaceId(workspaceId));
+  }
+
+  async listGroups(): Promise<Group[]> {
+    return retryOnDoReset(() => this.#user.listGroups());
+  }
+
+  async createGroup(name: string, memberAgentIds: string[]): Promise<Group> {
+    let groupId = crypto.randomUUID();
+    let workspaceId = this.overseers.newUniqueId().toString();
+
+    await this.#user.newGadget(workspaceId, name);
+
+    let group = await this.#user.createGroupRecord(
+      groupId,
+      workspaceId,
+      name,
+      memberAgentIds
+    );
+
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "group_created",
+      user_id: this.#userId.toString(),
+      group_id: groupId,
+      workspace_id: workspaceId,
+    });
+
+    return group;
+  }
+
+  async updateGroup(
+    id: string,
+    updates: {
+      name?: string;
+      memberAgentIds?: string[];
+    }
+  ): Promise<Group> {
+    let group = await this.#user.updateGroupRecord(id, updates);
+
+    if (updates.name) {
+      await this.#user.updateTitle(group.workspaceId, updates.name);
+    }
+
+    return group;
+  }
+
+  async deleteGroup(id: string): Promise<void> {
+    let workspaceId = await this.#user.deleteGroupRecord(id);
+    if (workspaceId) {
+      await this.#user.deleteGadget(workspaceId);
+    }
+  }
+
+  async getGroupByWorkspaceId(workspaceId: string): Promise<Group | null> {
+    return retryOnDoReset(() => this.#user.getGroupByWorkspaceId(workspaceId));
   }
 
   async listOutputFormats(): Promise<OutputFormatOffer[]> {

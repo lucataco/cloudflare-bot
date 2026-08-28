@@ -62,6 +62,10 @@ export interface ResourcePickerProps {
    * Workspace ID for filtering connected accounts to only those assigned to this workspace's agent.
    */
   workspaceId?: string
+  /**
+   * If set, use this specific agent profile to filter bindings (overrides workspace lookup).
+   */
+  agentId?: string
   compact?: boolean
   /**
    * Room the caller has measured for the list. Applied on top of the built-in cap, never instead of
@@ -98,7 +102,7 @@ function missingResourceGrants(account: AccountDescription, resource: SupportedR
 
 export default function ResourcePicker({
   authenticatedApi, searchText, onSelectAccount, onRefine, onReadyChange, compact,
-  maxHeight: maxHeightOverride, style, activeIndex, onItems, activateRef, workspaceId,
+  maxHeight: maxHeightOverride, style, activeIndex, onItems, activateRef, workspaceId, agentId,
 }: ResourcePickerProps) {
   const toasts = useKumoToastManager()
 
@@ -146,7 +150,7 @@ export default function ResourcePicker({
       },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(
-      subscriber, workspaceId ? { workspaceId } : undefined)
+      subscriber, workspaceId ? { workspaceId, agentId } : undefined)
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)

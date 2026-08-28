@@ -161,6 +161,8 @@ export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
   includeForcedAutoProvisionedAccounts?: boolean;
   /** If set, filter to only accounts assigned to this workspace's agent profile. */
   workspaceId?: string;
+  /** If set, use this specific agent profile to filter bindings (overrides workspace lookup). */
+  agentId?: string;
 };
 
 /**
@@ -499,6 +501,12 @@ export interface AuthenticatedApi extends RpcTarget {
    * the agent's defaultModelId and description into the chat.
    */
   getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null>;
+
+  listGroups(): Promise<Group[]>;
+  createGroup(name: string, memberAgentIds: string[]): Promise<Group>;
+  updateGroup(id: string, updates: { name?: string; memberAgentIds?: string[]; }): Promise<Group>;
+  deleteGroup(id: string): Promise<void>;
+  getGroupByWorkspaceId(workspaceId: string): Promise<Group | null>;
 
   /**
    * Open an existing gadget.
@@ -1368,6 +1376,15 @@ export type AgentProfile = {
   updated: Date;
 };
 
+export type Group = {
+  id: string;
+  name: string;
+  memberAgentIds: string[];
+  workspaceId: string;
+  created: Date;
+  updated: Date;
+};
+
 /**
  * The icons an output format may be drawn with. A closed set because we want them to look consistent.
  * The glyphs themselves live in the frontend, so only these keys ever cross the wire.
@@ -1832,8 +1849,10 @@ export interface Overseer extends RpcTarget {
    *
    * The new gatekeeper is a workspace-level workpiece; it is not bound into any gadget's `env` by
    * default. Use GadgetClient.bind() / bindWithSuggestedName() to expose it to a gadget.
+   *
+   * `agentId` optionally specifies which agent profile to use for binding validation.
    */
-  newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+  newGatekeeper(accountId: number, resourceUrl: string, agentId?: string): Promise<GatekeeperClient<any> | null>;
 
   /**
    * Create a new gatekeeper for an AI model binding. The model can be any returned by
@@ -2013,7 +2032,7 @@ export interface Overseer extends RpcTarget {
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-          formats?: MessageFormatRef[]): Promise<number>;
+          formats?: MessageFormatRef[], agentId?: string): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2028,7 +2047,7 @@ export interface Overseer extends RpcTarget {
    */
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                  formats?: MessageFormatRef[]): Promise<void>;
+                  formats?: MessageFormatRef[], agentId?: string): Promise<void>;
 
   /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to

@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile, Group } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -75,8 +75,8 @@ export type UserChatContext = {
   profile: AiChatAuthorInfo;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
-  /** If this chat belongs to an agent profile (agent-shell 1:1 chat), the agent's profile. */
   agentProfile?: AgentProfile;
+  group?: Group;
 }
 
 type LoginSessionRecord = {
@@ -109,6 +109,15 @@ type AgentRecord = {
   defaultModelId: string | null;
   workspaceId: string;
   defaultBindings?: number[];
+  created: Date;
+  updated: Date;
+};
+
+type GroupRecord = {
+  id: string;
+  name: string;
+  memberAgentIds: string[];
+  workspaceId: string;
   created: Date;
   updated: Date;
 };
@@ -176,6 +185,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: record => record.profile.id,
       }),
       agents: collection<AgentRecord>()({
+        primaryKey: "id"
+      }),
+      groups: collection<GroupRecord>()({
         primaryKey: "id"
       }),
       gadgets: collection<GadgetRecord>()({
@@ -711,19 +723,29 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** DO NOT MAKE PUBLIC -- returns API keys. Pure read: call sites replay it across DO resets
    * via retryOnDoReset, so it must stay free of writes and side effects. */
-  async getChatContext(modelId: string | null, workspaceId?: string): Promise<UserChatContext> {
+  async getChatContext(modelId: string | null, workspaceId?: string, agentId?: string): Promise<UserChatContext> {
     let gwConfig = getAiGatewayConfig(this.env);
 
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
 
-    // If this chat belongs to an agent profile (1:1 agent chat), include it in the context.
-    // The agent's defaultModelId is used in the frontend picker seed, not as a backend fallback.
-    if (workspaceId) {
+    if (agentId) {
+      let agentProfile = await this.getAgent(agentId);
+      if (agentProfile) {
+        result.agentProfile = agentProfile;
+      }
+    } else if (workspaceId) {
       let agentProfile = await this.getAgentByWorkspaceId(workspaceId);
       if (agentProfile) {
         result.agentProfile = agentProfile;
+      }
+    }
+
+    if (workspaceId) {
+      let group = await this.getGroupByWorkspaceId(workspaceId);
+      if (group) {
+        result.group = group;
       }
     }
 
@@ -875,8 +897,77 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let workspaceId = agent.workspaceId;
     
-    // Delete the agent record
     this.storage.agents.delete(id);
+    
+    return workspaceId;
+  }
+
+  async listGroups(): Promise<Group[]> {
+    let groups = Array.from(this.storage.groups.list());
+    groups.sort((a, b) => b.created.getTime() - a.created.getTime());
+    return groups;
+  }
+
+  async createGroupRecord(
+    groupId: string,
+    workspaceId: string,
+    name: string,
+    memberAgentIds: string[]
+  ): Promise<Group> {
+    let now = new Date();
+    let group: GroupRecord = {
+      id: groupId,
+      name,
+      memberAgentIds,
+      workspaceId,
+      created: now,
+      updated: now,
+    };
+    
+    this.storage.groups.put(group);
+    return group;
+  }
+
+  async updateGroupRecord(
+    id: string,
+    updates: {
+      name?: string;
+      memberAgentIds?: string[];
+    }
+  ): Promise<Group> {
+    let group = this.storage.groups.get(id);
+    if (!group) {
+      throw new Error(`Group not found: ${id}`);
+    }
+
+    let updated: GroupRecord = {
+      ...group,
+      ...updates,
+      updated: new Date(),
+    };
+
+    this.storage.groups.put(updated);
+    return updated;
+  }
+
+  async getGroupByWorkspaceId(workspaceId: string): Promise<Group | null> {
+    for (let group of this.storage.groups.list()) {
+      if (group.workspaceId === workspaceId) {
+        return group;
+      }
+    }
+    return null;
+  }
+
+  async deleteGroupRecord(id: string): Promise<string | null> {
+    let group = this.storage.groups.get(id);
+    if (!group) {
+      throw new Error(`Group not found: ${id}`);
+    }
+
+    let workspaceId = group.workspaceId;
+    
+    this.storage.groups.delete(id);
     
     return workspaceId;
   }
@@ -1529,7 +1620,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     
     let allowedAccountIds: Set<number> | undefined;
     if (filter?.workspaceId) {
-      let agentProfile = await this.getAgentByWorkspaceId(filter.workspaceId);
+      let agentProfile = filter.agentId
+        ? await this.getAgent(filter.agentId)
+        : await this.getAgentByWorkspaceId(filter.workspaceId);
       if (agentProfile?.defaultBindings !== undefined) {
         allowedAccountIds = new Set(agentProfile.defaultBindings);
       }
