@@ -927,10 +927,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return routines;
   }
 
-  async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<AgentRoutine> {
+  async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused: boolean = true): Promise<AgentRoutine> {
     let agent = this.storage.agents.get(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (schedule.kind === "interval" && schedule.everyMs < 60000) {
+      throw new Error("Interval must be at least 60 seconds");
     }
     let now = new Date();
     let routine: RoutineRecord = {
@@ -939,7 +942,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       name,
       prompt,
       schedule,
-      paused: true,
+      paused,
       created: now,
       updated: now,
     };

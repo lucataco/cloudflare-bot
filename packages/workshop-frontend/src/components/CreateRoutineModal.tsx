@@ -62,7 +62,7 @@ export default function CreateRoutineModal({
 
     setCreating(true)
     try {
-      await authenticatedApi.createRoutine(agent.id, name, prompt, schedule)
+      await authenticatedApi.createRoutine(agent.id, name, prompt, schedule, false)
       onCreated()
     } catch (err) {
       console.error('Failed to create routine:', err)

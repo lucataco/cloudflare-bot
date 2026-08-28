@@ -386,15 +386,54 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return retryOnDoReset(() => this.#user.listRoutines(agentId));
   }
 
-  async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<AgentRoutine> {
-    return retryOnDoReset(() => this.#user.createRoutine(agentId, name, prompt, schedule));
+  async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused: boolean = true): Promise<AgentRoutine> {
+    let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+    if (!agent) throw new Error("Agent not found");
+    let routine = await retryOnDoReset(() => this.#user.createRoutine(agentId, name, prompt, schedule, paused));
+    if (!paused) {
+      let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+      let scheduleId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+      await this.#user.setRoutineScheduleId(routine.id, scheduleId);
+      routine.scheduleId = scheduleId;
+    }
+    return routine;
   }
 
   async updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine> {
-    return retryOnDoReset(() => this.#user.updateRoutine(agentId, routineId, updates));
+    let oldRoutine = await this.#user.getRoutineById(routineId);
+    if (!oldRoutine || oldRoutine.agentId !== agentId) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    if (updates.schedule?.kind === "interval" && updates.schedule.everyMs < 60000) {
+      throw new Error("Interval must be at least 60 seconds");
+    }
+    let routine = await retryOnDoReset(() => this.#user.updateRoutine(agentId, routineId, updates));
+    let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+    if (!agent) return routine;
+    let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+    if (updates.paused !== undefined && oldRoutine.paused !== routine.paused) {
+      if (routine.paused && routine.scheduleId) {
+        await overseer.unregisterRoutine(routine.scheduleId);
+        await this.#user.setRoutineScheduleId(routine.id, undefined);
+        routine.scheduleId = undefined;
+      } else if (!routine.paused) {
+        let scheduleId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+        await this.#user.setRoutineScheduleId(routine.id, scheduleId);
+        routine.scheduleId = scheduleId;
+      }
+    }
+    return routine;
   }
 
   async deleteRoutine(agentId: string, routineId: string): Promise<void> {
+    let routine = await this.#user.getRoutineById(routineId);
+    if (routine && routine.scheduleId) {
+      let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+      if (agent) {
+        let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+        await overseer.unregisterRoutine(routine.scheduleId);
+      }
+    }
     return retryOnDoReset(() => this.#user.deleteRoutine(agentId, routineId));
   }
 
