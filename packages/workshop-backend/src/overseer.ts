@@ -10266,6 +10266,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
+  async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+    if (!this.env.COMPUTER_SESSION) {
+      throw new Error("Computer sessions are not available");
+    }
+    const id = this.env.COMPUTER_SESSION.idFromName(agentId);
+    const stub = this.env.COMPUTER_SESSION.get(id);
+    return stub as any;
+  }
+
+  async computerScreenshot(agentId: string): Promise<Uint8Array> {
+    const session = await this.getComputerSession(agentId);
+    return await session.screenshot();
+  }
+
   async stopAgent(chatId: number): Promise<void> {
     this.impl.cancelAgent(chatId);
   }
@@ -10791,6 +10805,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async finalizeChatDraft(_chatId: number): Promise<void> { this.#deny(); }
   async discardChatDraftChanges(_chatId: number): Promise<void> { this.#deny(); }
   async deleteChat(_chatId: number): Promise<void> { this.#deny(); }
+  async getComputerSession(_agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+    this.#deny();
+  }
+  async computerScreenshot(_agentId: string): Promise<Uint8Array> {
+    this.#deny();
+  }
   async stopAgent(_chatId: number): Promise<void> { this.#deny(); }
   async retryAgent(_chatId: number, _modelId: string): Promise<void> { this.#deny(); }
   async subscribeToConsoleLogs(_subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {

@@ -2162,6 +2162,18 @@ export interface Overseer extends RpcTarget {
   deleteChat(chatId: number): Promise<void>;
 
   /**
+   * Get computer session for the specified agent. Returns a stub to the agent's computer session DO.
+   * The computer session is keyed by agent ID and persists browser state (cookies, navigation).
+   * Only available when agentShell feature flag is enabled.
+   */
+  getComputerSession(agentId: string): Promise<RpcStub<ComputerSession>>;
+
+  /**
+   * Request screenshot from the agent's computer. Returns PNG image data.
+   */
+  computerScreenshot(agentId: string): Promise<Uint8Array>;
+
+  /**
    * Request that any ongoing LLM session in the given chat immediately stop.
    *
    * If an LLM is running, the session is canceled subscribers will receive a metadata update
@@ -3650,6 +3662,15 @@ export type PreApprovableAction = {
   /** Vendor of the gatekeeper holding this connection. Absent for vendorless gatekeepers. */
   vendorId?: string;
 };
+
+export interface ComputerSession extends RpcTarget {
+  navigate(url: string): Promise<void>;
+  screenshot(): Promise<Uint8Array>;
+  click(x: number, y: number): Promise<void>;
+  type(text: string): Promise<void>;
+  getState(): Promise<{ agentId: string; currentUrl: string | null; lastActivityAt: Date }>;
+  close(): Promise<void>;
+}
 
 // =======================================================================================
 // Blueprint types

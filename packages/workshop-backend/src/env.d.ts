@@ -45,6 +45,9 @@ declare global {
       >;
       FRONTEND_ERROR_RATE_LIMITER?: RateLimit;
 
+      // Computer session for per-agent desktop (behind agentShell flag).
+      COMPUTER_SESSION: DurableObjectNamespace<import("./computer-session").ComputerSessionImpl>;
+
       // The Browser Run binding (BROWSER) used to render Gadget exports is intentionally NOT
       // redeclared here: wrangler's generated types make it required, and TypeScript 7 rejects
       // weakening it to optional in a merged augmentation. Self-hosted deployments may omit the
