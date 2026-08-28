@@ -8178,9 +8178,13 @@ class OverseerImpl implements AgentHooks {
     return targets?.size === 1 ? targets.values().next().value : undefined;
   }
 
-  restore(params: OverseerRestoreParams): Fetcher<DurableObject> | Fetcher<RestoreForgerEntrypoint> {
+  restore(params: OverseerRestoreParams): any {
+    if (params.type === "routine") {
+      return new NativeRpcStub(new RoutineCallbackTarget(this, params.routineId));
+    }
+
     if (params.type !== "gadget") {
-      throw new TypeError("Unknown restore params type: " + params.type);
+      throw new TypeError("Unknown restore params type: " + (params as any).type);
     }
 
     if (params.codeId) {
@@ -8195,6 +8199,119 @@ class OverseerImpl implements AgentHooks {
     // gadgetId; they resolve to the default gadget. If that gadget was deleted (or there is no
     // default), this fails with an explicit error rather than silently retargeting.
     return this.getGadgetFacetFetcher(this.resolveGadgetId(params.gadgetId));
+  }
+
+  async handleRoutineFire(routineId: string): Promise<void> {
+    if (!this.ownerId) throw new Error("No workspace owner");
+    let userDo = this.#ownerUserDo();
+    let routine = await userDo.getRoutineById(routineId);
+    if (!routine) {
+      this.logger.warn("Routine not found for fire", { event: "routine.fire.notfound" });
+      return;
+    }
+    let agent = await userDo.getAgentByWorkspaceId(this.ctx.id.toString());
+    if (!agent || agent.id !== routine.agentId) {
+      this.logger.warn("Routine agent mismatch", { event: "routine.fire.agent_mismatch" });
+      return;
+    }
+    let userMeta = await retryOnDoReset(
+      () => userDo.getChatContext(agent.defaultModelId, this.ctx.id.toString(), agent.id), this.logger);
+    await this.newChat(userDo, userMeta, routine.prompt, undefined, undefined, undefined, undefined, undefined);
+  }
+
+  async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number }): Promise<number> {
+    let ambientGatekeepers = [...this.storage.gatekeepers.list()].filter(gk => gk.creationSpec?.type === "ambient");
+    let schedulerGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
+    if (!schedulerGk) {
+      throw new Error("Scheduler gatekeeper not available");
+    }
+    let session = this.getGatekeeperFacet(schedulerGk.id);
+    let callback = await this.ctx.restore({ type: "routine", routineId });
+    let beforeHookCount = [...this.storage.boundHooks.list()].length;
+    if (schedule.kind === "interval") {
+      await (session as any).every(schedule.everyMs!, callback, {
+        title: name,
+        description: `Routine: ${prompt.slice(0, 100)}`,
+      });
+    } else if (schedule.kind === "calendar") {
+      await (session as any).calendarAt({
+        timeZone: schedule.timeZone!,
+        freq: schedule.freq!,
+        minute: schedule.minute!,
+        ...(schedule.freq !== "hourly" ? { hour: schedule.hour } : {}),
+        ...(schedule.byDay ? { byDay: schedule.byDay } : {}),
+      }, callback, {
+        title: name,
+        description: `Routine: ${prompt.slice(0, 100)}`,
+      });
+    } else if (schedule.kind === "once") {
+      await (session as any).runAt(schedule.fireAt!, callback, {
+        title: name,
+        description: `Routine: ${prompt.slice(0, 100)}`,
+      });
+    } else {
+      throw new Error(`Unknown schedule kind: ${schedule.kind}`);
+    }
+    let hooks = [...this.storage.boundHooks.list()];
+    let hook = hooks[hooks.length - 1];
+    if (!hook || hooks.length <= beforeHookCount) {
+      throw new Error("Hook not created by scheduler");
+    }
+    await this.enableHook(hook.id);
+    return hook.id;
+  }
+
+  async unregisterRoutine(hookId: number): Promise<void> {
+    let hook = this.storage.boundHooks.get(hookId);
+    if (hook) {
+      await this.disableHook(hookId);
+      await this.deleteHook(hookId);
+    }
+  }
+
+  private async enableHook(id: number): Promise<void> {
+    let record = this.storage.boundHooks.get(id);
+    if (!record) throw new Error("Invalid hook ID.");
+    if (!record.enabled) {
+      let props = {
+        overseerId: this.ctx.id.toString(),
+        hookId: id,
+      };
+      await record.controller.enable(
+        this.ctx.exports.GatekeeperHookLoopback({ props }) as unknown as Fetcher<HookInitiator<RpcTarget>>,
+        {
+          workspaceId: this.ctx.id.toString(),
+          ...(record.gadgetId !== undefined ? { gadgetId: record.gadgetId } : {}),
+        }
+      );
+      record.enabled = true;
+      this.storage.boundHooks.put(record);
+    }
+  }
+
+  private async disableHook(id: number): Promise<void> {
+    let record = this.storage.boundHooks.get(id);
+    if (!record) throw new Error("Invalid hook ID.");
+    if (record.enabled) {
+      await record.controller.disable();
+      record.enabled = false;
+      this.storage.boundHooks.put(record);
+    }
+  }
+}
+
+class RoutineCallbackTarget extends NativeRpcTarget {
+  #impl: OverseerImpl;
+  #routineId: string;
+
+  constructor(impl: OverseerImpl, routineId: string) {
+    super();
+    this.#impl = impl;
+    this.#routineId = routineId;
+  }
+
+  async onSchedule(): Promise<void> {
+    await this.#impl.handleRoutineFire(this.#routineId);
   }
 }
 
@@ -8218,6 +8335,9 @@ type OverseerRestoreParams = {
   // stub is persisted with these params as its self-token -- which, `codeId` no longer matching,
   // now restores through the gadget's [restore]() method.
   codeId?: string;
+} | {
+  type: "routine";
+  routineId: string;
 };
 
 export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
@@ -8739,6 +8859,18 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   [restore](params: OverseerRestoreParams): any {
     return this.impl.restore(params);
+  }
+
+  async routineCallback(routineId: string): Promise<void> {
+    return this.impl.handleRoutineFire(routineId);
+  }
+
+  async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number }): Promise<number> {
+    return this.impl.registerRoutine(routineId, name, prompt, schedule);
+  }
+
+  async unregisterRoutine(hookId: number): Promise<void> {
+    return this.impl.unregisterRoutine(hookId);
   }
 }
 

@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile, Group } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -122,6 +122,18 @@ type GroupRecord = {
   updated: Date;
 };
 
+type RoutineRecord = {
+  id: string;
+  agentId: string;
+  name: string;
+  prompt: string;
+  schedule: AgentRoutineSchedule;
+  paused: boolean;
+  hookId?: number;
+  created: Date;
+  updated: Date;
+};
+
 type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
@@ -188,6 +200,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: "id"
       }),
       groups: collection<GroupRecord>()({
+        primaryKey: "id"
+      }),
+      routines: collection<RoutineRecord>()({
         primaryKey: "id"
       }),
       gadgets: collection<GadgetRecord>()({
@@ -900,6 +915,81 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.agents.delete(id);
     
     return workspaceId;
+  }
+
+  async listRoutines(agentId: string): Promise<AgentRoutine[]> {
+    let agent = this.storage.agents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    let routines = Array.from(this.storage.routines.list()).filter(r => r.agentId === agentId);
+    routines.sort((a, b) => b.created.getTime() - a.created.getTime());
+    return routines;
+  }
+
+  async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused: boolean = true): Promise<AgentRoutine> {
+    let agent = this.storage.agents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (schedule.kind === "interval" && schedule.everyMs < 60000) {
+      throw new Error("Interval must be at least 60 seconds");
+    }
+    let now = new Date();
+    let routine: RoutineRecord = {
+      id: crypto.randomUUID(),
+      agentId,
+      name,
+      prompt,
+      schedule,
+      paused,
+      created: now,
+      updated: now,
+    };
+    this.storage.routines.put(routine);
+    return routine;
+  }
+
+  async updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine> {
+    let routine = this.storage.routines.get(routineId);
+    if (!routine || routine.agentId !== agentId) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    let updated: RoutineRecord = {
+      ...routine,
+      name: updates.name ?? routine.name,
+      prompt: updates.prompt ?? routine.prompt,
+      schedule: updates.schedule ?? routine.schedule,
+      paused: updates.paused ?? routine.paused,
+      updated: new Date(),
+    };
+    this.storage.routines.put(updated);
+    return updated;
+  }
+
+  async deleteRoutine(agentId: string, routineId: string): Promise<void> {
+    let routine = this.storage.routines.get(routineId);
+    if (!routine || routine.agentId !== agentId) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    this.storage.routines.delete(routineId);
+  }
+
+  async setRoutineHookId(routineId: string, hookId: number | undefined): Promise<void> {
+    let routine = this.storage.routines.get(routineId);
+    if (!routine) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    let updated: RoutineRecord = {
+      ...routine,
+      hookId,
+      updated: new Date(),
+    };
+    this.storage.routines.put(updated);
+  }
+
+  async getRoutineById(routineId: string): Promise<RoutineRecord | undefined> {
+    return this.storage.routines.get(routineId);
   }
 
   async listGroups(): Promise<Group[]> {

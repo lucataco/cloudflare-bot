@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, Group, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -384,6 +384,61 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null> {
     return retryOnDoReset(() => this.#user.getAgentByWorkspaceId(workspaceId));
+  }
+
+  async listRoutines(agentId: string): Promise<AgentRoutine[]> {
+    return retryOnDoReset(() => this.#user.listRoutines(agentId));
+  }
+
+  async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused: boolean = true): Promise<AgentRoutine> {
+    let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+    if (!agent) throw new Error("Agent not found");
+    let routine = await retryOnDoReset(() => this.#user.createRoutine(agentId, name, prompt, schedule, paused));
+    if (!paused) {
+      let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+      let hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+      await this.#user.setRoutineHookId(routine.id, hookId);
+      routine.hookId = hookId;
+    }
+    return routine;
+  }
+
+  async updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine> {
+    let oldRoutine = await this.#user.getRoutineById(routineId);
+    if (!oldRoutine || oldRoutine.agentId !== agentId) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    if (updates.schedule?.kind === "interval" && updates.schedule.everyMs < 60000) {
+      throw new Error("Interval must be at least 60 seconds");
+    }
+    let routine = await retryOnDoReset(() => this.#user.updateRoutine(agentId, routineId, updates));
+    let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+    if (!agent) return routine;
+    let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+    if (updates.paused !== undefined && oldRoutine.paused !== routine.paused) {
+      if (routine.paused && routine.hookId !== undefined) {
+        await overseer.unregisterRoutine(routine.hookId);
+        await this.#user.setRoutineHookId(routine.id, undefined);
+        routine.hookId = undefined;
+      } else if (!routine.paused) {
+        let hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+        await this.#user.setRoutineHookId(routine.id, hookId);
+        routine.hookId = hookId;
+      }
+    }
+    return routine;
+  }
+
+  async deleteRoutine(agentId: string, routineId: string): Promise<void> {
+    let routine = await this.#user.getRoutineById(routineId);
+    if (routine && routine.hookId !== undefined) {
+      let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+      if (agent) {
+        let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+        await overseer.unregisterRoutine(routine.hookId);
+      }
+    }
+    return retryOnDoReset(() => this.#user.deleteRoutine(agentId, routineId));
   }
 
   async listGroups(): Promise<Group[]> {
