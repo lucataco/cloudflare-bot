@@ -1085,4 +1085,52 @@ export class GitHubApi {
       options,
     );
   }
+
+  async createWebhook(
+    owner: string,
+    repo: string,
+    config: {
+      url: string;
+      content_type?: string;
+      secret?: string;
+    },
+    events: string[],
+  ): Promise<{ id: number }> {
+    return (await this.#request<{ id: number }>(
+      "POST",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`,
+      {
+        body: {
+          name: "web",
+          active: true,
+          events,
+          config: {
+            ...config,
+            content_type: config.content_type ?? "json",
+          },
+        },
+      },
+    )).data;
+  }
+
+  async listWebhooks(
+    owner: string,
+    repo: string,
+  ): Promise<Array<{ id: number; config: { url: string } }>> {
+    return (await this.#request<Array<{ id: number; config: { url: string } }>>(
+      "GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`,
+    )).data;
+  }
+
+  async deleteWebhook(
+    owner: string,
+    repo: string,
+    hookId: number,
+  ): Promise<void> {
+    await this.#request<void>(
+      "DELETE",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks/${hookId}`,
+    );
+  }
 }
