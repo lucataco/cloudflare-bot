@@ -1917,6 +1917,7 @@ export const ChatInput = ({
   showThinkingTraces = true,
   onToggleThinkingTraces,
   workspaceId,
+  agentId,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1974,6 +1975,10 @@ export const ChatInput = ({
    * Workspace ID for filtering connected accounts to only those assigned to this workspace's agent.
    */
   workspaceId?: string;
+  /**
+   * If set, use this specific agent profile to filter bindings (overrides workspace lookup).
+   */
+  agentId?: string;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
   /** Open the pre-approval dialog (owned by the parent). */
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
@@ -3742,7 +3747,7 @@ export const ChatInput = ({
         getOverseer={getOverseer}
         onCreated={handleAttachCreated}
         workspaceId={workspaceId}
-        agentId={selectedMemberAgentId || undefined}
+        agentId={agentId}
       />
     </div>
   );
@@ -7312,7 +7317,7 @@ function ChatInterface({
           <ChatInput
             key={workspaceId}
             createCapsuleGatekeeper={(accountId, url) =>
-              overseer.newGatekeeper(accountId, url)
+              overseer.newGatekeeper(accountId, url, selectedMemberAgentId || undefined)
             }
             getOverseer={getOverseer}
             onSend={handleNewChatSend}
@@ -7328,6 +7333,7 @@ function ChatInterface({
               ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
               : undefined}
             workspaceId={workspaceId}
+            agentId={selectedMemberAgentId || undefined}
           />
           {/* Reserve the same height as the token/cost row to avoid layout shift. */}
           <div aria-hidden className="min-h-[1rem]" />
@@ -8303,7 +8309,7 @@ function ChatInterface({
                     key={`${workspaceId}:${selectedChatId}`}
                     chatKey={selectedChatId}
                     createCapsuleGatekeeper={(accountId, url) =>
-                      overseer.newGatekeeper(accountId, url)
+                      overseer.newGatekeeper(accountId, url, selectedMemberAgentId || undefined)
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
@@ -8379,6 +8385,8 @@ function ChatInterface({
                         </div>
                       );
                     })()}
+                    workspaceId={workspaceId}
+                    agentId={selectedMemberAgentId || undefined}
                   />
 
                   {/* Token / cost summary. */}

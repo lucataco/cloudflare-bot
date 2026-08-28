@@ -9384,13 +9384,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async newGatekeeper(accountId: number, resourceUrl: string)
+  async newGatekeeper(accountId: number, resourceUrl: string, agentId?: string)
       : Promise<GatekeeperClient<any> | null> {
     let workspaceId = this.impl.ctx.id.toString();
     let ownerDo = wrapDoStubForTelemetry(
         this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!)), this.impl.logger);
-    let agentProfile = await retryOnDoReset(() => 
-        ownerDo.getAgentByWorkspaceId(workspaceId), this.impl.logger);
+    let agentProfile = agentId
+      ? await retryOnDoReset(() => ownerDo.getAgent(agentId), this.impl.logger)
+      : await retryOnDoReset(() => ownerDo.getAgentByWorkspaceId(workspaceId), this.impl.logger);
     
     if (agentProfile?.defaultBindings !== undefined && 
         !agentProfile.defaultBindings.includes(accountId)) {

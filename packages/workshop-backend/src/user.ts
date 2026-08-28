@@ -740,7 +740,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (agentProfile) {
         result.agentProfile = agentProfile;
       }
+    }
 
+    if (workspaceId) {
       let group = await this.getGroupByWorkspaceId(workspaceId);
       if (group) {
         result.group = group;

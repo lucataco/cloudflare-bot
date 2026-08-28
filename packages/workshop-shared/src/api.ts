@@ -1849,8 +1849,10 @@ export interface Overseer extends RpcTarget {
    *
    * The new gatekeeper is a workspace-level workpiece; it is not bound into any gadget's `env` by
    * default. Use GadgetClient.bind() / bindWithSuggestedName() to expose it to a gadget.
+   *
+   * `agentId` optionally specifies which agent profile to use for binding validation.
    */
-  newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+  newGatekeeper(accountId: number, resourceUrl: string, agentId?: string): Promise<GatekeeperClient<any> | null>;
 
   /**
    * Create a new gatekeeper for an AI model binding. The model can be any returned by
@@ -2030,7 +2032,7 @@ export interface Overseer extends RpcTarget {
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-          formats?: MessageFormatRef[]): Promise<number>;
+          formats?: MessageFormatRef[], agentId?: string): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
