@@ -8183,8 +8183,11 @@ class OverseerImpl implements AgentHooks {
       throw new TypeError("Unknown restore params type: " + params.type);
     }
 
-    if (params.type === "routine") {
-      return new NativeRpcStub(new RoutineCallbackTarget(this, params.routineId));
+    if (params.type !== "gadget") {
+      if ("routineId" in params) {
+        return new NativeRpcStub(new RoutineCallbackTarget(this, (params as any).routineId)) as any;
+      }
+      throw new Error("Invalid restore params");
     }
 
     if (params.codeId) {
@@ -8201,17 +8204,17 @@ class OverseerImpl implements AgentHooks {
     return this.getGadgetFacetFetcher(this.resolveGadgetId(params.gadgetId));
   }
 
-  async handleRoutineFire(routineId: string, firing: { scheduleId: string; runId: string; scheduledTime: number; actualTime: number; timeZone: string }): Promise<void> {
+  async handleRoutineFire(routineId: string): Promise<void> {
     if (!this.ownerId) throw new Error("No workspace owner");
     let userDo = this.#ownerUserDo();
     let routine = await userDo.getRoutineById(routineId);
     if (!routine) {
-      this.logger.warn("Routine not found for fire", { event: "routine.fire.notfound", routineId });
+      this.logger.warn("Routine not found for fire", { event: "routine.fire.notfound" });
       return;
     }
     let agent = await userDo.getAgentByWorkspaceId(this.ctx.id.toString());
     if (!agent || agent.id !== routine.agentId) {
-      this.logger.warn("Routine agent mismatch", { event: "routine.fire.agent_mismatch", routineId, agentId: routine.agentId });
+      this.logger.warn("Routine agent mismatch", { event: "routine.fire.agent_mismatch" });
       return;
     }
     let userMeta = await retryOnDoReset(
@@ -8225,8 +8228,8 @@ class OverseerImpl implements AgentHooks {
     if (!schedulerGk) {
       throw new Error("Scheduler gatekeeper not available");
     }
-    let session = this.getGatekeeperFacet(schedulerGk.id, undefined);
-    let callback = await this.ctx.restore({ type: "routine", routineId });
+    let session = this.getGatekeeperFacet(schedulerGk.id) as any;
+    let callback = (await this.ctx.restore({ type: "routine", routineId } as any)) as any;
     let scheduleId: string;
     if (schedule.kind === "interval") {
       scheduleId = await session.every(schedule.everyMs!, callback, {
@@ -8252,7 +8255,7 @@ class OverseerImpl implements AgentHooks {
     } else {
       throw new Error(`Unknown schedule kind: ${schedule.kind}`);
     }
-    let hooks = [...this.storage.boundHooks.list()].filter(h => h.description.title === name && h.description.subtitle === `Routine: ${prompt.slice(0, 100)}`);
+    let hooks = [...this.storage.boundHooks.list()].filter(h => h.description.title === name);
     let hook = hooks[hooks.length - 1];
     if (hook) {
       await this.enableHook(hook.id);
@@ -8309,8 +8312,8 @@ class RoutineCallbackTarget extends NativeRpcTarget {
     this.#routineId = routineId;
   }
 
-  async onSchedule(firing: { scheduleId: string; runId: string; scheduledTime: number; actualTime: number; timeZone: string }): Promise<void> {
-    await this.#impl.handleRoutineFire(this.#routineId, firing);
+  async onSchedule(): Promise<void> {
+    await this.#impl.handleRoutineFire(this.#routineId);
   }
 }
 
@@ -8860,8 +8863,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.restore(params);
   }
 
-  async routineCallback(routineId: string, firing: { scheduleId: string; runId: string; scheduledTime: number; actualTime: number; timeZone: string }): Promise<void> {
-    return this.impl.handleRoutineFire(routineId, firing);
+  async routineCallback(routineId: string): Promise<void> {
+    return this.impl.handleRoutineFire(routineId);
   }
 
   async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number }): Promise<string> {

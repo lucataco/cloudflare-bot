@@ -503,7 +503,7 @@ export interface AuthenticatedApi extends RpcTarget {
   getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null>;
 
   listRoutines(agentId: string): Promise<AgentRoutine[]>;
-  createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<AgentRoutine>;
+  createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused?: boolean): Promise<AgentRoutine>;
   updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine>;
   deleteRoutine(agentId: string, routineId: string): Promise<void>;
 
