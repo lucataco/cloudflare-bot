@@ -8251,7 +8251,28 @@ class OverseerImpl implements AgentHooks {
         for (let accountId of agent.defaultBindings) {
           let vendorId = await userDo.getAccountVendorId(accountId);
           if (vendorId === "slack") {
-            slackGk = allSlackGks[0];
+            let accountFetcher = await userDo.getConnectedAccount(accountId);
+            if (accountFetcher) {
+              try {
+                let accountDesc = (await accountFetcher.describe()) as { uniqueName?: string; displayName: string };
+                for (let gk of allSlackGks) {
+                  let gkFacet = this.getGatekeeperFacet(gk.id);
+                  let gkDesc = (await gkFacet.describe()) as { url?: string; title: string };
+                  if (gkDesc.url && accountDesc.uniqueName && gkDesc.url.includes(accountDesc.uniqueName)) {
+                    slackGk = gk;
+                    break;
+                  }
+                  if (gk.resourceUrl && accountDesc.displayName && 
+                      (gk.resourceUrl.includes(accountDesc.displayName) || 
+                       gkDesc.title === accountDesc.displayName)) {
+                    slackGk = gk;
+                    break;
+                  }
+                }
+                if (slackGk) break;
+              } catch {
+              }
+            }
             break;
           }
         }
@@ -8282,11 +8303,18 @@ class OverseerImpl implements AgentHooks {
         for (let accountId of agent.defaultBindings) {
           let vendorId = await userDo.getAccountVendorId(accountId);
           if (vendorId === "github") {
-            githubGk = allGitHubGks[0];
+            let expectedRepoUrl = `https://github.com/${schedule.owner}/${schedule.repo}`;
+            for (let gk of allGitHubGks) {
+              if (gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.resourceUrl === expectedRepoUrl) {
+                githubGk = gk;
+                break;
+              }
+            }
             break;
           }
         }
       }
+      
       if (!githubGk) {
         githubGk = allGitHubGks[0];
       }

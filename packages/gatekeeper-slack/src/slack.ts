@@ -271,7 +271,45 @@ export default {
       return new Response(SELF_CLOSING_HTML,
           { headers: { "Content-Type": "text/html; charset=utf-8" } });
     } else if (relPath === "/events" && req.method === "POST") {
-      let body = await req.json() as any;
+      let rawBody = await req.text();
+      
+      if (env.SIGNING_SECRET) {
+        let signature = req.headers.get("X-Slack-Signature");
+        let timestamp = req.headers.get("X-Slack-Request-Timestamp");
+        
+        if (!signature || !timestamp) {
+          return new Response("Missing signature headers", { status: 401 });
+        }
+        
+        let tsNum = Number(timestamp);
+        let now = Math.floor(Date.now() / 1000);
+        if (Math.abs(now - tsNum) > 300) {
+          return new Response("Request timestamp too old", { status: 401 });
+        }
+        
+        let baseString = `v0:${timestamp}:${rawBody}`;
+        let hmac = crypto.subtle;
+        let key = new TextEncoder().encode(env.SIGNING_SECRET);
+        let message = new TextEncoder().encode(baseString);
+        
+        let keyObj = await hmac.importKey(
+          "raw",
+          key,
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"]
+        );
+        let signatureBytes = await hmac.sign("HMAC", keyObj, message);
+        let expectedSig = "v0=" + [...new Uint8Array(signatureBytes)]
+          .map(b => b.toString(16).padStart(2, "0"))
+          .join("");
+        
+        if (!constantTimeEqual(expectedSig, signature)) {
+          return new Response("Invalid signature", { status: 401 });
+        }
+      }
+      
+      let body = JSON.parse(rawBody) as any;
       
       if (body.type === "url_verification") {
         return new Response(JSON.stringify({ challenge: body.challenge }), {

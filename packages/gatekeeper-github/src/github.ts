@@ -89,6 +89,7 @@ type Env = Cloudflare.Env & {
   BASE_URL?: string;
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
+  WEBHOOK_SECRET?: string;
 };
 
 type StoredNonce = {
@@ -1006,7 +1007,36 @@ export default {
       let eventType = req.headers.get("X-GitHub-Event");
       if (!eventType) return new Response("OK");
       
-      let body = await req.json() as any;
+      let rawBody = await req.text();
+      
+      if (env.WEBHOOK_SECRET) {
+        let signature = req.headers.get("X-Hub-Signature-256");
+        
+        if (!signature) {
+          return new Response("Missing signature header", { status: 401 });
+        }
+        
+        let key = new TextEncoder().encode(env.WEBHOOK_SECRET);
+        let message = new TextEncoder().encode(rawBody);
+        
+        let keyObj = await crypto.subtle.importKey(
+          "raw",
+          key,
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"]
+        );
+        let signatureBytes = await crypto.subtle.sign("HMAC", keyObj, message);
+        let expectedSig = "sha256=" + [...new Uint8Array(signatureBytes)]
+          .map(b => b.toString(16).padStart(2, "0"))
+          .join("");
+        
+        if (!constantTimeEqual(expectedSig, signature)) {
+          return new Response("Invalid signature", { status: 401 });
+        }
+      }
+      
+      let body = JSON.parse(rawBody) as any;
       let repo = body.repository?.full_name;
       if (!repo) return new Response("OK");
       
@@ -3864,6 +3894,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   createEventHookController(owner: string, repo: string, events: string[]): Fetcher<HookController<RpcTarget>> {
     let hookId = crypto.randomUUID();
     let props: GitHubEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
       owner,
       repo,
       events,
@@ -3874,6 +3905,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 }
 
 type GitHubEventHookControllerProps = {
+  userObjectId: string;
   owner: string;
   repo: string;
   events: string[];
@@ -3887,27 +3919,69 @@ export class GitHubEventHookController
 {
   async enable(initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata): Promise<void> {
     let driver = (this.ctx.exports.GitHubEventHookDriver as any).getByName(`${this.ctx.props.owner}/${this.ctx.props.repo}`);
-    await driver.enable(this.ctx.props.hookId, initiator, target, this.ctx.props);
+    await driver.enable(this.ctx.props.hookId, initiator, target, this.ctx.props, this.env);
   }
 
   async disable(): Promise<void> {
     let driver = (this.ctx.exports.GitHubEventHookDriver as any).getByName(`${this.ctx.props.owner}/${this.ctx.props.repo}`);
-    await driver.disable(this.ctx.props.hookId);
+    await driver.disable(this.ctx.props.hookId, this.ctx.props.userObjectId, this.env);
   }
 }
 
 @validateRpc()
 export class GitHubEventHookDriver extends DurableObject<Env> {
-  async enable(hookId: string, initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata, props: GitHubEventHookControllerProps): Promise<void> {
+  async enable(hookId: string, initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata, props: GitHubEventHookControllerProps, env: Env): Promise<void> {
     this.ctx.storage.kv.put(`hook:${hookId}:initiator`, initiator);
     this.ctx.storage.kv.put(`hook:${hookId}:target`, target);
     this.ctx.storage.kv.put(`hook:${hookId}:props`, props);
+    
+    let webhookUrl = `${getBaseUrl(env)}/webhook`;
+    let webhookEvents = ["pull_request", "issue_comment", "pull_request_review_comment"];
+    
+    let account = this.ctx.exports.UserAccount.get(this.ctx.exports.UserAccount.idFromString(props.userObjectId));
+    let api = new GitHubApi(async () => await account.getAccessToken());
+    
+    let existingHooks = await api.listWebhooks(props.owner, props.repo);
+    let existingHook = existingHooks.find(h => h.config.url === webhookUrl);
+    
+    if (existingHook) {
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookId`, existingHook.id);
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookCreated`, false);
+    } else {
+      let config: { url: string; content_type: string; secret?: string } = {
+        url: webhookUrl,
+        content_type: "json",
+      };
+      if (env.WEBHOOK_SECRET) {
+        config.secret = env.WEBHOOK_SECRET;
+      }
+      
+      let webhook = await api.createWebhook(props.owner, props.repo, config, webhookEvents);
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookId`, webhook.id);
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookCreated`, true);
+    }
   }
 
-  async disable(hookId: string): Promise<void> {
+  async disable(hookId: string, userObjectId: string, env: Env): Promise<void> {
+    let webhookId = this.ctx.storage.kv.get<number>(`hook:${hookId}:webhookId`);
+    let webhookCreated = this.ctx.storage.kv.get<boolean>(`hook:${hookId}:webhookCreated`);
+    let props = this.ctx.storage.kv.get<GitHubEventHookControllerProps>(`hook:${hookId}:props`);
+    
+    if (webhookId && webhookCreated && props) {
+      let account = this.ctx.exports.UserAccount.get(this.ctx.exports.UserAccount.idFromString(userObjectId));
+      let api = new GitHubApi(async () => await account.getAccessToken());
+      
+      try {
+        await api.deleteWebhook(props.owner, props.repo, webhookId);
+      } catch (e) {
+      }
+    }
+    
     this.ctx.storage.kv.delete(`hook:${hookId}:initiator`);
     this.ctx.storage.kv.delete(`hook:${hookId}:target`);
     this.ctx.storage.kv.delete(`hook:${hookId}:props`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:webhookId`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:webhookCreated`);
   }
 
   async deliverEvent(event: any): Promise<void> {
