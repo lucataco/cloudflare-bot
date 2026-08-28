@@ -4632,6 +4632,15 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
+  async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+    if (!this.ownerId) throw new Error("Workspace not initialized.");
+    const computerSessions = this.ctx.exports.ComputerSessionImpl;
+    const sessionKey = `${this.ownerId}:${agentId}`;
+    const id = computerSessions.idFromName(sessionKey);
+    const stub = computerSessions.get(id);
+    return stub;
+  }
+
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
   // The `gatekeeperId` is set to the BUILTIN_TOOL_GATEKEEPER_ID sentinel so that downstream
   // code (which expects a gatekeeper to dereference for approve/reject) never touches it —
@@ -5304,6 +5313,7 @@ class OverseerImpl implements AgentHooks {
       if (userMeta.agentProfile?.description) {
         this.storage.chatContext.put({
           chatId,
+          agentId: userMeta.agentProfile.id,
           agentInstructions: userMeta.agentProfile.description,
         });
       }
@@ -5390,6 +5400,7 @@ class OverseerImpl implements AgentHooks {
     if (userMeta.agentProfile?.description && !chatContext?.agentInstructions) {
       this.storage.chatContext.put({
         ...(chatContext || { chatId }),
+        agentId: userMeta.agentProfile.id,
         agentInstructions: userMeta.agentProfile.description,
       });
     }
