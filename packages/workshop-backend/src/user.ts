@@ -972,6 +972,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.routines.delete(routineId);
   }
 
+  async setRoutineScheduleId(routineId: string, scheduleId: string | undefined): Promise<void> {
+    let routine = this.storage.routines.get(routineId);
+    if (!routine) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    let updated: RoutineRecord = {
+      ...routine,
+      scheduleId,
+      updated: new Date(),
+    };
+    this.storage.routines.put(updated);
+  }
+
+  async getRoutineById(routineId: string): Promise<RoutineRecord | undefined> {
+    return this.storage.routines.get(routineId);
+  }
+
   async listGroups(): Promise<Group[]> {
     let groups = Array.from(this.storage.groups.list());
     groups.sort((a, b) => b.created.getTime() - a.created.getTime());
