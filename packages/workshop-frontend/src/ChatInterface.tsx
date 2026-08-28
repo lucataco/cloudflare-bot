@@ -4739,6 +4739,9 @@ function ChatInterface({
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
+  const [currentGroup, setCurrentGroup] = useState<Group | null>(null);
+  const [groupMemberAgents, setGroupMemberAgents] = useState<AgentProfile[]>([]);
+  const [selectedMemberAgentId, setSelectedMemberAgentId] = useState<string | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -5293,7 +5296,20 @@ function ChatInterface({
         );
       }
     }
-  }, [selectedChatId, availableModels, currentMessages, activeAgent]);
+  }, [selectedChatId, availableModels, currentMessages, activeAgent, currentAgentProfile]);
+
+  // Update currentAgentProfile when selected member changes in a group
+  useEffect(() => {
+    if (currentGroup && selectedMemberAgentId && groupMemberAgents.length > 0) {
+      const selectedMember = groupMemberAgents.find(a => a.id === selectedMemberAgentId);
+      if (selectedMember) {
+        setCurrentAgentProfile(selectedMember);
+        if (selectedChatId === null) {
+          setSelectedModel(getInitialSelectedModel(availableModels, selectedMember));
+        }
+      }
+    }
+  }, [selectedMemberAgentId, currentGroup, groupMemberAgents, selectedChatId, availableModels]);
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {
@@ -5758,13 +5774,17 @@ function ChatInterface({
             try {
               group = await authenticatedApi.getGroupByWorkspaceId(workspaceId);
               if (group) {
+                setCurrentGroup(group);
                 const agents = await Promise.all(
                   group.memberAgentIds.map(id => 
                     authenticatedApi.listAgents().then(all => all.find(a => a.id === id))
                   )
                 );
                 memberAgents = agents.filter((a): a is AgentProfile => a !== undefined);
+                setGroupMemberAgents(memberAgents);
                 if (memberAgents.length > 0) {
+                  const firstMemberId = memberAgents[0].id;
+                  setSelectedMemberAgentId(firstMemberId);
                   agentProfile = memberAgents[0];
                   setCurrentAgentProfile(agentProfile);
                 }
