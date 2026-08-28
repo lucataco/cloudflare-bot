@@ -4632,6 +4632,15 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
+  async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+    if (!this.ownerId) throw new Error("Workspace not initialized.");
+    const computerSessions = this.ctx.exports.ComputerSessionImpl;
+    const sessionKey = `${this.ownerId}:${agentId}`;
+    const id = computerSessions.idFromName(sessionKey);
+    const stub = computerSessions.get(id);
+    return stub;
+  }
+
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
   // The `gatekeeperId` is set to the BUILTIN_TOOL_GATEKEEPER_ID sentinel so that downstream
   // code (which expects a gatekeeper to dereference for approve/reject) never touches it —
@@ -5301,9 +5310,10 @@ class OverseerImpl implements AgentHooks {
 
       // If this chat belongs to an agent profile (agent-shell 1:1 chat), store the agent's
       // standing instructions in the chat context.
-      if (userMeta.agentProfile?.description) {
+      if (userMeta.agentProfile) {
         this.storage.chatContext.put({
           chatId,
+          agentId: userMeta.agentProfile.id,
           agentInstructions: userMeta.agentProfile.description,
         });
       }
@@ -5387,9 +5397,10 @@ class OverseerImpl implements AgentHooks {
     // Backfill agent instructions if this chat belongs to an agent profile and the instructions
     // are not yet set (for existing chats or when the agent's description is edited).
     let chatContext = this.storage.chatContext.get(chatId);
-    if (userMeta.agentProfile?.description && !chatContext?.agentInstructions) {
+    if (userMeta.agentProfile) {
       this.storage.chatContext.put({
         ...(chatContext || { chatId }),
+        agentId: userMeta.agentProfile.id,
         agentInstructions: userMeta.agentProfile.description,
       });
     }
