@@ -1207,10 +1207,13 @@ export class SlackConversationGatekeeperImpl
 
   async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
     let hookId = crypto.randomUUID();
-    let teamId = await this.#account().getTeamId();
+    let account = this.#account();
+    let teamId = await account.getTeamId();
+    let authedUserId = await account.getUserId();
     let props: SlackEventHookControllerProps = {
       userObjectId: this.ctx.props.userObjectId,
       teamId,
+      authedUserId,
       channelId,
       matchKind,
       keyword,
