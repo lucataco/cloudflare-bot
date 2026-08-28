@@ -1042,10 +1042,13 @@ export class SlackWorkspaceGatekeeperImpl extends DurableObject<Env, SlackWorksp
 
   async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
     let hookId = crypto.randomUUID();
-    let teamId = await this.#account().getTeamId();
+    let account = this.#account();
+    let teamId = await account.getTeamId();
+    let authedUserId = await account.getUserId();
     let props: SlackEventHookControllerProps = {
       userObjectId: this.ctx.props.userObjectId,
       teamId,
+      authedUserId,
       channelId,
       matchKind,
       keyword,
@@ -1062,6 +1065,7 @@ export class SlackWorkspaceGatekeeperImpl extends DurableObject<Env, SlackWorksp
 type SlackEventHookControllerProps = {
   userObjectId: string;
   teamId: string;
+  authedUserId: string;
   channelId: string;
   matchKind: string;
   keyword?: string;
@@ -1111,7 +1115,7 @@ export class SlackEventHookDriver extends DurableObject<Env> {
       
       if (props.matchKind === "message") {
         shouldFire = true;
-      } else if (props.matchKind === "mention" && message.text?.includes("<@")) {
+      } else if (props.matchKind === "mention" && message.text?.includes(`<@${props.authedUserId}>`)) {
         shouldFire = true;
         matchedMention = true;
       } else if (props.matchKind === "keyword" && props.keyword && message.text?.toLowerCase().includes(props.keyword.toLowerCase())) {
@@ -1201,6 +1205,20 @@ export class SlackConversationGatekeeperImpl
 
   async removeObserver(_id: string): Promise<void> {}
 
+  async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
+    let hookId = crypto.randomUUID();
+    let teamId = await this.#account().getTeamId();
+    let props: SlackEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      teamId,
+      channelId,
+      matchKind,
+      keyword,
+      hookId,
+    };
+    return this.ctx.exports.SlackEventHookController({ props });
+  }
+
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }
   revertAction(): Promise<void> { return unreachableAction(); }
@@ -1275,6 +1293,23 @@ export class SlackThreadGatekeeperImpl extends DurableObject<Env, SlackThreadGat
   }
 
   async removeObserver(_id: string): Promise<void> {}
+
+  async createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Promise<Fetcher<HookController<RpcTarget>>> {
+    let hookId = crypto.randomUUID();
+    let account = this.#account();
+    let teamId = await account.getTeamId();
+    let authedUserId = await account.getUserId();
+    let props: SlackEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      teamId,
+      authedUserId,
+      channelId,
+      matchKind,
+      keyword,
+      hookId,
+    };
+    return this.ctx.exports.SlackEventHookController({ props });
+  }
 
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }

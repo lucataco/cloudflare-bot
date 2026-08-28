@@ -8236,8 +8236,14 @@ class OverseerImpl implements AgentHooks {
         gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "slack");
       
       let slackGk: GatekeeperRecord | undefined;
-      if (agent?.defaultBindings) {
-        slackGk = allSlackGks.find(gk => agent.defaultBindings!.includes(gk.id));
+      if (agent?.defaultBindings && agent.defaultBindings.length > 0) {
+        for (let accountId of agent.defaultBindings) {
+          let vendorId = await userDo.getAccountVendorId(accountId);
+          if (vendorId === "slack") {
+            slackGk = allSlackGks[0];
+            break;
+          }
+        }
       }
       if (!slackGk) {
         slackGk = allSlackGks[0];
@@ -8261,8 +8267,14 @@ class OverseerImpl implements AgentHooks {
         gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "github");
       
       let githubGk: GatekeeperRecord | undefined;
-      if (agent?.defaultBindings) {
-        githubGk = allGitHubGks.find(gk => agent.defaultBindings!.includes(gk.id));
+      if (agent?.defaultBindings && agent.defaultBindings.length > 0) {
+        for (let accountId of agent.defaultBindings) {
+          let vendorId = await userDo.getAccountVendorId(accountId);
+          if (vendorId === "github") {
+            githubGk = allGitHubGks[0];
+            break;
+          }
+        }
       }
       if (!githubGk) {
         githubGk = allGitHubGks[0];

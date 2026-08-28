@@ -1027,6 +1027,13 @@ export default {
             prTitle: body.pull_request?.title,
             prAuthor: body.pull_request?.user?.login,
           };
+        } else if (body.action === "review_requested") {
+          event = {
+            eventType: "review-requested",
+            prNumber: body.pull_request?.number,
+            prTitle: body.pull_request?.title,
+            prAuthor: body.pull_request?.user?.login,
+          };
         }
       } else if (eventType === "issue_comment" && body.issue?.pull_request) {
         event = {
@@ -1041,13 +1048,6 @@ export default {
           prNumber: body.pull_request?.number,
           prTitle: body.pull_request?.title,
           prAuthor: body.comment?.user?.login,
-        };
-      } else if (eventType === "pull_request" && body.action === "review_requested") {
-        event = {
-          eventType: "review-requested",
-          prNumber: body.pull_request?.number,
-          prTitle: body.pull_request?.title,
-          prAuthor: body.pull_request?.user?.login,
         };
       }
       
