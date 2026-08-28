@@ -8201,7 +8201,7 @@ class OverseerImpl implements AgentHooks {
     return this.getGadgetFacetFetcher(this.resolveGadgetId(params.gadgetId));
   }
 
-  async handleRoutineFire(routineId: string): Promise<void> {
+  async handleRoutineFire(routineId: string, eventContext: string | undefined): Promise<void> {
     if (!this.ownerId) throw new Error("No workspace owner");
     let userDo = this.#ownerUserDo();
     let routine = await userDo.getRoutineById(routineId);
@@ -8216,46 +8216,73 @@ class OverseerImpl implements AgentHooks {
     }
     let userMeta = await retryOnDoReset(
       () => userDo.getChatContext(agent.defaultModelId, this.ctx.id.toString(), agent.id), this.logger);
-    await this.newChat(userDo, userMeta, routine.prompt, undefined, undefined, undefined, undefined, undefined);
+    let finalPrompt = routine.prompt;
+    if (eventContext) {
+      finalPrompt = `${routine.prompt}\n\nEvent context:\n${eventContext}`;
+    }
+    await this.newChat(userDo, userMeta, finalPrompt, undefined, undefined, undefined, undefined, undefined);
   }
 
-  async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number }): Promise<number> {
+  async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number; channelId?: string; matchKind?: string; keyword?: string; owner?: string; repo?: string; events?: string[] }): Promise<number> {
     let ambientGatekeepers = [...this.storage.gatekeepers.list()].filter(gk => gk.creationSpec?.type === "ambient");
-    let schedulerGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
-    if (!schedulerGk) {
-      throw new Error("Scheduler gatekeeper not available");
-    }
-    let session = this.getGatekeeperFacet(schedulerGk.id);
     let callback = await this.ctx.restore({ type: "routine", routineId });
     let beforeHookCount = [...this.storage.boundHooks.list()].length;
-    if (schedule.kind === "interval") {
-      await (session as any).every(schedule.everyMs!, callback, {
+    
+    if (schedule.kind === "slack") {
+      let slackGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "slack");
+      if (!slackGk) {
+        throw new Error("Slack gatekeeper not available");
+      }
+      let session = this.getGatekeeperFacet(slackGk.id);
+      await (session as any).bindEventHook(schedule.channelId!, schedule.matchKind!, schedule.keyword, callback, {
         title: name,
         description: `Routine: ${prompt.slice(0, 100)}`,
       });
-    } else if (schedule.kind === "calendar") {
-      await (session as any).calendarAt({
-        timeZone: schedule.timeZone!,
-        freq: schedule.freq!,
-        minute: schedule.minute!,
-        ...(schedule.freq !== "hourly" ? { hour: schedule.hour } : {}),
-        ...(schedule.byDay ? { byDay: schedule.byDay } : {}),
-      }, callback, {
-        title: name,
-        description: `Routine: ${prompt.slice(0, 100)}`,
-      });
-    } else if (schedule.kind === "once") {
-      await (session as any).runAt(schedule.fireAt!, callback, {
+    } else if (schedule.kind === "github") {
+      let githubGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "github");
+      if (!githubGk) {
+        throw new Error("GitHub gatekeeper not available");
+      }
+      let session = this.getGatekeeperFacet(githubGk.id);
+      await (session as any).bindEventHook(schedule.owner!, schedule.repo!, schedule.events!, callback, {
         title: name,
         description: `Routine: ${prompt.slice(0, 100)}`,
       });
     } else {
-      throw new Error(`Unknown schedule kind: ${schedule.kind}`);
+      let schedulerGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
+      if (!schedulerGk) {
+        throw new Error("Scheduler gatekeeper not available");
+      }
+      let session = this.getGatekeeperFacet(schedulerGk.id);
+      if (schedule.kind === "interval") {
+        await (session as any).every(schedule.everyMs!, callback, {
+          title: name,
+          description: `Routine: ${prompt.slice(0, 100)}`,
+        });
+      } else if (schedule.kind === "calendar") {
+        await (session as any).calendarAt({
+          timeZone: schedule.timeZone!,
+          freq: schedule.freq!,
+          minute: schedule.minute!,
+          ...(schedule.freq !== "hourly" ? { hour: schedule.hour } : {}),
+          ...(schedule.byDay ? { byDay: schedule.byDay } : {}),
+        }, callback, {
+          title: name,
+          description: `Routine: ${prompt.slice(0, 100)}`,
+        });
+      } else if (schedule.kind === "once") {
+        await (session as any).runAt(schedule.fireAt!, callback, {
+          title: name,
+          description: `Routine: ${prompt.slice(0, 100)}`,
+        });
+      } else {
+        throw new Error(`Unknown schedule kind: ${schedule.kind}`);
+      }
     }
     let hooks = [...this.storage.boundHooks.list()];
     let hook = hooks[hooks.length - 1];
     if (!hook || hooks.length <= beforeHookCount) {
-      throw new Error("Hook not created by scheduler");
+      throw new Error("Hook not created");
     }
     await this.enableHook(hook.id);
     return hook.id;
@@ -8311,7 +8338,20 @@ class RoutineCallbackTarget extends NativeRpcTarget {
   }
 
   async onSchedule(): Promise<void> {
-    await this.#impl.handleRoutineFire(this.#routineId);
+    await this.#impl.handleRoutineFire(this.#routineId, undefined);
+  }
+
+  async onMessage(event: any): Promise<void> {
+    let context = `Slack message in channel ${event.channelId}`;
+    if (event.matchedMention) context += ` (bot mentioned)`;
+    if (event.matchedKeyword) context += ` (matched keyword: ${event.matchedKeyword})`;
+    context += `:\n${event.message.text}`;
+    await this.#impl.handleRoutineFire(this.#routineId, context);
+  }
+
+  async onEvent(event: any): Promise<void> {
+    let context = `GitHub ${event.eventType} event in ${event.owner}/${event.repo} - PR #${event.prNumber}: ${event.prTitle} by ${event.prAuthor}`;
+    await this.#impl.handleRoutineFire(this.#routineId, context);
   }
 }
 
@@ -8862,7 +8902,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async routineCallback(routineId: string): Promise<void> {
-    return this.impl.handleRoutineFire(routineId);
+    return this.impl.handleRoutineFire(routineId, undefined);
   }
 
   async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number }): Promise<number> {

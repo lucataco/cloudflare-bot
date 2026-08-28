@@ -3794,6 +3794,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async removeObserver(_id: string): Promise<void> {}
+
+  async bindEventHook(owner: string, repo: string, events: string[], callback: RpcStub<any>, description: { title: string; description: string }): Promise<void> {
+    throw new Error("GitHub event hooks not yet implemented");
+  }
 }
 
 @validateRpc()

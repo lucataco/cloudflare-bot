@@ -73,6 +73,16 @@ export default function RoutinesList({ agent }: { agent: AgentProfile }) {
     if (schedule.kind === 'once') {
       return `Once at ${new Date(schedule.fireAt).toLocaleString()}`
     }
+    if (schedule.kind === 'slack') {
+      let trigger = 'Slack: '
+      if (schedule.matchKind === 'mention') trigger += 'mention'
+      else if (schedule.matchKind === 'keyword') trigger += `keyword "${schedule.keyword}"`
+      else trigger += 'any message'
+      return `${trigger} in ${schedule.channelId}`
+    }
+    if (schedule.kind === 'github') {
+      return `GitHub: ${schedule.owner}/${schedule.repo} - ${schedule.events.join(', ')}`
+    }
     return 'Unknown schedule'
   }
 

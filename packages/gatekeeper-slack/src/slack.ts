@@ -1008,6 +1008,10 @@ export class SlackWorkspaceGatekeeperImpl extends DurableObject<Env, SlackWorksp
     this.ctx.storage.kv.delete(this.#observerKey(id));
   }
 
+  async bindEventHook(channelId: string, matchKind: string, keyword: string | undefined, callback: RpcStub<any>, description: { title: string; description: string }): Promise<void> {
+    throw new Error("Slack event hooks not yet implemented");
+  }
+
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }
   revertAction(): Promise<void> { return unreachableAction(); }
