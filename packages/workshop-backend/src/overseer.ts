@@ -8228,25 +8228,51 @@ class OverseerImpl implements AgentHooks {
     let beforeHookCount = [...this.storage.boundHooks.list()].length;
     
     if (schedule.kind === "slack") {
-      let slackGk = [...this.storage.gatekeepers.list()].find(gk => 
+      let userDo = this.#ownerUserDo();
+      let routine = await userDo.getRoutineById(routineId);
+      let agent = routine ? await userDo.getAgent(routine.agentId) : null;
+      
+      let allSlackGks = [...this.storage.gatekeepers.list()].filter(gk => 
         gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "slack");
+      
+      let slackGk: GatekeeperRecord | undefined;
+      if (agent?.defaultBindings) {
+        slackGk = allSlackGks.find(gk => agent.defaultBindings!.includes(gk.id));
+      }
+      if (!slackGk) {
+        slackGk = allSlackGks[0];
+      }
+      
       if (!slackGk) {
         throw new Error("No Slack connection found. Please connect Slack first.");
       }
       let gatekeeperFacet = this.getGatekeeperFacet(slackGk.id);
-      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.channelId!, schedule.matchKind!, schedule.keyword);
+      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.channelId, schedule.matchKind, schedule.keyword);
       await this.bindHook(slackGk.id, controller, callback, {
         title: name,
         description: `Routine: ${prompt.slice(0, 100)}`,
       }, { from: "agent", chatId: 0 });
     } else if (schedule.kind === "github") {
-      let githubGk = [...this.storage.gatekeepers.list()].find(gk => 
+      let userDo = this.#ownerUserDo();
+      let routine = await userDo.getRoutineById(routineId);
+      let agent = routine ? await userDo.getAgent(routine.agentId) : null;
+      
+      let allGitHubGks = [...this.storage.gatekeepers.list()].filter(gk => 
         gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "github");
+      
+      let githubGk: GatekeeperRecord | undefined;
+      if (agent?.defaultBindings) {
+        githubGk = allGitHubGks.find(gk => agent.defaultBindings!.includes(gk.id));
+      }
+      if (!githubGk) {
+        githubGk = allGitHubGks[0];
+      }
+      
       if (!githubGk) {
         throw new Error("No GitHub connection found. Please connect GitHub first.");
       }
       let gatekeeperFacet = this.getGatekeeperFacet(githubGk.id);
-      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.owner!, schedule.repo!, schedule.events!);
+      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.owner, schedule.repo, schedule.events);
       await this.bindHook(githubGk.id, controller, callback, {
         title: name,
         description: `Routine: ${prompt.slice(0, 100)}`,
@@ -8279,8 +8305,6 @@ class OverseerImpl implements AgentHooks {
           title: name,
           description: `Routine: ${prompt.slice(0, 100)}`,
         });
-      } else {
-        throw new Error(`Unknown schedule kind: ${schedule.kind}`);
       }
     }
     let hooks = [...this.storage.boundHooks.list()];
@@ -8909,7 +8933,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.handleRoutineFire(routineId, undefined);
   }
 
-  async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number }): Promise<number> {
+  async registerRoutine(routineId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<number> {
     return this.impl.registerRoutine(routineId, name, prompt, schedule);
   }
 

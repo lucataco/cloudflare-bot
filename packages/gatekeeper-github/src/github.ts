@@ -1002,6 +1002,69 @@ export default {
       });
     }
 
+    if (relPath === "/webhook" && req.method === "POST") {
+      let eventType = req.headers.get("X-GitHub-Event");
+      if (!eventType) return new Response("OK");
+      
+      let body = await req.json() as any;
+      let repo = body.repository?.full_name;
+      if (!repo) return new Response("OK");
+      
+      let event: any = null;
+      
+      if (eventType === "pull_request") {
+        if (body.action === "opened") {
+          event = {
+            eventType: "pr-opened",
+            prNumber: body.pull_request?.number,
+            prTitle: body.pull_request?.title,
+            prAuthor: body.pull_request?.user?.login,
+          };
+        } else if (body.action === "closed" && body.pull_request?.merged) {
+          event = {
+            eventType: "pr-merged",
+            prNumber: body.pull_request?.number,
+            prTitle: body.pull_request?.title,
+            prAuthor: body.pull_request?.user?.login,
+          };
+        }
+      } else if (eventType === "issue_comment" && body.issue?.pull_request) {
+        event = {
+          eventType: "pr-comment",
+          prNumber: body.issue?.number,
+          prTitle: body.issue?.title,
+          prAuthor: body.comment?.user?.login,
+        };
+      } else if (eventType === "pull_request_review_comment") {
+        event = {
+          eventType: "pr-comment",
+          prNumber: body.pull_request?.number,
+          prTitle: body.pull_request?.title,
+          prAuthor: body.comment?.user?.login,
+        };
+      } else if (eventType === "pull_request" && body.action === "review_requested") {
+        event = {
+          eventType: "review-requested",
+          prNumber: body.pull_request?.number,
+          prTitle: body.pull_request?.title,
+          prAuthor: body.pull_request?.user?.login,
+        };
+      }
+      
+      if (event) {
+        try {
+          let driver = (ctx.exports.GitHubEventHookDriver as any).getByName(repo);
+          await driver.deliverEvent({
+            repo,
+            ...event,
+          });
+        } catch (e) {
+        }
+      }
+      
+      return new Response("OK");
+    }
+
     return new Response("Not Found", { status: 404 });
   },
 };
@@ -3852,7 +3915,6 @@ export class GitHubEventHookDriver extends DurableObject<Env> {
       if (!key.endsWith(":props")) continue;
       let hookId = key.slice(5, -6);
       
-      if (event.repo !== `${props.owner}/${props.repo}`) continue;
       if (!props.events.includes(event.eventType)) continue;
       
       let initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RpcTarget>>>(`hook:${hookId}:initiator`);
