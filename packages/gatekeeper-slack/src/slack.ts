@@ -4,7 +4,7 @@ import {
   GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription,
   ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions,
   AccountDescription, SupportedResource, ResourceConfiguratorFrame, ActionKind, Cursor,
-  GatekeeperUserVerifier, ObservationDescription,
+  GatekeeperUserVerifier, ObservationDescription, HookController, HookInitiator, HookTargetMetadata,
   stripTrailingSlashes,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -1008,13 +1008,96 @@ export class SlackWorkspaceGatekeeperImpl extends DurableObject<Env, SlackWorksp
     this.ctx.storage.kv.delete(this.#observerKey(id));
   }
 
-  async bindEventHook(channelId: string, matchKind: string, keyword: string | undefined, callback: RpcStub<any>, description: { title: string; description: string }): Promise<void> {
-    throw new Error("Slack event hooks not yet implemented");
+  createEventHookController(channelId: string, matchKind: string, keyword: string | undefined): Fetcher<HookController<RpcTarget>> {
+    let hookId = crypto.randomUUID();
+    let props: SlackEventHookControllerProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      channelId,
+      matchKind,
+      keyword,
+      hookId,
+    };
+    return this.ctx.exports.SlackEventHookController({ props });
   }
 
   applyAction(): Promise<void> { return unreachableAction(); }
   rejectAction(): Promise<void> { return unreachableAction(); }
   revertAction(): Promise<void> { return unreachableAction(); }
+}
+
+type SlackEventHookControllerProps = {
+  userObjectId: string;
+  channelId: string;
+  matchKind: string;
+  keyword?: string;
+  hookId: string;
+};
+
+@validateRpc()
+export class SlackEventHookController
+  extends WorkerEntrypoint<Env, SlackEventHookControllerProps>
+  implements HookController<RpcTarget>
+{
+  async enable(initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata): Promise<void> {
+    let driver = (this.ctx.exports.SlackEventHookDriver as any).getByName(this.ctx.props.userObjectId);
+    await driver.enable(this.ctx.props.hookId, initiator, target, this.ctx.props);
+  }
+
+  async disable(): Promise<void> {
+    let driver = (this.ctx.exports.SlackEventHookDriver as any).getByName(this.ctx.props.userObjectId);
+    await driver.disable(this.ctx.props.hookId);
+  }
+}
+
+@validateRpc()
+export class SlackEventHookDriver extends DurableObject<Env> {
+  async enable(hookId: string, initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata, props: SlackEventHookControllerProps): Promise<void> {
+    this.ctx.storage.kv.put(`hook:${hookId}:initiator`, initiator);
+    this.ctx.storage.kv.put(`hook:${hookId}:target`, target);
+    this.ctx.storage.kv.put(`hook:${hookId}:props`, props);
+  }
+
+  async disable(hookId: string): Promise<void> {
+    this.ctx.storage.kv.delete(`hook:${hookId}:initiator`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:target`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:props`);
+  }
+
+  async deliverMessage(message: any): Promise<void> {
+    for (let [key, props] of this.ctx.storage.kv.list<SlackEventHookControllerProps>({ prefix: "hook:" })) {
+      if (!key.endsWith(":props")) continue;
+      let hookId = key.slice(5, -6);
+      
+      if (props.channelId !== message.channelId) continue;
+      
+      let shouldFire = false;
+      let matchedMention = false;
+      let matchedKeyword: string | undefined;
+      
+      if (props.matchKind === "message") {
+        shouldFire = true;
+      } else if (props.matchKind === "mention" && message.text?.includes("<@")) {
+        shouldFire = true;
+        matchedMention = true;
+      } else if (props.matchKind === "keyword" && props.keyword && message.text?.toLowerCase().includes(props.keyword.toLowerCase())) {
+        shouldFire = true;
+        matchedKeyword = props.keyword;
+      }
+      
+      if (!shouldFire) continue;
+      
+      let initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RpcTarget>>>(`hook:${hookId}:initiator`);
+      if (!initiator) continue;
+      
+      let { callback, approvalQueue } = await initiator.startHook();
+      await (callback as any).onMessage({
+        channelId: message.channelId,
+        message: message,
+        matchedMention,
+        matchedKeyword,
+      });
+    }
+  }
 }
 
 type SlackConversationGatekeeperImplProps = {

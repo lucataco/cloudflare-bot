@@ -2,6 +2,9 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
+  HookController,
+  HookInitiator,
+  HookTargetMetadata,
   stripTrailingSlashes,
   type ActionDescription,
   type AccountDescription,
@@ -3795,8 +3798,76 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   async removeObserver(_id: string): Promise<void> {}
 
-  async bindEventHook(owner: string, repo: string, events: string[], callback: RpcStub<any>, description: { title: string; description: string }): Promise<void> {
-    throw new Error("GitHub event hooks not yet implemented");
+  createEventHookController(owner: string, repo: string, events: string[]): Fetcher<HookController<RpcTarget>> {
+    let hookId = crypto.randomUUID();
+    let props: GitHubEventHookControllerProps = {
+      owner,
+      repo,
+      events,
+      hookId,
+    };
+    return this.ctx.exports.GitHubEventHookController({ props });
+  }
+}
+
+type GitHubEventHookControllerProps = {
+  owner: string;
+  repo: string;
+  events: string[];
+  hookId: string;
+};
+
+@validateRpc()
+export class GitHubEventHookController
+  extends WorkerEntrypoint<Env, GitHubEventHookControllerProps>
+  implements HookController<RpcTarget>
+{
+  async enable(initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata): Promise<void> {
+    let driver = (this.ctx.exports.GitHubEventHookDriver as any).getByName(`${this.ctx.props.owner}/${this.ctx.props.repo}`);
+    await driver.enable(this.ctx.props.hookId, initiator, target, this.ctx.props);
+  }
+
+  async disable(): Promise<void> {
+    let driver = (this.ctx.exports.GitHubEventHookDriver as any).getByName(`${this.ctx.props.owner}/${this.ctx.props.repo}`);
+    await driver.disable(this.ctx.props.hookId);
+  }
+}
+
+@validateRpc()
+export class GitHubEventHookDriver extends DurableObject<Env> {
+  async enable(hookId: string, initiator: Fetcher<HookInitiator<RpcTarget>>, target: HookTargetMetadata, props: GitHubEventHookControllerProps): Promise<void> {
+    this.ctx.storage.kv.put(`hook:${hookId}:initiator`, initiator);
+    this.ctx.storage.kv.put(`hook:${hookId}:target`, target);
+    this.ctx.storage.kv.put(`hook:${hookId}:props`, props);
+  }
+
+  async disable(hookId: string): Promise<void> {
+    this.ctx.storage.kv.delete(`hook:${hookId}:initiator`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:target`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:props`);
+  }
+
+  async deliverEvent(event: any): Promise<void> {
+    for (let [key, props] of this.ctx.storage.kv.list<GitHubEventHookControllerProps>({ prefix: "hook:" })) {
+      if (!key.endsWith(":props")) continue;
+      let hookId = key.slice(5, -6);
+      
+      if (event.repo !== `${props.owner}/${props.repo}`) continue;
+      if (!props.events.includes(event.eventType)) continue;
+      
+      let initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RpcTarget>>>(`hook:${hookId}:initiator`);
+      if (!initiator) continue;
+      
+      let { callback, approvalQueue } = await initiator.startHook();
+      await (callback as any).onEvent({
+        owner: props.owner,
+        repo: props.repo,
+        eventType: event.eventType,
+        prNumber: event.prNumber,
+        prTitle: event.prTitle,
+        prAuthor: event.prAuthor,
+      });
+    }
   }
 }
 

@@ -8224,32 +8224,36 @@ class OverseerImpl implements AgentHooks {
   }
 
   async registerRoutine(routineId: string, name: string, prompt: string, schedule: { kind: string; everyMs?: number; timeZone?: string; freq?: string; hour?: number; minute?: number; byDay?: string[]; fireAt?: number; channelId?: string; matchKind?: string; keyword?: string; owner?: string; repo?: string; events?: string[] }): Promise<number> {
-    let ambientGatekeepers = [...this.storage.gatekeepers.list()].filter(gk => gk.creationSpec?.type === "ambient");
     let callback = await this.ctx.restore({ type: "routine", routineId });
     let beforeHookCount = [...this.storage.boundHooks.list()].length;
     
     if (schedule.kind === "slack") {
-      let slackGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "slack");
+      let slackGk = [...this.storage.gatekeepers.list()].find(gk => 
+        gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "slack");
       if (!slackGk) {
-        throw new Error("Slack gatekeeper not available");
+        throw new Error("No Slack connection found. Please connect Slack first.");
       }
-      let session = this.getGatekeeperFacet(slackGk.id);
-      await (session as any).bindEventHook(schedule.channelId!, schedule.matchKind!, schedule.keyword, callback, {
+      let gatekeeperFacet = this.getGatekeeperFacet(slackGk.id);
+      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.channelId!, schedule.matchKind!, schedule.keyword);
+      await this.bindHook(slackGk.id, controller, callback, {
         title: name,
         description: `Routine: ${prompt.slice(0, 100)}`,
-      });
+      }, { from: "agent", chatId: 0 });
     } else if (schedule.kind === "github") {
-      let githubGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "github");
+      let githubGk = [...this.storage.gatekeepers.list()].find(gk => 
+        gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "github");
       if (!githubGk) {
-        throw new Error("GitHub gatekeeper not available");
+        throw new Error("No GitHub connection found. Please connect GitHub first.");
       }
-      let session = this.getGatekeeperFacet(githubGk.id);
-      await (session as any).bindEventHook(schedule.owner!, schedule.repo!, schedule.events!, callback, {
+      let gatekeeperFacet = this.getGatekeeperFacet(githubGk.id);
+      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.owner!, schedule.repo!, schedule.events!);
+      await this.bindHook(githubGk.id, controller, callback, {
         title: name,
         description: `Routine: ${prompt.slice(0, 100)}`,
-      });
+      }, { from: "agent", chatId: 0 });
     } else {
-      let schedulerGk = ambientGatekeepers.find(gk => gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
+      let schedulerGk = [...this.storage.gatekeepers.list()].find(gk => 
+        gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
       if (!schedulerGk) {
         throw new Error("Scheduler gatekeeper not available");
       }
