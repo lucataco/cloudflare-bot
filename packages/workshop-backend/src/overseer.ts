@@ -8251,8 +8251,27 @@ class OverseerImpl implements AgentHooks {
         for (let accountId of agent.defaultBindings) {
           let vendorId = await userDo.getAccountVendorId(accountId);
           if (vendorId === "slack") {
-            if (allSlackGks.length > 0) {
-              slackGk = allSlackGks[0];
+            let accountFetcher = await userDo.getConnectedAccount(accountId);
+            if (accountFetcher) {
+              try {
+                let accountDesc = (await accountFetcher.describe()) as { uniqueName?: string; displayName: string };
+                for (let gk of allSlackGks) {
+                  let gkFacet = this.getGatekeeperFacet(gk.id);
+                  let gkDesc = (await gkFacet.describe()) as { url?: string; title: string };
+                  if (gkDesc.url && accountDesc.uniqueName && gkDesc.url.includes(accountDesc.uniqueName)) {
+                    slackGk = gk;
+                    break;
+                  }
+                  if (gk.resourceUrl && accountDesc.displayName && 
+                      (gk.resourceUrl.includes(accountDesc.displayName) || 
+                       gkDesc.title === accountDesc.displayName)) {
+                    slackGk = gk;
+                    break;
+                  }
+                }
+                if (slackGk) break;
+              } catch {
+              }
             }
             break;
           }

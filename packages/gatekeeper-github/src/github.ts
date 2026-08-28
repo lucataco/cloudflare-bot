@@ -3941,33 +3941,33 @@ export class GitHubEventHookDriver extends DurableObject<Env> {
     let account = this.ctx.exports.UserAccount.get(this.ctx.exports.UserAccount.idFromString(props.userObjectId));
     let api = new GitHubApi(async () => await account.getAccessToken());
     
-    try {
-      let existingHooks = await api.listWebhooks(props.owner, props.repo);
-      let existingHook = existingHooks.find(h => h.config.url === webhookUrl);
-      
-      if (existingHook) {
-        this.ctx.storage.kv.put(`hook:${hookId}:webhookId`, existingHook.id);
-      } else {
-        let config: { url: string; content_type: string; secret?: string } = {
-          url: webhookUrl,
-          content_type: "json",
-        };
-        if (env.WEBHOOK_SECRET) {
-          config.secret = env.WEBHOOK_SECRET;
-        }
-        
-        let webhook = await api.createWebhook(props.owner, props.repo, config, webhookEvents);
-        this.ctx.storage.kv.put(`hook:${hookId}:webhookId`, webhook.id);
+    let existingHooks = await api.listWebhooks(props.owner, props.repo);
+    let existingHook = existingHooks.find(h => h.config.url === webhookUrl);
+    
+    if (existingHook) {
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookId`, existingHook.id);
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookCreated`, false);
+    } else {
+      let config: { url: string; content_type: string; secret?: string } = {
+        url: webhookUrl,
+        content_type: "json",
+      };
+      if (env.WEBHOOK_SECRET) {
+        config.secret = env.WEBHOOK_SECRET;
       }
-    } catch (e) {
+      
+      let webhook = await api.createWebhook(props.owner, props.repo, config, webhookEvents);
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookId`, webhook.id);
+      this.ctx.storage.kv.put(`hook:${hookId}:webhookCreated`, true);
     }
   }
 
   async disable(hookId: string, userObjectId: string, env: Env): Promise<void> {
     let webhookId = this.ctx.storage.kv.get<number>(`hook:${hookId}:webhookId`);
+    let webhookCreated = this.ctx.storage.kv.get<boolean>(`hook:${hookId}:webhookCreated`);
     let props = this.ctx.storage.kv.get<GitHubEventHookControllerProps>(`hook:${hookId}:props`);
     
-    if (webhookId && props) {
+    if (webhookId && webhookCreated && props) {
       let account = this.ctx.exports.UserAccount.get(this.ctx.exports.UserAccount.idFromString(userObjectId));
       let api = new GitHubApi(async () => await account.getAccessToken());
       
@@ -3981,6 +3981,7 @@ export class GitHubEventHookDriver extends DurableObject<Env> {
     this.ctx.storage.kv.delete(`hook:${hookId}:target`);
     this.ctx.storage.kv.delete(`hook:${hookId}:props`);
     this.ctx.storage.kv.delete(`hook:${hookId}:webhookId`);
+    this.ctx.storage.kv.delete(`hook:${hookId}:webhookCreated`);
   }
 
   async deliverEvent(event: any): Promise<void> {

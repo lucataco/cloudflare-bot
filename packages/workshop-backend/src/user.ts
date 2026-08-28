@@ -1997,6 +1997,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return account?.vendorId ?? null;
   }
 
+  async getConnectedAccount(accountId: number): Promise<Fetcher<GatekeeperUser> | null> {
+    let account = this.storage.connectedAccounts.get(accountId);
+    return account?.account ?? null;
+  }
+
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
                   typeUrlPattern: string}> {
