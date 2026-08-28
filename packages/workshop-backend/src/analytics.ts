@@ -108,6 +108,12 @@ export type ProductAnalyticsInput =
       agent_id: string;
       workspace_id: string;
     }
+  | {
+      event_name: "group_created";
+      user_id: string;
+      group_id: string;
+      workspace_id: string;
+    }
   | ProductAnalyticsGadgetInput;
 
 export function recordAnalytics(

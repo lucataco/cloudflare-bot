@@ -500,6 +500,12 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getAgentByWorkspaceId(workspaceId: string): Promise<AgentProfile | null>;
 
+  listGroups(): Promise<Group[]>;
+  createGroup(name: string, memberAgentIds: string[]): Promise<Group>;
+  updateGroup(id: string, updates: { name?: string; memberAgentIds?: string[]; }): Promise<Group>;
+  deleteGroup(id: string): Promise<void>;
+  getGroupByWorkspaceId(workspaceId: string): Promise<Group | null>;
+
   /**
    * Open an existing gadget.
    *
@@ -1365,6 +1371,15 @@ export type AgentProfile = {
   /** When this agent profile was created. */
   created: Date;
   /** When this agent profile was last updated. */
+  updated: Date;
+};
+
+export type Group = {
+  id: string;
+  name: string;
+  memberAgentIds: string[];
+  workspaceId: string;
+  created: Date;
   updated: Date;
 };
 
