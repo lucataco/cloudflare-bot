@@ -1,51 +1,108 @@
-import { useState, useEffect } from 'react';
-import { useAuthenticatedApi } from '../AuthContext';
+import { useState, useEffect, useRef } from 'react';
+import { RpcStub } from 'capnweb';
+import { Overseer, ComputerSession } from '@gadgets/workshop-shared/api';
 
 interface ComputerViewProps {
   agentId: string;
+  overseer: RpcStub<Overseer>;
   onClose: () => void;
 }
 
-export function ComputerView({ agentId, onClose }: ComputerViewProps) {
-  const { authenticatedApi } = useAuthenticatedApi();
+export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) {
   const [screenshot, setScreenshot] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [url, setUrl] = useState('about:blank');
+  const [currentUrl, setCurrentUrl] = useState('about:blank');
+  const [session, setSession] = useState<RpcStub<ComputerSession> | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     let mounted = true;
 
-    async function loadScreenshot() {
+    async function initSession() {
       try {
-        setLoading(true);
-        setError(null);
-        const overseer = await authenticatedApi.openGadget(agentId);
-        const imageData = await overseer.computerScreenshot(agentId);
+        const computerSession = await overseer.getComputerSession(agentId);
         if (mounted) {
-          const blob = new Blob([imageData as unknown as BlobPart], { type: 'image/png' });
-          const url = URL.createObjectURL(blob);
-          setScreenshot(url);
+          setSession(computerSession);
+          loadScreenshot(computerSession);
         }
       } catch (err) {
         if (mounted) {
-          setError(err instanceof Error ? err.message : 'Failed to load computer');
-        }
-      } finally {
-        if (mounted) {
-          setLoading(false);
+          setError(err instanceof Error ? err.message : 'Failed to initialize computer');
         }
       }
     }
 
-    loadScreenshot();
+    initSession();
 
     return () => {
       mounted = false;
       if (screenshot) {
         URL.revokeObjectURL(screenshot);
       }
+      if (session) {
+        session[Symbol.dispose]();
+      }
     };
-  }, [agentId, authenticatedApi]);
+  }, [agentId, overseer]);
+
+  async function loadScreenshot(computerSession: RpcStub<ComputerSession>) {
+    try {
+      setLoading(true);
+      setError(null);
+      const imageData = await computerSession.screenshot();
+      const blob = new Blob([imageData as unknown as BlobPart], { type: 'image/png' });
+      const url = URL.createObjectURL(blob);
+      if (screenshot) {
+        URL.revokeObjectURL(screenshot);
+      }
+      setScreenshot(url);
+      
+      const state = await computerSession.getState();
+      setCurrentUrl(state.currentUrl || 'about:blank');
+      setUrl(state.currentUrl || 'about:blank');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load computer');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleNavigate() {
+    if (!session) return;
+    try {
+      setLoading(true);
+      setError(null);
+      await session.navigate(url);
+      await loadScreenshot(session);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Navigation failed');
+      setLoading(false);
+    }
+  }
+
+  async function handleRefresh() {
+    if (!session) return;
+    await loadScreenshot(session);
+  }
+
+  async function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (!session || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = 1280 / rect.width;
+    const scaleY = 720 / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    
+    try {
+      await session.click(Math.round(x), Math.round(y));
+      await loadScreenshot(session);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Click failed');
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -57,6 +114,31 @@ export function ComputerView({ agentId, onClose }: ComputerViewProps) {
             className="rounded px-3 py-1.5 text-sm text-kumo-default hover:bg-kumo-hovered"
           >
             Close
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 border-b border-kumo-border px-4 py-2">
+          <input
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleNavigate()}
+            placeholder="Enter URL"
+            className="flex-1 rounded border border-kumo-border bg-kumo-base px-3 py-1.5 text-sm text-kumo-default focus:border-kumo-brand focus:outline-none"
+          />
+          <button
+            onClick={handleNavigate}
+            disabled={loading}
+            className="rounded bg-kumo-brand px-4 py-1.5 text-sm text-white hover:bg-kumo-brand-hover disabled:opacity-50"
+          >
+            Go
+          </button>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="rounded border border-kumo-border px-3 py-1.5 text-sm text-kumo-default hover:bg-kumo-hovered disabled:opacity-50"
+          >
+            Refresh
           </button>
         </div>
         
@@ -79,8 +161,27 @@ export function ComputerView({ agentId, onClose }: ComputerViewProps) {
           )}
           
           {screenshot && !loading && (
-            <div className="flex justify-center">
-              <img src={screenshot} alt="Computer screenshot" className="max-w-full rounded border border-kumo-border" />
+            <div className="flex flex-col items-center gap-2">
+              <div className="text-xs text-kumo-subtle">
+                Current: {currentUrl}
+              </div>
+              <canvas
+                ref={canvasRef}
+                onClick={handleCanvasClick}
+                style={{ 
+                  backgroundImage: `url(${screenshot})`,
+                  backgroundSize: 'contain',
+                  backgroundRepeat: 'no-repeat',
+                  width: '1280px',
+                  height: '720px',
+                  maxWidth: '100%',
+                  cursor: 'crosshair',
+                  border: '1px solid var(--kumo-border)'
+                }}
+              />
+              <div className="text-xs text-kumo-subtle">
+                Click on the image to interact
+              </div>
             </div>
           )}
         </div>

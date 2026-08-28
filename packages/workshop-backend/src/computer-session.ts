@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { launch, type Page, type Browser } from "@cloudflare/puppeteer";
-import { RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
+import type { ComputerSession } from "@gadgets/workshop-shared/api";
 
 type ComputerSessionLogFields = {
   event?: string;
@@ -13,7 +13,6 @@ type ComputerSessionLogFields = {
 const logger = createLogger<ComputerSessionLogFields>({ component: "workshop.computer-session" });
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface ComputerSessionState {
   agentId: string;
@@ -22,15 +21,6 @@ export interface ComputerSessionState {
 }
 
 @validateRpc()
-export class ComputerSession extends RpcTarget {
-  navigate(url: string): Promise<void>;
-  screenshot(): Promise<Uint8Array>;
-  click(x: number, y: number): Promise<void>;
-  type(text: string): Promise<void>;
-  getState(): Promise<ComputerSessionState>;
-  close(): Promise<void>;
-}
-
 export class ComputerSessionImpl extends DurableObject implements ComputerSession {
   #agentId: string;
   #browser: Browser | null = null;

@@ -8533,6 +8533,7 @@ function ChatInterface({
       {showComputer && (currentAgentProfile?.id || selectedMemberAgentId) && (
         <ComputerView
           agentId={selectedMemberAgentId || currentAgentProfile?.id || ''}
+          overseer={getOverseer()}
           onClose={() => setShowComputer(false)}
         />
       )}

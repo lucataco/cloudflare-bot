@@ -2161,16 +2161,8 @@ export interface Overseer extends RpcTarget {
   /** Delete a chat thread. */
   deleteChat(chatId: number): Promise<void>;
 
-  /**
-   * Get computer session for the specified agent. Returns a stub to the agent's computer session DO.
-   * The computer session is keyed by agent ID and persists browser state (cookies, navigation).
-   * Only available when agentShell feature flag is enabled.
-   */
   getComputerSession(agentId: string): Promise<RpcStub<ComputerSession>>;
 
-  /**
-   * Request screenshot from the agent's computer. Returns PNG image data.
-   */
   computerScreenshot(agentId: string): Promise<Uint8Array>;
 
   /**

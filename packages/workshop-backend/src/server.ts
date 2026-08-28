@@ -61,7 +61,6 @@ export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
 // Re-export service-binding entrypoint for external channel integrations.
 export { ExternalMessageGateway };
 
-// Re-export entrypoint for computer sessions.
 export { ComputerSessionImpl } from "./computer-session";
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
