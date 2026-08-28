@@ -22,7 +22,7 @@ export function ComputerView({ agentId, onClose }: ComputerViewProps) {
         const overseer = await authenticatedApi.openGadget(agentId);
         const imageData = await overseer.computerScreenshot(agentId);
         if (mounted) {
-          const blob = new Blob([imageData], { type: 'image/png' });
+          const blob = new Blob([imageData as unknown as BlobPart], { type: 'image/png' });
           const url = URL.createObjectURL(blob);
           setScreenshot(url);
         }
