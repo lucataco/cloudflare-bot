@@ -75,6 +75,7 @@ import {
   ActionLogEntry,
   AiChatAuthorInfo,
   AgentProfile,
+  Group,
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
@@ -5743,13 +5744,33 @@ function ChatInterface({
 
           // Fetch agent profile if this workspace is bound to an agent
           let agentProfile: AgentProfile | null = null;
+          let group: Group | null = null;
+          let memberAgents: AgentProfile[] = [];
+          
           if (workspaceId) {
             try {
               agentProfile = await authenticatedApi.getAgentByWorkspaceId(workspaceId);
               setCurrentAgentProfile(agentProfile);
             } catch (err) {
-              // Not a critical error; workspace may not be bound to an agent
               console.debug("No agent profile for workspace", workspaceId);
+            }
+
+            try {
+              group = await authenticatedApi.getGroupByWorkspaceId(workspaceId);
+              if (group) {
+                const agents = await Promise.all(
+                  group.memberAgentIds.map(id => 
+                    authenticatedApi.listAgents().then(all => all.find(a => a.id === id))
+                  )
+                );
+                memberAgents = agents.filter((a): a is AgentProfile => a !== undefined);
+                if (memberAgents.length > 0) {
+                  agentProfile = memberAgents[0];
+                  setCurrentAgentProfile(agentProfile);
+                }
+              }
+            } catch (err) {
+              console.debug("No group for workspace", workspaceId);
             }
           }
 

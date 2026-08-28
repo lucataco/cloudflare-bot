@@ -132,7 +132,7 @@ export default function AgentRoster({
       <div className="flex items-center justify-between border-b border-kumo-border px-4 py-3">
         <h2 className="text-sm font-semibold text-kumo-default">Agents</h2>
         <div className="flex gap-1">
-          {agentShellEnabled && groups.length > 0 && (
+          {agentShellEnabled && (
             <button
               onClick={handleCreateGroupClick}
               className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-well hover:text-kumo-default transition-colors"
