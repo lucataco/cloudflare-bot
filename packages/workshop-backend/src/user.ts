@@ -138,6 +138,7 @@ type SkillRecord = {
   id: string;
   agentId: string;
   name: string;
+  slug: string;
   description: string;
   body: string;
   created: Date;
@@ -1005,6 +1006,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.routines.get(routineId);
   }
 
+  #generateSkillSlug(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .replace(/-+/g, '-');
+  }
+
   async listSkills(agentId: string): Promise<AgentSkill[]> {
     let agent = this.storage.agents.get(agentId);
     if (!agent) {
@@ -1025,6 +1034,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       id: crypto.randomUUID(),
       agentId,
       name,
+      slug: this.#generateSkillSlug(name),
       description,
       body,
       created: now,
@@ -1042,6 +1052,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let updated: SkillRecord = {
       ...skill,
       ...updates,
+      ...(updates.name ? { slug: this.#generateSkillSlug(updates.name) } : {}),
       updated: new Date(),
     };
     this.storage.skills.put(updated);

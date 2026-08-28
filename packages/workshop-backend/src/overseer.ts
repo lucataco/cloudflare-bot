@@ -5194,7 +5194,7 @@ class OverseerImpl implements AgentHooks {
               this.users.get(this.users.idFromString(this.ownerId)),
               this.logger);
           let skills: AgentSkill[] = await retryOnDoReset(() => owner.listSkills(agentId), this.logger);
-          let skill = skills.find(s => s.name.toLowerCase() === skillName.toLowerCase());
+          let skill = skills.find(s => s.slug === skillName);
           if (skill) {
             let remainingMessage = message.slice(match[0].length).trim();
             let fullMessage = remainingMessage
@@ -5272,6 +5272,7 @@ class OverseerImpl implements AgentHooks {
         capsules,
         attachments,
         formats,
+        ...(prepared.skillName ? {skillName: prepared.skillName} : {}),
       });
       return messageSequence;
     }
@@ -5290,6 +5291,7 @@ class OverseerImpl implements AgentHooks {
       capsules,
       attachments,
       formats,
+      ...(prepared.skillName ? {skillName: prepared.skillName} : {}),
     });
     return messageSequence;
   }
@@ -7456,6 +7458,7 @@ class OverseerImpl implements AgentHooks {
 
   async getInstanceInstructions(): Promise<string> {
     try {
+      // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
       return (await readAdminConfig(this.env)).instanceInstructions;
     } catch (err) {
       this.logger.warn("failed to read instance instructions", {

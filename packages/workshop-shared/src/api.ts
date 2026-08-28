@@ -1374,6 +1374,7 @@ export type AgentRoutine = {
 export type AgentSkill = {
   id: string;
   name: string;
+  slug: string;
   description: string;
   body: string;
   created: Date;
