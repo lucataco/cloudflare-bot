@@ -392,9 +392,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let routine = await retryOnDoReset(() => this.#user.createRoutine(agentId, name, prompt, schedule, paused));
     if (!paused) {
       let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
-      let scheduleId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
-      await this.#user.setRoutineScheduleId(routine.id, scheduleId);
-      routine.scheduleId = scheduleId;
+      let hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+      await this.#user.setRoutineHookId(routine.id, hookId);
+      routine.hookId = hookId;
     }
     return routine;
   }
@@ -412,14 +412,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (!agent) return routine;
     let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
     if (updates.paused !== undefined && oldRoutine.paused !== routine.paused) {
-      if (routine.paused && routine.scheduleId) {
-        await overseer.unregisterRoutine(routine.scheduleId);
-        await this.#user.setRoutineScheduleId(routine.id, undefined);
-        routine.scheduleId = undefined;
+      if (routine.paused && routine.hookId !== undefined) {
+        await overseer.unregisterRoutine(routine.hookId);
+        await this.#user.setRoutineHookId(routine.id, undefined);
+        routine.hookId = undefined;
       } else if (!routine.paused) {
-        let scheduleId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
-        await this.#user.setRoutineScheduleId(routine.id, scheduleId);
-        routine.scheduleId = scheduleId;
+        let hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+        await this.#user.setRoutineHookId(routine.id, hookId);
+        routine.hookId = hookId;
       }
     }
     return routine;
@@ -427,11 +427,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async deleteRoutine(agentId: string, routineId: string): Promise<void> {
     let routine = await this.#user.getRoutineById(routineId);
-    if (routine && routine.scheduleId) {
+    if (routine && routine.hookId !== undefined) {
       let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
       if (agent) {
         let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
-        await overseer.unregisterRoutine(routine.scheduleId);
+        await overseer.unregisterRoutine(routine.hookId);
       }
     }
     return retryOnDoReset(() => this.#user.deleteRoutine(agentId, routineId));

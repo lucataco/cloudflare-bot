@@ -129,7 +129,7 @@ type RoutineRecord = {
   prompt: string;
   schedule: AgentRoutineSchedule;
   paused: boolean;
-  scheduleId?: string;
+  hookId?: number;
   created: Date;
   updated: Date;
 };
@@ -975,14 +975,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.routines.delete(routineId);
   }
 
-  async setRoutineScheduleId(routineId: string, scheduleId: string | undefined): Promise<void> {
+  async setRoutineHookId(routineId: string, hookId: number | undefined): Promise<void> {
     let routine = this.storage.routines.get(routineId);
     if (!routine) {
       throw new Error(`Routine not found: ${routineId}`);
     }
     let updated: RoutineRecord = {
       ...routine,
-      scheduleId,
+      hookId,
       updated: new Date(),
     };
     this.storage.routines.put(updated);

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useAuthenticatedApi } from '../AuthContext'
 import { AgentProfile, AiChatAuthorInfo, Group } from '@gadgets/workshop-shared/api'
-import { Plus, User, Gear, Users } from '@phosphor-icons/react'
+import { Plus, User, Gear, Users, Clock } from '@phosphor-icons/react'
 import CreateAgentModal from './CreateAgentModal'
 import EditAgentModal from './EditAgentModal'
 import CreateGroupModal from './CreateGroupModal'
@@ -203,13 +203,26 @@ export default function AgentRoster({
                   <p className="truncate text-xs text-kumo-subtle">{agent.title}</p>
                 </div>
 
-                <button
-                  onClick={(e) => handleEditAgentClick(agent, e)}
-                  className="ml-auto rounded-lg p-1.5 text-kumo-subtle opacity-0 group-hover:opacity-100 hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
-                  title="Edit agent"
-                >
-                  <Gear size={16} weight="bold" />
-                </button>
+                <div className="ml-auto flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {agentShellEnabled && (
+                    <Link
+                      to="/agent/$id/routines"
+                      params={{ id: agent.id }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
+                      title="Routines"
+                    >
+                      <Clock size={16} weight="bold" />
+                    </Link>
+                  )}
+                  <button
+                    onClick={(e) => handleEditAgentClick(agent, e)}
+                    className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
+                    title="Edit agent"
+                  >
+                    <Gear size={16} weight="bold" />
+                  </button>
+                </div>
               </Link>
             ))}
 

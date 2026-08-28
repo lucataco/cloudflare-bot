@@ -1359,7 +1359,7 @@ export type AgentRoutine = {
   prompt: string;
   schedule: AgentRoutineSchedule;
   paused: boolean;
-  scheduleId?: string;
+  hookId?: number;
   created: Date;
   updated: Date;
 };
