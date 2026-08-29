@@ -104,6 +104,42 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     }
   }
 
+  async function handleCanvasWheel(e: React.WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    if (!sessionRef.current) return;
+    
+    try {
+      await sessionRef.current.scroll(e.deltaX, e.deltaY);
+      await loadScreenshot(sessionRef.current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Scroll failed');
+    }
+  }
+
+  async function handleCanvasKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
+    if (!sessionRef.current) return;
+
+    const specialKeys = ['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+    
+    if (specialKeys.includes(e.key)) {
+      e.preventDefault();
+      try {
+        await sessionRef.current.key(e.key);
+        await loadScreenshot(sessionRef.current);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Key failed');
+      }
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      try {
+        await sessionRef.current.type(e.key);
+        await loadScreenshot(sessionRef.current);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Type failed');
+      }
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="flex h-[90vh] w-[90vw] flex-col rounded-lg bg-kumo-elevated shadow-xl">
@@ -168,6 +204,9 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
               <canvas
                 ref={canvasRef}
                 onClick={handleCanvasClick}
+                onWheel={handleCanvasWheel}
+                onKeyDown={handleCanvasKeyDown}
+                tabIndex={0}
                 style={{ 
                   backgroundImage: `url(${screenshot})`,
                   backgroundSize: 'contain',
@@ -176,11 +215,12 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
                   height: '720px',
                   maxWidth: '100%',
                   cursor: 'crosshair',
-                  border: '1px solid var(--kumo-border)'
+                  border: '1px solid var(--kumo-border)',
+                  outline: 'none'
                 }}
               />
               <div className="text-xs text-kumo-subtle">
-                Click on the image to interact
+                Click, scroll, or type to interact
               </div>
             </div>
           )}
