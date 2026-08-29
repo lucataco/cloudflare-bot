@@ -26,6 +26,7 @@ import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
 import { Route as AgentIdRoutinesRouteImport } from './routes/agent.$id.routines'
+import { Route as AgentIdSkillsRouteImport } from './routes/agent.$id.skills'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -112,6 +113,11 @@ const AgentIdRoutinesRoute = AgentIdRoutinesRouteImport.update({
   path: '/agent/$id/routines',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentIdSkillsRoute = AgentIdSkillsRouteImport.update({
+  id: '/agent/$id/skills',
+  path: '/agent/$id/skills',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -131,6 +137,7 @@ export interface FileRoutesByFullPath {
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
+  '/agent/$id/skills': typeof AgentIdSkillsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -150,6 +157,7 @@ export interface FileRoutesByTo {
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
+  '/agent/$id/skills': typeof AgentIdSkillsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -170,6 +178,7 @@ export interface FileRoutesById {
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
+  '/agent/$id/skills': typeof AgentIdSkillsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -191,6 +200,7 @@ export interface FileRouteTypes {
     | '/gatekeepers/$appId'
     | '/workspace/$id'
     | '/agent/$id/routines'
+    | '/agent/$id/skills'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -210,6 +220,7 @@ export interface FileRouteTypes {
     | '/gatekeepers/$appId'
     | '/workspace/$id'
     | '/agent/$id/routines'
+    | '/agent/$id/skills'
   id:
     | '__root__'
     | '/'
@@ -229,6 +240,7 @@ export interface FileRouteTypes {
     | '/gatekeepers_/$appId'
     | '/workspace/$id'
     | '/agent/$id/routines'
+    | '/agent/$id/skills'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -249,6 +261,7 @@ export interface RootRouteChildren {
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
   AgentIdRoutinesRoute: typeof AgentIdRoutinesRoute
+  AgentIdSkillsRoute: typeof AgentIdSkillsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -372,6 +385,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentIdRoutinesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agent/$id/skills': {
+      id: '/agent/$id/skills'
+      path: '/agent/$id/skills'
+      fullPath: '/agent/$id/skills'
+      preLoaderRoute: typeof AgentIdSkillsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -393,6 +413,7 @@ const rootRouteChildren: RootRouteChildren = {
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
   AgentIdRoutinesRoute: AgentIdRoutinesRoute,
+  AgentIdSkillsRoute: AgentIdSkillsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

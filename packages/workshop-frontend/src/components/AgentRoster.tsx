@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useAuthenticatedApi } from '../AuthContext'
 import { AgentProfile, AiChatAuthorInfo, Group } from '@gadgets/workshop-shared/api'
-import { Plus, User, Gear, Users, Clock } from '@phosphor-icons/react'
+import { Plus, User, Gear, Users, Clock, Book } from '@phosphor-icons/react'
 import CreateAgentModal from './CreateAgentModal'
 import EditAgentModal from './EditAgentModal'
 import CreateGroupModal from './CreateGroupModal'
@@ -205,15 +205,26 @@ export default function AgentRoster({
 
                 <div className="ml-auto flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   {agentShellEnabled && (
-                    <Link
-                      to="/agent/$id/routines"
-                      params={{ id: agent.id }}
-                      onClick={(e) => e.stopPropagation()}
-                      className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
-                      title="Routines"
-                    >
-                      <Clock size={16} weight="bold" />
-                    </Link>
+                    <>
+                      <Link
+                        to="/agent/$id/skills"
+                        params={{ id: agent.id }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
+                        title="Skills"
+                      >
+                        <Book size={16} weight="bold" />
+                      </Link>
+                      <Link
+                        to="/agent/$id/routines"
+                        params={{ id: agent.id }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
+                        title="Routines"
+                      >
+                        <Clock size={16} weight="bold" />
+                      </Link>
+                    </>
                   )}
                   <button
                     onClick={(e) => handleEditAgentClick(agent, e)}
