@@ -2935,7 +2935,8 @@ export async function runAgent(
         logger.warn("Failed to capture screenshot after action", {
           error: screenshotError,
         });
-        return toolResult(resultMessage);
+        const errorText = screenshotError instanceof Error ? screenshotError.message : String(screenshotError);
+        return toolResult(`${resultMessage}\n\nNote: Failed to capture screenshot (${errorText}). Use computerScreenshot if needed.`);
       }
     };
 
