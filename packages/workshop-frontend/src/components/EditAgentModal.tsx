@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Dialog, Button, Input, Textarea, Select, Collapsible, useKumoToastManager, Checkbox } from '@cloudflare/kumo'
+import { Dialog, Button, Input, Textarea, Select, useKumoToastManager, Checkbox } from '@cloudflare/kumo'
 import { AgentProfile, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
@@ -168,13 +168,17 @@ export default function EditAgentModal({
   ]
 
   return (
-    <Dialog open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
-      <Dialog.Content title="Edit Agent">
-        <Dialog.Header
-          title="Edit Agent"
-          description={`Update ${agent.name}'s settings`}
-        />
-        <Dialog.Body>
+    <Dialog.Root open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
+      <Dialog className="responsive-dialog !w-[min(520px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="sm">
+        <div className="flex flex-col border-b border-kumo-line px-5 py-4">
+          <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
+            Edit Agent
+          </Dialog.Title>
+          <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+            Update {agent.name}'s settings
+          </Dialog.Description>
+        </div>
+        <div className="px-5 py-4">
       <div className="flex flex-col gap-4">
         {/* Name */}
         <div>
@@ -342,10 +346,9 @@ export default function EditAgentModal({
           </div>
         )}
       </div>
-        </Dialog.Body>
+        </div>
 
-        {/* Actions */}
-        <Dialog.Footer>
+        <div className="flex items-center justify-between border-t border-kumo-line bg-kumo-base px-5 py-3">
           <Button
             variant="secondary"
             onClick={handleDelete}
@@ -354,7 +357,7 @@ export default function EditAgentModal({
           >
             Delete Agent
           </Button>
-          <div className="flex gap-2 ml-auto">
+          <div className="flex gap-2">
             <Button variant="secondary" onClick={onCancel} disabled={loading}>
               Cancel
             </Button>
@@ -362,8 +365,8 @@ export default function EditAgentModal({
               Save Changes
             </Button>
           </div>
-        </Dialog.Footer>
-      </Dialog.Content>
-    </Dialog>
+        </div>
+      </Dialog>
+    </Dialog.Root>
   )
 }
