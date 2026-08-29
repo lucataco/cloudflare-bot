@@ -145,6 +145,13 @@ type SkillRecord = {
   updated: Date;
 };
 
+type MemoryNoteRecord = {
+  id: string;
+  agentId: string;
+  fact: string;
+  created: Date;
+};
+
 type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
@@ -217,6 +224,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: "id"
       }),
       skills: collection<SkillRecord>()({
+        primaryKey: "id"
+      }),
+      memory: collection<MemoryNoteRecord>()({
         primaryKey: "id"
       }),
       gadgets: collection<GadgetRecord>()({
@@ -1065,6 +1075,52 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(`Skill not found: ${skillId}`);
     }
     this.storage.skills.delete(skillId);
+  }
+
+  async listMemory(agentId: string): Promise<MemoryNoteRecord[]> {
+    let agent = this.storage.agents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    let notes = Array.from(this.storage.memory.list()).filter(n => n.agentId === agentId);
+    notes.sort((a, b) => b.created.getTime() - a.created.getTime());
+    return notes;
+  }
+
+  async addMemory(agentId: string, fact: string): Promise<MemoryNoteRecord> {
+    let agent = this.storage.agents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    let note: MemoryNoteRecord = {
+      id: crypto.randomUUID(),
+      agentId,
+      fact: fact.trim(),
+      created: new Date(),
+    };
+    this.storage.memory.put(note);
+    return note;
+  }
+
+  async updateMemory(agentId: string, noteId: string, fact: string): Promise<MemoryNoteRecord> {
+    let note = this.storage.memory.get(noteId);
+    if (!note || note.agentId !== agentId) {
+      throw new Error(`Memory note not found: ${noteId}`);
+    }
+    let updated: MemoryNoteRecord = {
+      ...note,
+      fact: fact.trim(),
+    };
+    this.storage.memory.put(updated);
+    return updated;
+  }
+
+  async deleteMemory(agentId: string, noteId: string): Promise<void> {
+    let note = this.storage.memory.get(noteId);
+    if (!note || note.agentId !== agentId) {
+      throw new Error(`Memory note not found: ${noteId}`);
+    }
+    this.storage.memory.delete(noteId);
   }
 
   async listGroups(): Promise<Group[]> {

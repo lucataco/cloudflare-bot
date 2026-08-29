@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule, AgentSkill, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule, AgentSkill, AgentMemoryNote, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -455,6 +455,22 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async deleteSkill(agentId: string, skillId: string): Promise<void> {
     return retryOnDoReset(() => this.#user.deleteSkill(agentId, skillId));
+  }
+
+  async listMemory(agentId: string): Promise<AgentMemoryNote[]> {
+    return retryOnDoReset(() => this.#user.listMemory(agentId));
+  }
+
+  async addMemory(agentId: string, fact: string): Promise<AgentMemoryNote> {
+    return retryOnDoReset(() => this.#user.addMemory(agentId, fact));
+  }
+
+  async updateMemory(agentId: string, noteId: string, fact: string): Promise<AgentMemoryNote> {
+    return retryOnDoReset(() => this.#user.updateMemory(agentId, noteId, fact));
+  }
+
+  async deleteMemory(agentId: string, noteId: string): Promise<void> {
+    return retryOnDoReset(() => this.#user.deleteMemory(agentId, noteId));
   }
 
   async listGroups(): Promise<Group[]> {

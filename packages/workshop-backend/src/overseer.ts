@@ -6723,6 +6723,28 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
+  async getAgentMemory(agentId: string): Promise<string[]> {
+    let user = this.users.get(this.users.idFromString(this.ownerId!));
+    let notes = await retryOnDoReset(() => user.listMemory(agentId));
+    return notes.map(note => note.fact);
+  }
+
+  async listAgentMemory(agentId: string): Promise<{id: string, fact: string}[]> {
+    let user = this.users.get(this.users.idFromString(this.ownerId!));
+    let notes = await retryOnDoReset(() => user.listMemory(agentId));
+    return notes.map(note => ({id: note.id, fact: note.fact}));
+  }
+
+  async addAgentMemory(agentId: string, fact: string): Promise<void> {
+    let user = this.users.get(this.users.idFromString(this.ownerId!));
+    await retryOnDoReset(() => user.addMemory(agentId, fact));
+  }
+
+  async deleteAgentMemory(agentId: string, noteId: string): Promise<void> {
+    let user = this.users.get(this.users.idFromString(this.ownerId!));
+    await retryOnDoReset(() => user.deleteMemory(agentId, noteId));
+  }
+
   async listSlashCommands(): Promise<SlashCommandChoice[]> {
     let sources = [...this.storage.gatekeepers.list()]
       .filter(record => record.hasSlashCommands)
