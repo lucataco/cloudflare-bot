@@ -16,6 +16,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
   const [currentUrl, setCurrentUrl] = useState('about:blank');
   const sessionRef = useRef<RpcStub<ComputerSession> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scrollDebounceRef = useRef<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -44,12 +45,17 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
       if (sessionRef.current) {
         sessionRef.current[Symbol.dispose]();
       }
+      if (scrollDebounceRef.current !== null) {
+        clearTimeout(scrollDebounceRef.current);
+      }
     };
   }, [agentId, overseer]);
 
-  async function loadScreenshot(computerSession: RpcStub<ComputerSession>) {
+  async function loadScreenshot(computerSession: RpcStub<ComputerSession>, showSpinner = true) {
     try {
-      setLoading(true);
+      if (showSpinner) {
+        setLoading(true);
+      }
       setError(null);
       const imageData = await computerSession.screenshot();
       const blob = new Blob([imageData as unknown as BlobPart], { type: 'image/png' });
@@ -65,7 +71,9 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load computer');
     } finally {
-      setLoading(false);
+      if (showSpinner) {
+        setLoading(false);
+      }
     }
   }
 
@@ -84,7 +92,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
 
   async function handleRefresh() {
     if (!sessionRef.current) return;
-    await loadScreenshot(sessionRef.current);
+    await loadScreenshot(sessionRef.current, false);
   }
 
   async function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -98,7 +106,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     
     try {
       await sessionRef.current.click(Math.round(x), Math.round(y));
-      await loadScreenshot(sessionRef.current);
+      await loadScreenshot(sessionRef.current, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Click failed');
     }
@@ -110,7 +118,16 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     
     try {
       await sessionRef.current.scroll(e.deltaX, e.deltaY);
-      await loadScreenshot(sessionRef.current);
+      
+      if (scrollDebounceRef.current !== null) {
+        clearTimeout(scrollDebounceRef.current);
+      }
+      
+      scrollDebounceRef.current = window.setTimeout(async () => {
+        if (sessionRef.current) {
+          await loadScreenshot(sessionRef.current, false);
+        }
+      }, 150);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Scroll failed');
     }
@@ -125,7 +142,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
       e.preventDefault();
       try {
         await sessionRef.current.key(e.key);
-        await loadScreenshot(sessionRef.current);
+        await loadScreenshot(sessionRef.current, false);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Key failed');
       }
@@ -133,7 +150,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
       e.preventDefault();
       try {
         await sessionRef.current.type(e.key);
-        await loadScreenshot(sessionRef.current);
+        await loadScreenshot(sessionRef.current, false);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Type failed');
       }
@@ -179,13 +196,13 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
         </div>
         
         <div className="flex-1 overflow-auto p-4">
-          {loading && (
+          {loading && !screenshot && (
             <div className="flex h-full items-center justify-center">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
             </div>
           )}
           
-          {error && (
+          {error && !screenshot && (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <p className="text-sm text-red-500">{error}</p>
@@ -196,7 +213,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
             </div>
           )}
           
-          {screenshot && !loading && (
+          {screenshot && (
             <div className="flex flex-col items-center gap-2">
               <div className="text-xs text-kumo-subtle">
                 Current: {currentUrl}
