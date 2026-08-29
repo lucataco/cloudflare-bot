@@ -2922,6 +2922,23 @@ export async function runAgent(
   }
 
   if (agentContext.agentId) {
+    const captureScreenshotAfterAction = async (
+      session: Awaited<ReturnType<typeof hooks.getComputerSession>>,
+      resultMessage: string
+    ) => {
+      try {
+        const screenshotBytes = await session.screenshot();
+        return toolResult(resultMessage, {
+          image: { type: "png" as const, data: screenshotBytes }
+        } as Partial<AiToolCall>);
+      } catch (screenshotError) {
+        logger.warn("Failed to capture screenshot after action", {
+          error: screenshotError,
+        });
+        return toolResult(resultMessage);
+      }
+    };
+
     tools.computerNavigate = defineTool({
       name: "computerNavigate",
       label: "Navigate browser",
@@ -2941,7 +2958,7 @@ export async function runAgent(
                 title: `Navigated to ${url}`,
                 description: `Browser navigated to \`${url}\``,
               });
-          return toolResult(`Navigated to ${url}`);
+          return await captureScreenshotAfterAction(session, `Navigated to ${url}`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -2996,7 +3013,7 @@ export async function runAgent(
                 title: `Clicked at (${x}, ${y})`,
                 description: `Browser clicked at coordinates (${x}, ${y})`,
               });
-          return toolResult(`Clicked at (${x}, ${y})`);
+          return await captureScreenshotAfterAction(session, `Clicked at (${x}, ${y})`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -3023,7 +3040,7 @@ export async function runAgent(
                 title: `Typed text`,
                 description: `Typed ${text.length} characters in browser`,
               });
-          return toolResult(`Typed: ${text}`);
+          return await captureScreenshotAfterAction(session, `Typed: ${text}`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -3051,7 +3068,7 @@ export async function runAgent(
                 title: `Scrolled (${deltaX}, ${deltaY})`,
                 description: `Browser scrolled by (${deltaX}, ${deltaY}) pixels`,
               });
-          return toolResult(`Scrolled by (${deltaX}, ${deltaY}) pixels`);
+          return await captureScreenshotAfterAction(session, `Scrolled by (${deltaX}, ${deltaY}) pixels`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -3078,7 +3095,7 @@ export async function runAgent(
                 title: `Pressed ${key}`,
                 description: `Key ${key} pressed in browser`,
               });
-          return toolResult(`Pressed key: ${key}`);
+          return await captureScreenshotAfterAction(session, `Pressed key: ${key}`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -3106,7 +3123,7 @@ export async function runAgent(
                 title: `Waited ${cappedMs}ms`,
                 description: `Waited for ${cappedMs} milliseconds`,
               });
-          return toolResult(`Waited ${cappedMs}ms`);
+          return await captureScreenshotAfterAction(session, `Waited ${cappedMs}ms`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
