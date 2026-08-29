@@ -3031,6 +3031,89 @@ export async function runAgent(
       }
     });
 
+    tools.computerScroll = defineTool({
+      name: "computerScroll",
+      label: "Scroll in browser",
+      description: "Scroll the agent's web browser.",
+      parameters: Type.Object({
+        deltaX: Type.Number({description: "Horizontal scroll amount in pixels."}),
+        deltaY: Type.Number({description: "Vertical scroll amount in pixels."}),
+      }),
+      execute: async (toolCallId, {deltaX, deltaY}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          await session.scroll(deltaX, deltaY);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer scroll: (${deltaX}, ${deltaY})`,
+              undefined,
+              {
+                title: `Scrolled (${deltaX}, ${deltaY})`,
+                description: `Browser scrolled by (${deltaX}, ${deltaY}) pixels`,
+              });
+          return toolResult(`Scrolled by (${deltaX}, ${deltaY}) pixels`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.computerKey = defineTool({
+      name: "computerKey",
+      label: "Press key in browser",
+      description: "Press a key in the agent's web browser (e.g., Enter, Tab, Escape, ArrowDown).",
+      parameters: Type.Object({
+        key: Type.String({description: "The key to press (e.g., Enter, Tab, Escape, ArrowDown)."}),
+      }),
+      execute: async (toolCallId, {key}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          await session.key(key);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer key: ${key}`,
+              undefined,
+              {
+                title: `Pressed ${key}`,
+                description: `Key ${key} pressed in browser`,
+              });
+          return toolResult(`Pressed key: ${key}`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.computerWait = defineTool({
+      name: "computerWait",
+      label: "Wait",
+      description: "Wait for a specified duration (max 10 seconds).",
+      parameters: Type.Object({
+        ms: Type.Number({description: "Milliseconds to wait (capped at 10000)."}),
+      }),
+      execute: async (toolCallId, {ms}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          await session.wait(ms);
+          const cappedMs = Math.min(ms, 10000);
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer wait: ${cappedMs}ms`,
+              undefined,
+              {
+                title: `Waited ${cappedMs}ms`,
+                description: `Waited for ${cappedMs} milliseconds`,
+              });
+          return toolResult(`Waited ${cappedMs}ms`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
     tools.computerGetState = defineTool({
       name: "computerGetState",
       label: "Get browser state",
