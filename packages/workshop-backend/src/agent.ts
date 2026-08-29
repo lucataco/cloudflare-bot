@@ -462,6 +462,11 @@ export interface AgentHooks {
    */
   prepareChatBindings(chatId: number, chatMessages: AiChatMessage[]): Promise<SeedBindingInfo[]>;
 
+  getAgentMemory(agentId: string): Promise<string[]>;
+  listAgentMemory(agentId: string): Promise<{id: string, fact: string}[]>;
+  addAgentMemory(agentId: string, fact: string): Promise<void>;
+  deleteAgentMemory(agentId: string, noteId: string): Promise<void>;
+
   executeCodeMode(chatId: number, code: string,
                    initiator: AiChatAuthorInfo, initiatorModelId: string,
                    bindings: Record<string, ChatBindingEntry>,
@@ -2089,6 +2094,19 @@ export async function runAgent(
     }
   }
 
+  let agentMemoryPrompt = "";
+  if (agentContext.agentId) {
+    let memoryNotes = await hooks.listAgentMemory(agentContext.agentId);
+    if (memoryNotes.length > 0) {
+      let formattedNotes = memoryNotes.map(note => `[id:${note.id}] ${note.fact}`);
+      agentMemoryPrompt = `\n\n<agent_memory>\n${formattedNotes.join("\n")}\n</agent_memory>`;
+    }
+  }
+
+  // The two system prompt slots: the non-project-specific parts, followed by the
+  // project-specific parts. Kept as a two-part construction (static slot first) so the shared
+  // prefix stays byte-stable for prompt caching; they are concatenated into pi's single
+  // Context.systemPrompt string below.
   let systemPromptSlots: [string, string];
 
   if (agentContext.spawnerConfig) {
@@ -2116,9 +2134,9 @@ export async function runAgent(
       instanceInstructions || agentInstructions || agentSkillsText
           ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}${agentInstructions}${agentSkillsText}`
           : SPAWNER_SYSTEM_PROMPT,
-      alwaysAvailableResourcesPrompt
+      (alwaysAvailableResourcesPrompt
           ? `${systemPromptBindings}\n\n${alwaysAvailableResourcesPrompt}`
-          : systemPromptBindings,
+          : systemPromptBindings) + agentMemoryPrompt,
     ];
   } else {
     // This is a regular coding agent.
@@ -2226,7 +2244,8 @@ export async function runAgent(
           : SYSTEM_PROMPT,
       (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
-          (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
+          (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : "") +
+          agentMemoryPrompt,
     ];
   }
 
@@ -3031,6 +3050,57 @@ export async function runAgent(
                 description: `Current URL: ${state.currentUrl || 'none'}\nLast activity: ${state.lastActivityAt}`,
               });
           return toolResult(stateStr);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.memoryWrite = defineTool({
+      name: "memoryWrite",
+      label: "Remember fact",
+      description: "Store a fact in the agent's persistent memory.",
+      parameters: Type.Object({
+        fact: Type.String({description: "The fact to remember."}),
+      }),
+      execute: async (toolCallId, {fact}) => {
+        try {
+          await hooks.addAgentMemory(agentContext.agentId!, fact);
+          return toolResult(`Remembered: ${fact}`);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
+    tools.memoryForget = defineTool({
+      name: "memoryForget",
+      label: "Forget fact",
+      description: "Remove a fact from the agent's persistent memory by ID or exact text match.",
+      parameters: Type.Object({
+        id: Type.Optional(Type.String({description: "The ID of the memory note to forget."})),
+        fact: Type.Optional(Type.String({description: "The exact fact text to forget."})),
+      }),
+      execute: async (toolCallId, {id, fact}) => {
+        try {
+          if (!id && !fact) {
+            return toolResult("Error: Must provide either id or fact", {
+              isError: true,
+            } as Partial<AiToolCall>);
+          }
+          let notes = await hooks.listAgentMemory(agentContext.agentId!);
+          let noteToDelete = id
+            ? notes.find(n => n.id === id)
+            : notes.find(n => n.fact === fact);
+          if (!noteToDelete) {
+            return toolResult("Memory note not found", {
+              isError: true,
+            } as Partial<AiToolCall>);
+          }
+          await hooks.deleteAgentMemory(agentContext.agentId!, noteToDelete.id);
+          return toolResult(`Forgot: ${noteToDelete.fact}`);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;

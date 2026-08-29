@@ -25,6 +25,7 @@ import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
+import { Route as AgentIdMemoryRouteImport } from './routes/agent.$id.memory'
 import { Route as AgentIdRoutinesRouteImport } from './routes/agent.$id.routines'
 import { Route as AgentIdSkillsRouteImport } from './routes/agent.$id.skills'
 
@@ -108,6 +109,11 @@ const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
   path: '/workspace/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentIdMemoryRoute = AgentIdMemoryRouteImport.update({
+  id: '/agent/$id/memory',
+  path: '/agent/$id/memory',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentIdRoutinesRoute = AgentIdRoutinesRouteImport.update({
   id: '/agent/$id/routines',
   path: '/agent/$id/routines',
@@ -136,6 +142,7 @@ export interface FileRoutesByFullPath {
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/agent/$id/memory': typeof AgentIdMemoryRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
   '/agent/$id/skills': typeof AgentIdSkillsRoute
 }
@@ -156,6 +163,7 @@ export interface FileRoutesByTo {
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/agent/$id/memory': typeof AgentIdMemoryRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
   '/agent/$id/skills': typeof AgentIdSkillsRoute
 }
@@ -177,6 +185,7 @@ export interface FileRoutesById {
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/agent/$id/memory': typeof AgentIdMemoryRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
   '/agent/$id/skills': typeof AgentIdSkillsRoute
 }
@@ -199,6 +208,7 @@ export interface FileRouteTypes {
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
+    | '/agent/$id/memory'
     | '/agent/$id/routines'
     | '/agent/$id/skills'
   fileRoutesByTo: FileRoutesByTo
@@ -219,6 +229,7 @@ export interface FileRouteTypes {
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
+    | '/agent/$id/memory'
     | '/agent/$id/routines'
     | '/agent/$id/skills'
   id:
@@ -239,6 +250,7 @@ export interface FileRouteTypes {
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
     | '/workspace/$id'
+    | '/agent/$id/memory'
     | '/agent/$id/routines'
     | '/agent/$id/skills'
   fileRoutesById: FileRoutesById
@@ -260,6 +272,7 @@ export interface RootRouteChildren {
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
+  AgentIdMemoryRoute: typeof AgentIdMemoryRoute
   AgentIdRoutinesRoute: typeof AgentIdRoutinesRoute
   AgentIdSkillsRoute: typeof AgentIdSkillsRoute
 }
@@ -378,6 +391,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agent/$id/memory': {
+      id: '/agent/$id/memory'
+      path: '/agent/$id/memory'
+      fullPath: '/agent/$id/memory'
+      preLoaderRoute: typeof AgentIdMemoryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agent/$id/routines': {
       id: '/agent/$id/routines'
       path: '/agent/$id/routines'
@@ -412,6 +432,7 @@ const rootRouteChildren: RootRouteChildren = {
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
+  AgentIdMemoryRoute: AgentIdMemoryRoute,
   AgentIdRoutinesRoute: AgentIdRoutinesRoute,
   AgentIdSkillsRoute: AgentIdSkillsRoute,
 }

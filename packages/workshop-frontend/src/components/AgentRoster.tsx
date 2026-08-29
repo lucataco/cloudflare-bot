@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useAuthenticatedApi } from '../AuthContext'
 import { AgentProfile, AiChatAuthorInfo, Group } from '@gadgets/workshop-shared/api'
-import { Plus, User, Gear, Users, Clock, Book } from '@phosphor-icons/react'
+import { Plus, User, Gear, Users, Clock, Book, Brain } from '@phosphor-icons/react'
 import CreateAgentModal from './CreateAgentModal'
 import EditAgentModal from './EditAgentModal'
 import CreateGroupModal from './CreateGroupModal'
@@ -223,6 +223,15 @@ export default function AgentRoster({
                         title="Routines"
                       >
                         <Clock size={16} weight="bold" />
+                      </Link>
+                      <Link
+                        to="/agent/$id/memory"
+                        params={{ id: agent.id }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="rounded-lg p-1.5 text-kumo-subtle hover:bg-kumo-border/50 hover:text-kumo-default transition-all"
+                        title="Memory"
+                      >
+                        <Brain size={16} weight="bold" />
                       </Link>
                     </>
                   )}

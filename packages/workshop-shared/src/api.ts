@@ -512,6 +512,11 @@ export interface AuthenticatedApi extends RpcTarget {
   updateSkill(agentId: string, skillId: string, updates: { name?: string; description?: string; body?: string }): Promise<AgentSkill>;
   deleteSkill(agentId: string, skillId: string): Promise<void>;
 
+  listMemory(agentId: string): Promise<AgentMemoryNote[]>;
+  addMemory(agentId: string, fact: string): Promise<AgentMemoryNote>;
+  updateMemory(agentId: string, noteId: string, fact: string): Promise<AgentMemoryNote>;
+  deleteMemory(agentId: string, noteId: string): Promise<void>;
+
   listGroups(): Promise<Group[]>;
   createGroup(name: string, memberAgentIds: string[]): Promise<Group>;
   updateGroup(id: string, updates: { name?: string; memberAgentIds?: string[]; }): Promise<Group>;
@@ -1379,6 +1384,13 @@ export type AgentSkill = {
   body: string;
   created: Date;
   updated: Date;
+};
+
+export type AgentMemoryNote = {
+  id: string;
+  agentId: string;
+  fact: string;
+  created: Date;
 };
 
 export type AgentProfile = {
