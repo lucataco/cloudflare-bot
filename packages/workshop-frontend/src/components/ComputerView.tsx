@@ -16,6 +16,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
   const [currentUrl, setCurrentUrl] = useState('about:blank');
   const sessionRef = useRef<RpcStub<ComputerSession> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scrollDebounceRef = useRef<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -44,12 +45,17 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
       if (sessionRef.current) {
         sessionRef.current[Symbol.dispose]();
       }
+      if (scrollDebounceRef.current !== null) {
+        clearTimeout(scrollDebounceRef.current);
+      }
     };
   }, [agentId, overseer]);
 
-  async function loadScreenshot(computerSession: RpcStub<ComputerSession>) {
+  async function loadScreenshot(computerSession: RpcStub<ComputerSession>, showSpinner = true) {
     try {
-      setLoading(true);
+      if (showSpinner) {
+        setLoading(true);
+      }
       setError(null);
       const imageData = await computerSession.screenshot();
       const blob = new Blob([imageData as unknown as BlobPart], { type: 'image/png' });
@@ -65,7 +71,9 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load computer');
     } finally {
-      setLoading(false);
+      if (showSpinner) {
+        setLoading(false);
+      }
     }
   }
 
@@ -84,7 +92,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
 
   async function handleRefresh() {
     if (!sessionRef.current) return;
-    await loadScreenshot(sessionRef.current);
+    await loadScreenshot(sessionRef.current, false);
   }
 
   async function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -98,9 +106,54 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     
     try {
       await sessionRef.current.click(Math.round(x), Math.round(y));
-      await loadScreenshot(sessionRef.current);
+      await loadScreenshot(sessionRef.current, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Click failed');
+    }
+  }
+
+  async function handleCanvasWheel(e: React.WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    if (!sessionRef.current) return;
+    
+    try {
+      await sessionRef.current.scroll(e.deltaX, e.deltaY);
+      
+      if (scrollDebounceRef.current !== null) {
+        clearTimeout(scrollDebounceRef.current);
+      }
+      
+      scrollDebounceRef.current = window.setTimeout(async () => {
+        if (sessionRef.current) {
+          await loadScreenshot(sessionRef.current, false);
+        }
+      }, 150);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Scroll failed');
+    }
+  }
+
+  async function handleCanvasKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
+    if (!sessionRef.current) return;
+
+    const specialKeys = ['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+    
+    if (specialKeys.includes(e.key)) {
+      e.preventDefault();
+      try {
+        await sessionRef.current.key(e.key);
+        await loadScreenshot(sessionRef.current, false);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Key failed');
+      }
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      try {
+        await sessionRef.current.type(e.key);
+        await loadScreenshot(sessionRef.current, false);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Type failed');
+      }
     }
   }
 
@@ -143,13 +196,13 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
         </div>
         
         <div className="flex-1 overflow-auto p-4">
-          {loading && (
+          {loading && !screenshot && (
             <div className="flex h-full items-center justify-center">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
             </div>
           )}
           
-          {error && (
+          {error && !screenshot && (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <p className="text-sm text-red-500">{error}</p>
@@ -160,7 +213,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
             </div>
           )}
           
-          {screenshot && !loading && (
+          {screenshot && (
             <div className="flex flex-col items-center gap-2">
               <div className="text-xs text-kumo-subtle">
                 Current: {currentUrl}
@@ -168,6 +221,9 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
               <canvas
                 ref={canvasRef}
                 onClick={handleCanvasClick}
+                onWheel={handleCanvasWheel}
+                onKeyDown={handleCanvasKeyDown}
+                tabIndex={0}
                 style={{ 
                   backgroundImage: `url(${screenshot})`,
                   backgroundSize: 'contain',
@@ -176,11 +232,12 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
                   height: '720px',
                   maxWidth: '100%',
                   cursor: 'crosshair',
-                  border: '1px solid var(--kumo-border)'
+                  border: '1px solid var(--kumo-border)',
+                  outline: 'none'
                 }}
               />
               <div className="text-xs text-kumo-subtle">
-                Click on the image to interact
+                Click, scroll, or type to interact
               </div>
             </div>
           )}
