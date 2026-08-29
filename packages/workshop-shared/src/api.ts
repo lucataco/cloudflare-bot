@@ -3710,6 +3710,9 @@ export interface ComputerSession extends RpcTarget {
   screenshot(): Promise<Uint8Array>;
   click(x: number, y: number): Promise<void>;
   type(text: string): Promise<void>;
+  scroll(deltaX: number, deltaY: number): Promise<void>;
+  key(key: string): Promise<void>;
+  wait(ms: number): Promise<void>;
   getState(): Promise<{ agentId: string; currentUrl: string | null; lastActivityAt: Date }>;
   close(): Promise<void>;
 }

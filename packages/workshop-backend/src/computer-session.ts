@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { launch, type Page, type Browser } from "@cloudflare/puppeteer";
+import { launch, type Page, type Browser, type KeyInput } from "@cloudflare/puppeteer";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import type { ComputerSession } from "@gadgets/workshop-shared/api";
@@ -103,6 +103,23 @@ export class ComputerSessionImpl extends DurableObject implements ComputerSessio
     const page = await this.#ensureBrowser();
     await page.keyboard.type(text);
     await this.#persistState();
+  }
+
+  async scroll(deltaX: number, deltaY: number): Promise<void> {
+    const page = await this.#ensureBrowser();
+    await page.mouse.wheel({ deltaX, deltaY });
+    await this.#persistState();
+  }
+
+  async key(key: string): Promise<void> {
+    const page = await this.#ensureBrowser();
+    await page.keyboard.press(key as KeyInput);
+    await this.#persistState();
+  }
+
+  async wait(ms: number): Promise<void> {
+    const cappedMs = Math.min(ms, 10000);
+    await new Promise(resolve => setTimeout(resolve, cappedMs));
   }
 
   async getState(): Promise<ComputerSessionState> {
