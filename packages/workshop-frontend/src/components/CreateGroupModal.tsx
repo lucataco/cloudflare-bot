@@ -79,13 +79,17 @@ export default function CreateGroupModal({
   }
 
   return (
-    <Dialog open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
-      <Dialog.Content title="Create Group">
-        <Dialog.Header
-          title="Create Group"
-          description="Create a group chat with multiple agents"
-        />
-        <Dialog.Body>
+    <Dialog.Root open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
+      <Dialog className="responsive-dialog !w-[min(520px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="sm">
+        <div className="flex flex-col border-b border-kumo-line px-5 py-4">
+          <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
+            Create Group
+          </Dialog.Title>
+          <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+            Create a group chat with multiple agents
+          </Dialog.Description>
+        </div>
+        <div className="px-5 py-4">
           <div className="flex flex-col gap-4">
             <div>
               <label htmlFor="group-name" className="block text-sm font-medium text-kumo-default mb-1.5">
@@ -152,17 +156,17 @@ export default function CreateGroupModal({
               )}
             </div>
           </div>
-        </Dialog.Body>
+        </div>
 
-        <Dialog.Footer>
+        <div className="flex items-center justify-end gap-2 border-t border-kumo-line bg-kumo-base px-5 py-3">
           <Button variant="secondary" onClick={onCancel} disabled={loading}>
             Cancel
           </Button>
           <Button type="submit" loading={loading} onClick={handleCreate}>
             Create Group
           </Button>
-        </Dialog.Footer>
-      </Dialog.Content>
-    </Dialog>
+        </div>
+      </Dialog>
+    </Dialog.Root>
   )
 }

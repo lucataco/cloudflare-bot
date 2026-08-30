@@ -110,13 +110,17 @@ export default function EditGroupModal({
   }
 
   return (
-    <Dialog open={visible} onOpenChange={(open: boolean) => { if (!open && !loading && !deleting) onCancel() }}>
-      <Dialog.Content title="Edit Group">
-        <Dialog.Header
-          title="Edit Group"
-          description="Update group name and members"
-        />
-        <Dialog.Body>
+    <Dialog.Root open={visible} onOpenChange={(open: boolean) => { if (!open && !loading && !deleting) onCancel() }}>
+      <Dialog className="responsive-dialog !w-[min(520px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="sm">
+        <div className="flex flex-col border-b border-kumo-line px-5 py-4">
+          <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
+            Edit Group
+          </Dialog.Title>
+          <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+            Update group name and members
+          </Dialog.Description>
+        </div>
+        <div className="px-5 py-4">
           <div className="flex flex-col gap-4">
             <div>
               <label htmlFor="group-name" className="block text-sm font-medium text-kumo-default mb-1.5">
@@ -183,9 +187,9 @@ export default function EditGroupModal({
               )}
             </div>
           </div>
-        </Dialog.Body>
+        </div>
 
-        <Dialog.Footer className="flex justify-between">
+        <div className="flex items-center justify-between border-t border-kumo-line bg-kumo-base px-5 py-3">
           <Button variant="destructive" onClick={handleDelete} loading={deleting} disabled={loading}>
             Delete
           </Button>
@@ -197,8 +201,8 @@ export default function EditGroupModal({
               Update Group
             </Button>
           </div>
-        </Dialog.Footer>
-      </Dialog.Content>
-    </Dialog>
+        </div>
+      </Dialog>
+    </Dialog.Root>
   )
 }

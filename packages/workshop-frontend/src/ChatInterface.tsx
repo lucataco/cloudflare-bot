@@ -6936,10 +6936,6 @@ function ChatInterface({
     // A blocking (awaitDecision) pending action suspends the agent turn and blocks the composer, so
     // present it as a prominent callout with its details expanded by default.
     const isBlocking = isPending && log.description.awaitDecision === true;
-    // A pending request is never collapsed: its description is the thing the user has to read in
-    // order to answer it, so hiding it behind a disclosure would just add a step before every
-    // decision. Resolved actions are history, and collapse so a long thread stays scannable.
-    const showDescription = isPending || open;
     const metadata = log.resourceTitle;
     const stateLabel = isApproved
       ? "Approved"
@@ -6969,14 +6965,10 @@ function ChatInterface({
       <>
         {autoApproveTarget &&
           !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag) && (
-          <Tooltip content="Always approve this type of action on this connection, without future prompts." asChild>
-            <span className="flex">
-              <AlwaysApproveButton
-                onClick={() => setAutoApproveConfirm(autoApproveTarget)}
-                disabled={isProc}
-              />
-            </span>
-          </Tooltip>
+          <AlwaysApproveButton
+            onClick={() => setAutoApproveConfirm(autoApproveTarget)}
+            disabled={isProc}
+          />
         )}
         <ResolveButton
           tone="deny"
@@ -6985,7 +6977,7 @@ function ChatInterface({
         />
         <ResolveButton
           tone="approve"
-          variant={isBlocking ? "filled" : "quiet"}
+          variant="filled"
           onClick={() => void resolveAction(msg.actionId, "approve")}
           disabled={isProc}
         />
@@ -7047,57 +7039,60 @@ function ChatInterface({
       );
     }
 
-    const titleIcon = (
-      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center" aria-hidden="true">
-        {isPending ? (
-          <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand" />
-        ) : (
-          <WorkIcon Icon={LinkSimple} />
-        )}
-      </span>
-    );
-
     return (
       <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
         {isPending ? (
-          <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-1.5 py-1">
-            <div className="flex min-w-[8rem] flex-1 items-center gap-3">
-              {titleIcon}
-              <span className="min-w-0 flex-1 truncate text-kumo-default">
-                {log.description.title}
-              </span>
+          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
+                  <h3 className="m-0 min-w-[8rem] flex-1 text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+                    {log.description.title}
+                  </h3>
+                  <div className="flex flex-shrink-0 items-center gap-0.5">
+                    {actionControls}
+                  </div>
+                </div>
+                {log.description.description && (
+                  <div className={`mt-1.5 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                    <MarkdownMessage message={log.description.description} />
+                  </div>
+                )}
+                {resourceMeta && <div className="mt-1.5">{resourceMeta}</div>}
+              </div>
             </div>
-            <div className="ml-auto flex flex-shrink-0 items-center gap-0.5">{actionControls}</div>
           </div>
         ) : (
-          <button
-            type="button"
-            onClick={() => toggleActionExpansion(msg.actionId)}
-            className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
-            aria-expanded={open}
-          >
-            {titleIcon}
-            <span className="flex min-w-0 flex-1 items-center gap-2">
-              <span className="min-w-0 truncate">{log.description.title}</span>
-              {stateLabel && (
-                <span className={`flex-shrink-0 text-[12px] font-medium ${stateLabelCls}`}>
-                  {stateLabel}
-                </span>
-              )}
-              <CaretRight
-                size={13}
-                weight="bold"
-                className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
-              />
-            </span>
-          </button>
-        )}
-        {showDescription && (
-          <div className="themed-surface-inset ml-8 mt-1 space-y-1.5 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
-            <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
-              <MarkdownMessage message={log.description.description} />
+          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => toggleActionExpansion(msg.actionId)}
+                  className="flex w-full cursor-pointer items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
+                  aria-expanded={open}
+                >
+                  <h3 className="m-0 min-w-0 flex-1 truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+                    {log.description.title}
+                  </h3>
+                  {stateLabel && (
+                    <span className={`flex-shrink-0 text-[12px] font-medium ${stateLabelCls}`}>
+                      {stateLabel}
+                    </span>
+                  )}
+                  <CaretRight
+                    size={12}
+                    className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+                  />
+                </button>
+                {open && log.description.description && (
+                  <div className={`mt-1.5 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                    <MarkdownMessage message={log.description.description} />
+                  </div>
+                )}
+                {resourceMeta && <div className="mt-1.5">{resourceMeta}</div>}
+              </div>
             </div>
-            {resourceMeta}
           </div>
         )}
       </div>
