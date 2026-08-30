@@ -569,11 +569,11 @@ describe("PDF attachment bridging", () => {
 });
 
 describe("Workers AI output cap for small-window models", () => {
-  it("caps maxTokens to fit within the model's context window", () => {
-    const smallWindowHandle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
-    expect(smallWindowHandle.model.maxTokens).toBeLessThanOrEqual(
-        smallWindowHandle.model.contextWindow - 2048);
-    expect(smallWindowHandle.model.maxTokens).toBeGreaterThan(0);
+  it("caps Llama 3.3 70B maxTokens well below its 24k window to fit agent prompts", () => {
+    const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
+    expect(handle.model.contextWindow).toBe(24000);
+    expect(handle.model.maxTokens).toBeLessThanOrEqual(16000);
+    expect(handle.model.maxTokens).toBeGreaterThanOrEqual(15000);
   });
 
   it("uses the full output limit for catalog models with large windows", () => {
@@ -584,11 +584,6 @@ describe("Workers AI output cap for small-window models", () => {
     }, INITIATOR);
     expect(largeWindowHandle.model.contextWindow).toBe(1048576);
     expect(largeWindowHandle.model.maxTokens).toBe(32768);
-  });
-
-  it("caps custom Workers AI models with context windows smaller than WORKERS_AI_OUTPUT_LIMIT", () => {
-    const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
-    expect(handle.model.maxTokens).toBeLessThanOrEqual(handle.model.contextWindow);
   });
 });
 

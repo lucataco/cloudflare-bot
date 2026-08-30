@@ -148,7 +148,7 @@ function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined
   const requestedMaxTokens = suggested?.outputLimit ??
       (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
       catalog?.maxTokens ?? 4096;
-  const maxTokens = Math.min(requestedMaxTokens, Math.max(contextWindow - 2048, 4096));
+  const maxTokens = Math.min(requestedMaxTokens, Math.max(contextWindow - 8192, 4096));
   return { contextWindow, maxTokens };
 }
 
