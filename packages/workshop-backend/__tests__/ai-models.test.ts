@@ -567,3 +567,23 @@ describe("PDF attachment bridging", () => {
     }));
   }, 15000);
 });
+
+describe("Workers AI output cap for small-window models", () => {
+  it("caps Llama 3.3 70B maxTokens well below its 24k window to fit agent prompts", () => {
+    const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
+    expect(handle.model.contextWindow).toBe(24000);
+    expect(handle.model.maxTokens).toBeLessThanOrEqual(16000);
+    expect(handle.model.maxTokens).toBeGreaterThanOrEqual(15000);
+  });
+
+  it("uses the full output limit for catalog models with large windows", () => {
+    const largeWindowHandle = getModel(env(), {
+      provider: "cloudflare",
+      model: "@cf/deepseek-ai/deepseek-v4-pro-0813",
+      apiToken: "ignored-in-gateway-mode",
+    }, INITIATOR);
+    expect(largeWindowHandle.model.contextWindow).toBe(1048576);
+    expect(largeWindowHandle.model.maxTokens).toBe(32768);
+  });
+});
+
