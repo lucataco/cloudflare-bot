@@ -144,12 +144,12 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
 function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined)
     : { contextWindow: number, maxTokens: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
-  return {
-    contextWindow: suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000,
-    maxTokens: suggested?.outputLimit ??
-        (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
-        catalog?.maxTokens ?? 4096,
-  };
+  const contextWindow = suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000;
+  const requestedMaxTokens = suggested?.outputLimit ??
+      (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
+      catalog?.maxTokens ?? 4096;
+  const maxTokens = Math.min(requestedMaxTokens, Math.max(contextWindow - 2048, 4096));
+  return { contextWindow, maxTokens };
 }
 
 // Compat flags for a Workers AI model reached over its OpenAI-compatible endpoint (direct REST

@@ -567,3 +567,28 @@ describe("PDF attachment bridging", () => {
     }));
   }, 15000);
 });
+
+describe("Workers AI output cap for small-window models", () => {
+  it("caps maxTokens to fit within the model's context window", () => {
+    const smallWindowHandle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
+    expect(smallWindowHandle.model.maxTokens).toBeLessThanOrEqual(
+        smallWindowHandle.model.contextWindow - 2048);
+    expect(smallWindowHandle.model.maxTokens).toBeGreaterThan(0);
+  });
+
+  it("uses the full output limit for catalog models with large windows", () => {
+    const largeWindowHandle = getModel(env(), {
+      provider: "cloudflare",
+      model: "@cf/deepseek-ai/deepseek-v4-pro-0813",
+      apiToken: "ignored-in-gateway-mode",
+    }, INITIATOR);
+    expect(largeWindowHandle.model.contextWindow).toBe(1048576);
+    expect(largeWindowHandle.model.maxTokens).toBe(32768);
+  });
+
+  it("caps custom Workers AI models with context windows smaller than WORKERS_AI_OUTPUT_LIMIT", () => {
+    const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
+    expect(handle.model.maxTokens).toBeLessThanOrEqual(handle.model.contextWindow);
+  });
+});
+

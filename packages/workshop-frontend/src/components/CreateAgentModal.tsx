@@ -223,21 +223,18 @@ export default function CreateAgentModal({
                 Default Model
               </label>
               <Select
-                id="agent-model"
+                className="w-full text-sm"
+                placeholder="Select a model"
                 value={defaultModelId ?? ''}
                 onValueChange={(value) => setDefaultModelId(value || null)}
                 disabled={loading}
+                renderValue={(id) => modelOptions.find((opt) => opt.value === id)?.label || 'Select a model'}
               >
-                <Select.Trigger placeholder="Select a model">
-                  {modelOptions.find((opt) => opt.value === (defaultModelId ?? ''))?.label || 'Select a model'}
-                </Select.Trigger>
-                <Select.Content>
-                  {modelOptions.map((option) => (
-                    <Select.Item key={option.value} value={option.value}>
-                      {option.label}
-                    </Select.Item>
-                  ))}
-                </Select.Content>
+                {modelOptions.map((option) => (
+                  <Select.Option key={option.value} value={option.value}>
+                    {option.label}
+                  </Select.Option>
+                ))}
               </Select>
               <p className="mt-1 text-xs text-kumo-subtle">
                 The AI model this agent uses by default. You can override it per message.
