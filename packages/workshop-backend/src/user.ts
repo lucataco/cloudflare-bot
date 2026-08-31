@@ -30,6 +30,9 @@ type ConnectedAccountRecord = {
   // (no OAuth flow), rather than the user connecting it. Such accounts are protected from manual
   // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
   autoProvisioned?: boolean;
+  // For per-agent singleton accounts (e.g. Context Library), the agent this account belongs to.
+  // Absent means user-global (the old behavior for non-Context gatekeepers).
+  agentId?: string;
 };
 
 /**
@@ -52,6 +55,7 @@ export type ProvidedAccountInfo = {
 // shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
+type AccountCreatorWithIdStub = Required<Pick<GatekeeperVendor, "createAccountWithId">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
@@ -1711,12 +1715,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     await this.#createAutoProvisionedAccount(vendorId, vendor);
   }
 
-  // Mint a vendor's connected account with no OAuth flow and persist it as auto-provisioned. The
-  // caller must have already confirmed the vendor sets autoProvisionsAccount (so createAccount is
-  // present) and that the user has no account for it yet.
-  async #createAutoProvisionedAccount(vendorId: string, vendor: Service<GatekeeperVendor>): Promise<void> {
-    let account = await (vendor as unknown as AccountCreatorStub).createAccount();
-    // Resolve the description before allocating the id, so a describe() failure doesn't burn a slot.
+  async #createAutoProvisionedAccount(vendorId: string, vendor: Service<GatekeeperVendor>, agentId?: string): Promise<void> {
+    let account: Fetcher<GatekeeperUser>;
+    
+    if (vendorId === "context" && agentId) {
+      account = await (vendor as unknown as AccountCreatorWithIdStub).createAccountWithId(agentId);
+    } else {
+      account = await (vendor as unknown as AccountCreatorStub).createAccount();
+    }
+    
     let description = await account.describe();
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);
@@ -1726,6 +1733,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       description,
       vendorId,
       autoProvisioned: true,
+      agentId,
     });
   }
 
@@ -1733,23 +1741,35 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // RPCs (describe/createAccount), which releases the DO input gate; without this, two overlapping
   // calls (e.g. the nav listing apps while a gadget opens) could both see "not provisioned" and
   // create duplicate accounts. Cleared on completion so a later call re-checks (e.g. for a gatekeeper
-  // bound after this DO started).
-  #ensureAccountsPromise?: Promise<void>;
+  // bound after this DO started). Keyed by agentId (empty string for user-global).
+  #ensureAccountsPromises = new Map<string, Promise<void>>();
 
   // Ensure an auto-provisioned connected account exists for every bound vendor that requests it
   // (VendorDescription.autoProvisionsAccount) and is permitted by the provisioning policy. Idempotent
   // and best-effort: a single failing vendor never blocks the others. Creates at most one account per
-  // vendor. Deduped via #ensureAccountsPromise (above); callers reach it through listProvidedAccounts.
-  #ensureAutoProvisionedAccounts(): Promise<void> {
-    return (this.#ensureAccountsPromise ??=
-      this.#provisionMissingAccounts().finally(() => { this.#ensureAccountsPromise = undefined; }));
+  // vendor (or per vendor+agent for per-agent accounts). Deduped via #ensureAccountsPromises (above);
+  // callers reach it through listProvidedAccounts.
+  #ensureAutoProvisionedAccounts(agentId?: string): Promise<void> {
+    let key = agentId ?? "";
+    let existing = this.#ensureAccountsPromises.get(key);
+    if (existing) return existing;
+    let promise = this.#provisionMissingAccounts(agentId).finally(() => {
+      this.#ensureAccountsPromises.delete(key);
+    });
+    this.#ensureAccountsPromises.set(key, promise);
+    return promise;
   }
 
-  async #provisionMissingAccounts(): Promise<void> {
-    // Which vendors already have an auto-provisioned account?
+  async #provisionMissingAccounts(agentId?: string): Promise<void> {
+    // Which vendors already have an auto-provisioned account for this agent (or user-global if no agentId)?
     let provisioned = new Set<string>();
     for (let rec of this.#connectedAccountRecords()) {
-      if (rec.autoProvisioned) provisioned.add(rec.vendorId);
+      if (rec.autoProvisioned) {
+        // Match: both have agentId and they're equal, or neither has agentId (user-global)
+        if ((agentId && rec.agentId === agentId) || (!agentId && !rec.agentId)) {
+          provisioned.add(rec.vendorId);
+        }
+      }
     }
 
     let config = await readAdminConfig(this.env);
@@ -1760,7 +1780,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!shouldAutoProvisionAccount(config, vendorId)) continue;
 
       try {
-        await this.#createAutoProvisionedAccount(vendorId, vendor);
+        await this.#createAutoProvisionedAccount(vendorId, vendor, agentId);
       } catch (err) {
         logger.error("failed to auto-provision account", {
           event: "account.auto.provision.failed", vendorId, error: err,
@@ -1769,22 +1789,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  /**
-   * Ensure the user's auto-provisioned accounts exist (idempotent; see #ensureAutoProvisionedAccounts),
-   * then list those that declare an agent singleton and/or a management UI. Folding the ensure in lets
-   * callers (gadget open, app nav) provision and read the accounts back in a single round trip to this
-   * DO. Callers filter on `description.singleton` (ambient capsules / catalog) or
-   * `description.providesUi` (management-UI listing).
-   */
-  async listProvidedAccounts(): Promise<ProvidedAccountInfo[]> {
-    await this.#ensureAutoProvisionedAccounts();
+  async listProvidedAccounts(agentId?: string): Promise<ProvidedAccountInfo[]> {
+    await this.#ensureAutoProvisionedAccounts(agentId);
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
       if (!rec.description.singleton && !rec.description.providesUi) continue;
-      // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
-      // or management UI. (Its data is preserved, so re-enabling restores it.)
       if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
+      
+      if (agentId && rec.vendorId === "context") {
+        if (rec.agentId !== agentId) continue;
+      } else if (agentId && rec.agentId && rec.agentId !== agentId) {
+        continue;
+      }
+      
       result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
     }
     return result;
