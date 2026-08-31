@@ -5367,7 +5367,7 @@ class OverseerImpl implements AgentHooks {
     if (prepared.message !== undefined && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
+                      clientUser.id.toString(), false, needsAgentTurnKeepAlive, userMeta.agentProfile);
     }
 
     if (userMeta.quickModel) {
@@ -5454,7 +5454,7 @@ class OverseerImpl implements AgentHooks {
     if (runsAgentTurn && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
+                      clientUser.id.toString(), false, needsAgentTurnKeepAlive, userMeta.agentProfile);
     }
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -5739,10 +5739,27 @@ class OverseerImpl implements AgentHooks {
   // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
   // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
   // needed to re-resolve the model config on resume.
+  /**
+   * Constructs the author info for agent responses. In group chats with an agent profile,
+   * includes the profile ID so messages are attributed to the specific bot, not just the model.
+   */
+  #makeAgentAuthor(aiModel: UserAiModelRecord, agentProfile?: AgentProfile): AiChatAuthorInfo {
+    let author = aiModel.profile;
+    if (agentProfile) {
+      author = {
+        ...author,
+        name: agentProfile.name,
+        agentProfileId: agentProfile.id,
+      };
+    }
+    return author;
+  }
+
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
-             keepAlive: boolean = false): void {
+             keepAlive: boolean = false,
+             agentProfile?: AgentProfile): void {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -5755,27 +5772,29 @@ class OverseerImpl implements AgentHooks {
     });
 
     let liveChat = this.#getLiveChat(chatId);
-    let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
+    let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile);
     if (keepAlive) this.ctx.waitUntil(turn);
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
                 initiator: AiChatAuthorInfo,
                 callbackInitiated: boolean,
-                liveChat: LiveChatContext): Promise<void> {
+                liveChat: LiveChatContext,
+                agentProfile?: AgentProfile): Promise<void> {
     return obsContext.with({
       operation: "agent.run",
       gadgetId: this.ctx.id.toString(),
       chatId,
       modelId: aiModel.profile.id,
     }, () => traced("agent.run", () => this.#runAgentTurnWithContext(
-        chatId, aiModel, initiator, callbackInitiated, liveChat)));
+        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile)));
   }
 
   async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
                                  initiator: AiChatAuthorInfo,
                                  callbackInitiated: boolean,
-                                 liveChat: LiveChatContext): Promise<void> {
+                                 liveChat: LiveChatContext,
+                                 agentProfile?: AgentProfile): Promise<void> {
     // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
@@ -5814,7 +5833,7 @@ class OverseerImpl implements AgentHooks {
         let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
         let usage = await checkUsageAndBalance(this.env, ownerStub);
         if (!usage.allowed) {
-          this.postAgentErrorMessage(chatId, aiModel.profile,
+          this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile),
               usage.reason ?? "Usage limit reached.", "usage_limit");
           turnLogger.debug("agent run finished", {
             event: "agent.run.finished", outcome: "usage_limit",
@@ -5851,7 +5870,7 @@ class OverseerImpl implements AgentHooks {
 
         let compactionTurn = isCompactionTurn(chatMessages);
         let newCheckpoint = await runAgent(
-            this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
+            this, chosenModel, chatId, this.#makeAgentAuthor(aiModel, agentProfile), chatMessages, controller.signal,
             initiator, callbackInitiated, {
               checkpoint,
               modelConfig: aiModel.config,
@@ -5878,7 +5897,7 @@ class OverseerImpl implements AgentHooks {
           let count = liveChat.activeAgentCallbacks.size;
           this.rejectAllAgentCallbacks(chatId,
               "Agent failed to resolve callbacks after multiple attempts.");
-          this.postAgentErrorMessage(chatId, aiModel.profile,
+          this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile),
               `Failed to resolve ${count} outstanding callback(s).`);
           outcome = "callbacks_stalled";
           break;
@@ -5948,7 +5967,7 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile), errorMessage);
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);
@@ -6185,7 +6204,7 @@ class OverseerImpl implements AgentHooks {
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
       this.startAgent(chatId, userMeta.aiModel, author, callbacks[0].initiatorUserId,
-                      /* callbackInitiated */ true);
+                      /* callbackInitiated */ true, false, userMeta.agentProfile);
     } catch (err) {
       // Failure to set up the agent. Make sure to reject all callbacks.
       liveChat.pendingAgentCallbacks = [];
@@ -9037,7 +9056,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     } else if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
       this.impl.startAgent(chatId, userMeta.aiModel, author,
-                           this.impl.users.idFromString(resolveUserId).toString());
+                           this.impl.users.idFromString(resolveUserId).toString(), false, false, userMeta.agentProfile);
     } else {
       // TODO: Flag as needing user attention.
     }
@@ -10119,7 +10138,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.chatMeta.put(fresh);
 
     this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.#clientUser.id.toString());
+                         this.#clientUser.id.toString(), false, false, userMeta.agentProfile);
   }
 
   async acceptConnectionRequest(
@@ -10625,7 +10644,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.chatMeta.put(meta);
 
     this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.#clientUser.id.toString());
+                         this.#clientUser.id.toString(), false, false, userMeta.agentProfile);
   }
 
   async finalizeChatDraft(chatId: number): Promise<void> {
