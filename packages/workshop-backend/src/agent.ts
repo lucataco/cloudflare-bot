@@ -20,6 +20,7 @@ import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
 import type { ModelHandle } from "./ai-models";
+import { catalogModel, computeTokenLimits } from "./ai-models";
 import {
   buildCompactionState, buildSummaryPrompt, chatChangeStatuses, COMPACTION_SYSTEM_PROMPT,
   estimateProjectionTokens, findCompactionBoundary, findProtectedFromSequence,
@@ -3389,6 +3390,12 @@ export async function runAgent(
               maxTokens: maxOutputTokens,
               hasToolResultImages,
               supportsImages: handle.model.input.includes("image"),
+              requestUrl: handle.lastRequest?.url,
+              requestMaxTokens: handle.lastRequest?.maxTokens,
+              requestMaxCompletionTokens: handle.lastRequest?.maxCompletionTokens,
+              requestMessageCount: handle.lastRequest?.messageCount,
+              requestMessages: handle.lastRequest?.messages,
+              requestPromptChars: handle.lastRequest?.promptChars,
             });
           }
           break;
@@ -3527,6 +3534,20 @@ export async function runAgent(
     messages: modelMessages,
     tools: toolList,
   };
+
+  const catalog = catalogModel(compaction.modelConfig.provider, compaction.modelConfig.model);
+  const {contextWindow} = computeTokenLimits(compaction.modelConfig, catalog);
+  const finalContextTokens = estimateProjectionTokens(
+      modelMessages.map((message, index) => ({message, ...modelMessageSources[index]}))
+  ) + Math.ceil(systemPrompt.length / 4);
+
+  logger.debug("Agent turn starting", {
+    event: "agent.turn.start",
+    chatId,
+    contextWindow,
+    finalContextTokens,
+    maxOutputTokens,
+  });
 
   await runAgentLoopContinue(context, {
     model: handle.model,
