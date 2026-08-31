@@ -256,6 +256,21 @@ class ComputerSessionWrapper extends RpcTarget {
   }
 }
 
+export function resolveComputerSession(
+  ctx: { exports: any },
+  ownerId: string,
+  agentId: string
+): RpcStub<import("@gadgets/workshop-shared/api").ComputerSession> {
+  if (!ctx.exports.ComputerSessionImpl) {
+    throw new Error("Computer sessions require the BROWSER binding to be configured.");
+  }
+  const computerSessions = ctx.exports.ComputerSessionImpl;
+  const sessionKey = `${ownerId}:${agentId}`;
+  const id = computerSessions.idFromName(sessionKey);
+  const nativeStub = computerSessions.get(id);
+  return new ComputerSessionWrapper(nativeStub) as any;
+}
+
 // =======================================================================================
 
 // Per-chat in-memory state, used while an agent is running or agent callbacks are pending.
@@ -4684,14 +4699,7 @@ class OverseerImpl implements AgentHooks {
 
   async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
-    if (!this.ctx.exports.ComputerSessionImpl) {
-      throw new Error("Computer sessions require the BROWSER binding to be configured.");
-    }
-    const computerSessions = this.ctx.exports.ComputerSessionImpl;
-    const sessionKey = `${this.ownerId}:${agentId}`;
-    const id = computerSessions.idFromName(sessionKey);
-    const nativeStub = computerSessions.get(id);
-    return new ComputerSessionWrapper(nativeStub) as any;
+    return resolveComputerSession(this.ctx, this.ownerId, agentId);
   }
 
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
@@ -10912,15 +10920,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Agent not found or does not belong to you");
     }
 
-    if (!this.impl.ctx.exports.ComputerSessionImpl) {
-      throw new Error("Computer sessions require the BROWSER binding to be configured.");
-    }
-
-    const computerSessions = this.impl.ctx.exports.ComputerSessionImpl;
-    const sessionKey = `${this.clientUserId}:${agentId}`;
-    const id = computerSessions.idFromName(sessionKey);
-    const nativeStub = computerSessions.get(id);
-    return new ComputerSessionWrapper(nativeStub) as any;
+    return resolveComputerSession(this.impl.ctx, this.clientUserId, agentId);
   }
 
   async computerScreenshot(agentId: string): Promise<Uint8Array> {
