@@ -109,6 +109,7 @@ type AgentRecord = {
   defaultModelId: string | null;
   workspaceId: string;
   defaultBindings?: number[];
+  notifyOnUpdates?: boolean;
   created: Date;
   updated: Date;
 };
@@ -855,7 +856,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     description: string,
     defaultModelId: string | null,
     avatar?: AvatarImage,
-    defaultBindings?: number[]
+    defaultBindings?: number[],
+    notifyOnUpdates?: boolean
   ): Promise<AgentProfile> {
     let now = new Date();
     let agent: AgentRecord = {
@@ -867,6 +869,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       defaultModelId,
       workspaceId,
       defaultBindings,
+      notifyOnUpdates,
       created: now,
       updated: now,
     };
@@ -885,6 +888,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       defaultModelId?: string | null;
       avatar?: AvatarImage | null;
       defaultBindings?: number[];
+      notifyOnUpdates?: boolean;
     }
   ): Promise<AgentProfile> {
     let agent = this.storage.agents.get(id);
@@ -892,7 +896,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(`Agent not found: ${id}`);
     }
 
-    // Apply updates
     if (updates.name !== undefined) agent.name = updates.name;
     if (updates.title !== undefined) agent.title = updates.title;
     if (updates.description !== undefined) agent.description = updates.description;
@@ -905,6 +908,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     if (updates.defaultBindings !== undefined) agent.defaultBindings = updates.defaultBindings;
+    if (updates.notifyOnUpdates !== undefined) agent.notifyOnUpdates = updates.notifyOnUpdates;
 
     agent.updated = new Date();
     this.storage.agents.put(agent);

@@ -320,16 +320,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     description: string,
     defaultModelId: string | null,
     avatar?: AvatarImage,
-    defaultBindings?: number[]
+    defaultBindings?: number[],
+    notifyOnUpdates?: boolean
   ): Promise<AgentProfile> {
-    // Generate unique IDs
     let agentId = crypto.randomUUID();
     let workspaceId = this.overseers.newUniqueId().toString();
 
-    // Create the workspace for this agent
     await this.#user.newGadget(workspaceId, name);
 
-    // Create the agent record
     let agent = await this.#user.createAgentRecord(
       agentId,
       workspaceId,
@@ -338,7 +336,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       description,
       defaultModelId,
       avatar,
-      defaultBindings
+      defaultBindings,
+      notifyOnUpdates
     );
 
     recordAnalytics(this.ctx, this.env, {
@@ -360,11 +359,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       defaultModelId?: string | null;
       avatar?: AvatarImage | null;
       defaultBindings?: number[];
+      notifyOnUpdates?: boolean;
     }
   ): Promise<AgentProfile> {
     let agent = await this.#user.updateAgentRecord(id, updates);
 
-    // If name changed, update the workspace title too
     if (updates.name !== undefined) {
       await this.#user.updateTitle(agent.workspaceId, updates.name);
     }
