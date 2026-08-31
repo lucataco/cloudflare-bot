@@ -737,3 +737,68 @@ describe("model input capabilities for computer tools gating", () => {
   });
 });
 
+describe("null content coercion for Workers AI", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+
+  it("coerces null assistant content to empty string for Workers AI", async () => {
+    const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
+    
+    const stream = handle.stream(handle.model, {
+      messages: [
+        { role: "user" as const, content: "What tools do you have?", timestamp: 0 },
+        {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [{
+            id: "call_123",
+            type: "function" as const,
+            function: { name: "getTool", arguments: "{}" }
+          }],
+          timestamp: 0
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: "call_123",
+          content: "Tool result",
+          timestamp: 0
+        }
+      ],
+      tools: [{
+        type: "function" as const,
+        function: {
+          name: "getTool",
+          description: "Get a tool",
+          parameters: { type: "object" as const, properties: {} }
+        }
+      }]
+    }, { fetch: fetchStub, maxRetries: 0 });
+
+    await stream.result();
+    
+    expect(handle.lastRequest).toBeDefined();
+    expect(handle.lastRequest!.requestMessages.length).toBeGreaterThan(0);
+    
+    const assistantMsg = handle.lastRequest!.requestMessages.find((m: any) => m.role === "assistant");
+    if (assistantMsg) {
+      expect(assistantMsg.contentKind).toBe("string");
+    }
+  }, 15000);
+
+  it("does not break Anthropic requests", async () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR);
+    
+    const stream = handle.stream(handle.model, {
+      messages: [
+        { role: "user" as const, content: "Hello", timestamp: 0 }
+      ]
+    }, { fetch: fetchStub, maxRetries: 0 });
+
+    await stream.result();
+    
+    expect(handle.lastRequest).toBeDefined();
+    expect(handle.lastRequest!.requestMessages.length).toBe(1);
+  }, 15000);
+});
+
