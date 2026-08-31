@@ -2958,7 +2958,7 @@ export async function runAgent(
     });
   }
 
-  if (agentContext.agentId) {
+  if (agentContext.agentId && handle.model.input.includes("image")) {
     const captureScreenshotAfterAction = async (
       session: Awaited<ReturnType<typeof hooks.getComputerSession>>,
       resultMessage: string
@@ -3394,8 +3394,10 @@ export async function runAgent(
               requestMaxTokens: handle.lastRequest?.maxTokens,
               requestMaxCompletionTokens: handle.lastRequest?.maxCompletionTokens,
               requestMessageCount: handle.lastRequest?.messageCount,
-              requestMessages: handle.lastRequest?.messages,
               requestPromptChars: handle.lastRequest?.promptChars,
+              payloadKeys: handle.lastRequest?.payloadKeys,
+              toolsCount: handle.lastRequest?.toolsCount,
+              requestMessages: handle.lastRequest?.requestMessages,
             });
           }
           break;

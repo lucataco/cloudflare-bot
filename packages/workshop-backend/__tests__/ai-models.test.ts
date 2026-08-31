@@ -697,3 +697,43 @@ describe("getModel direct Workers AI binding (no gateway)", () => {
   }, 15000);
 });
 
+describe("lastRequest diagnostics", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+
+  it("captures PR 34 fields and new flattened fields", async () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR);
+    await captureRequest(handle);
+    
+    expect(handle.lastRequest).toBeDefined();
+    expect(typeof handle.lastRequest!.url).toBe("string");
+    expect(typeof handle.lastRequest!.messageCount).toBe("number");
+    expect(typeof handle.lastRequest!.promptChars).toBe("number");
+    expect(typeof handle.lastRequest!.payloadKeys).toBe("string");
+    expect(handle.lastRequest!.payloadKeys.split(",")).toContain("messages");
+    expect(handle.lastRequest!.toolsCount).toBe(0);
+    expect(handle.lastRequest!.requestMessages).toHaveLength(1);
+    
+    const msg = handle.lastRequest!.requestMessages[0];
+    expect(msg.role).toBe("user");
+    expect(["string", "array"]).toContain(msg.contentKind);
+    expect(typeof msg.contentPartTypes).toBe("string");
+    expect(msg.hasToolCalls).toBe(false);
+    expect(typeof msg.toolCallNames).toBe("string");
+    expect(msg.toolCallNames).toBe("");
+  }, 15000);
+});
+
+describe("model input capabilities for computer tools gating", () => {
+  it("marks Llama 3.3 70B as text-only", () => {
+    const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
+    expect(handle.model.input).toEqual(["text"]);
+  });
+
+  it("marks Anthropic models as image-capable", () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR);
+    expect(handle.model.input).toContain("image");
+  });
+});
+
