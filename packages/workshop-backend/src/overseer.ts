@@ -5785,10 +5785,18 @@ class OverseerImpl implements AgentHooks {
   // if it @mentioned other group members in its response. If so, queue turns for those mentioned
   // members. This enables bots to respond to each other without unbounded ping-pong (only explicit
   // @mentions trigger follow-up turns).
+  //
+  // Hard hop cap: mentionDepth >= 1 blocks further queuing, limiting agent-to-agent chains to
+  // one round (user → agent A → agent B, stop). This prevents infinite recursion when models
+  // keep @mentioning each other.
   async #queueMentionedGroupMembers(
       chatId: number, startSequence: number,
-      currentAgentModel: UserAiModelRecord, currentAgentAuthor: AiChatAuthorInfo): Promise<void> {
+      currentAgentModel: UserAiModelRecord, currentAgentAuthor: AiChatAuthorInfo,
+      mentionDepth: number): Promise<void> {
     try {
+      // Hard stop: only allow one round of mention-triggered turns per user-initiated turn.
+      if (mentionDepth >= 1) return;
+
       if (!this.ownerId) return;
 
       // Get the owner's user DO to access group and agent profile information.
@@ -5863,17 +5871,11 @@ class OverseerImpl implements AgentHooks {
           continue;
         }
         
-        // Ensure no agent is currently active before starting the next one.
-        let meta = this.storage.chatMeta.get(chatId);
-        if (!meta || meta.activeAgent) continue;
-        
         this.logger.info("starting agent turn for mentioned group member", {
           event: "agent.group.mention.turn",
           chatId,
         });
         
-        // Register and start the mentioned member's turn. We await the full turn to ensure
-        // sequential execution (no overlapping agents on the same chat).
         this.#registerRunningAgent(chatId);
         this.storage.activeAgents.put({
           chatId,
@@ -5883,13 +5885,16 @@ class OverseerImpl implements AgentHooks {
           callbackInitiated: false,
         });
         
-        meta.activeAgent = memberMeta.aiModel.profile;
-        meta.lastActive = this.getChatTimestamp();
-        this.storage.chatMeta.put(meta);
+        let meta = this.storage.chatMeta.get(chatId);
+        if (meta) {
+          meta.activeAgent = memberMeta.aiModel.profile;
+          meta.lastActive = this.getChatTimestamp();
+          this.storage.chatMeta.put(meta);
+        }
         
         let liveChat = this.#getLiveChat(chatId);
         await this.#runAgentTurn(chatId, memberMeta.aiModel, memberMeta.aiModel.profile,
-                                 false, liveChat);
+                                 false, liveChat, memberProfile, mentionDepth + 1);
       }
     } catch (err) {
       // Log but don't throw: agent-to-agent triggering is best-effort and should never
@@ -5947,21 +5952,23 @@ class OverseerImpl implements AgentHooks {
                 initiator: AiChatAuthorInfo,
                 callbackInitiated: boolean,
                 liveChat: LiveChatContext,
-                agentProfile?: AgentProfile): Promise<void> {
+                agentProfile?: AgentProfile,
+                mentionDepth: number = 0): Promise<void> {
     return obsContext.with({
       operation: "agent.run",
       gadgetId: this.ctx.id.toString(),
       chatId,
       modelId: aiModel.profile.id,
     }, () => traced("agent.run", () => this.#runAgentTurnWithContext(
-        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile)));
+        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile, mentionDepth)));
   }
 
   async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
                                  initiator: AiChatAuthorInfo,
                                  callbackInitiated: boolean,
                                  liveChat: LiveChatContext,
-                                 agentProfile?: AgentProfile): Promise<void> {
+                                 agentProfile?: AgentProfile,
+                                 mentionDepth: number = 0): Promise<void> {
     // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
@@ -6185,7 +6192,7 @@ class OverseerImpl implements AgentHooks {
       // Agent-to-agent communication for group chats: if this turn posted messages that @mention
       // other group member agents, queue turns for those mentioned members. This enables bots to
       // respond to each other without unbounded ping-pong (only explicit @mentions trigger).
-      await this.#queueMentionedGroupMembers(chatId, startSequence, aiModel, initiator);
+      await this.#queueMentionedGroupMembers(chatId, startSequence, aiModel, initiator, mentionDepth);
 
       // If any new messages were queued waiting for the agent to finish, deliver them now.
       if (liveChat.pendingAgentCallbacks.length > 0) {
