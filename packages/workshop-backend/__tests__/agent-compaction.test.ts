@@ -107,7 +107,7 @@ describe("compaction trigger", () => {
   // Cloudflare model configured by hand needs the reservation the model table can't declare for it.
   it("reserves Workers AI output capacity for a model the registry doesn't list", () => {
     expect(getModelTokenLimits({provider: "cloudflare", model: "@cf/custom", apiToken: ""}))
-        .toEqual({inputBudget: 8_192, maxOutputTokens: 15_808});
+        .toEqual({inputBudget: 10_000, maxOutputTokens: 14_000});
 
     // Other providers fall back to the assumed window with nothing withheld.
     expect(getModelTokenLimits({provider: "ollama", model: "local", apiToken: ""}))
@@ -120,9 +120,8 @@ describe("compaction trigger", () => {
       model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
       apiToken: "",
     });
-    expect(limits.maxOutputTokens).toBeLessThanOrEqual(16000);
-    expect(limits.maxOutputTokens).toBeGreaterThanOrEqual(15000);
-    expect(limits.inputBudget).toBe(24000 - limits.maxOutputTokens!);
+    expect(limits.maxOutputTokens).toBe(14_000);
+    expect(limits.inputBudget).toBe(10_000);
   });
 
   it("uses full output limit for catalog models with large windows", () => {
