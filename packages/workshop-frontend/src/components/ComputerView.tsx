@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { RpcStub } from 'capnweb';
-import { Overseer, ComputerSession } from '@gadgets/workshop-shared/api';
+import { Overseer, ComputerSession, AiChatMessage } from '@gadgets/workshop-shared/api';
 
 interface ComputerViewProps {
   agentId: string;
   overseer: RpcStub<Overseer>;
   onClose: () => void;
+  pendingTakeoverRequest?: AiChatMessage & { type: "computerHumanTakeover" };
+  onApproveTakeover?: (requestId: string) => Promise<void>;
+  isProcessingTakeover?: (requestId: string) => boolean;
 }
 
-export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) {
+export function ComputerView({ agentId, overseer, onClose, pendingTakeoverRequest, onApproveTakeover, isProcessingTakeover }: ComputerViewProps) {
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -17,6 +20,7 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
   const sessionRef = useRef<RpcStub<ComputerSession> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scrollDebounceRef = useRef<number | null>(null);
+  const [approvingTakeover, setApprovingTakeover] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -30,7 +34,15 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
         }
       } catch (err) {
         if (mounted) {
-          setError(err instanceof Error ? err.message : 'Failed to initialize computer');
+          let errorMsg = 'Failed to initialize computer';
+          if (err instanceof Error) {
+            if (err.message.includes('BROWSER binding')) {
+              errorMsg = 'Computer sessions require the BROWSER binding to be configured.';
+            } else if (!err.message.includes('Proxy could not be serialized')) {
+              errorMsg = err.message;
+            }
+          }
+          setError(errorMsg);
         }
       }
     }
@@ -157,17 +169,41 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
     }
   }
 
+  async function handleApproveTakeover() {
+    if (!pendingTakeoverRequest || !onApproveTakeover) return;
+    setApprovingTakeover(true);
+    try {
+      await onApproveTakeover(pendingTakeoverRequest.requestId);
+    } finally {
+      setApprovingTakeover(false);
+    }
+  }
+
+  const hasPendingTakeover = pendingTakeoverRequest && pendingTakeoverRequest.state === 'pending';
+  const isProcessing = hasPendingTakeover && isProcessingTakeover?.(pendingTakeoverRequest.requestId);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="flex h-[90vh] w-[90vw] flex-col rounded-lg bg-kumo-elevated shadow-xl">
         <div className="flex items-center justify-between border-b border-kumo-border px-4 py-3">
           <h2 className="text-lg font-semibold text-kumo-default">Agent Computer</h2>
-          <button
-            onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-kumo-default hover:bg-kumo-hovered"
-          >
-            Close
-          </button>
+          <div className="flex gap-2">
+            {hasPendingTakeover && onApproveTakeover && (
+              <button
+                onClick={handleApproveTakeover}
+                disabled={isProcessing || approvingTakeover}
+                className="rounded bg-kumo-brand px-3 py-1.5 text-sm text-white hover:bg-kumo-brand-hover disabled:opacity-50"
+              >
+                Done
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="rounded px-3 py-1.5 text-sm text-kumo-default hover:bg-kumo-hovered"
+            >
+              Close
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 border-b border-kumo-border px-4 py-2">
@@ -206,9 +242,6 @@ export function ComputerView({ agentId, overseer, onClose }: ComputerViewProps) 
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <p className="text-sm text-red-500">{error}</p>
-                <p className="mt-2 text-xs text-kumo-subtle">
-                  Computer sessions require the BROWSER binding to be configured.
-                </p>
               </div>
             </div>
           )}
