@@ -4684,15 +4684,14 @@ class OverseerImpl implements AgentHooks {
 
   async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
-    try {
-      const computerSessions = this.ctx.exports.ComputerSessionImpl;
-      const sessionKey = `${this.ownerId}:${agentId}`;
-      const id = computerSessions.idFromName(sessionKey);
-      const nativeStub = computerSessions.get(id);
-      return new ComputerSessionWrapper(nativeStub) as any;
-    } catch (err) {
+    if (!this.ctx.exports.ComputerSessionImpl) {
       throw new Error("Computer sessions require the BROWSER binding to be configured.");
     }
+    const computerSessions = this.ctx.exports.ComputerSessionImpl;
+    const sessionKey = `${this.ownerId}:${agentId}`;
+    const id = computerSessions.idFromName(sessionKey);
+    const nativeStub = computerSessions.get(id);
+    return new ComputerSessionWrapper(nativeStub) as any;
   }
 
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
@@ -10913,15 +10912,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Agent not found or does not belong to you");
     }
 
-    try {
-      const computerSessions = this.impl.ctx.exports.ComputerSessionImpl;
-      const sessionKey = `${this.clientUserId}:${agentId}`;
-      const id = computerSessions.idFromName(sessionKey);
-      const nativeStub = computerSessions.get(id);
-      return new ComputerSessionWrapper(nativeStub) as any;
-    } catch (err) {
+    if (!this.impl.ctx.exports.ComputerSessionImpl) {
       throw new Error("Computer sessions require the BROWSER binding to be configured.");
     }
+
+    const computerSessions = this.impl.ctx.exports.ComputerSessionImpl;
+    const sessionKey = `${this.clientUserId}:${agentId}`;
+    const id = computerSessions.idFromName(sessionKey);
+    const nativeStub = computerSessions.get(id);
+    return new ComputerSessionWrapper(nativeStub) as any;
   }
 
   async computerScreenshot(agentId: string): Promise<Uint8Array> {
