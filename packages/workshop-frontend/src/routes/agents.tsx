@@ -3,7 +3,6 @@ import { useState, useEffect } from 'react'
 import AgentRoster from '../components/AgentRoster'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useAuthenticatedApi } from '../AuthContext'
-import { AgentProfile } from '@gadgets/workshop-shared/api'
 
 /**
  * Agent roster page - shows when agentShell feature flag is enabled.
@@ -19,25 +18,18 @@ function AgentsPage() {
   const { authenticatedApi } = useAuthenticatedApi()
   const [firstLoad, setFirstLoad] = useState(true)
 
-  // On first load with zero agents, show the create form immediately via the roster's empty state
-  // When an agent is created or if agents exist, open the first one's workspace
   useEffect(() => {
     if (!firstLoad) return
 
     authenticatedApi.listAgents()
-      .then((agents: AgentProfile[]) => {
+      .then(() => {
         setFirstLoad(false)
-        if (agents.length > 0) {
-          // Open the first agent's workspace
-          navigate({ to: '/workspace/$id', params: { id: agents[0].workspaceId } })
-        }
-        // If zero agents, stay on this page and the empty state will show the create button
       })
       .catch((err: unknown) => {
         console.error('Failed to load agents:', err)
         setFirstLoad(false)
       })
-  }, [authenticatedApi, firstLoad, navigate])
+  }, [authenticatedApi, firstLoad])
 
   const handleAgentCreated = (_agentId: string, workspaceId: string) => {
     // Navigate to the newly created agent's workspace
