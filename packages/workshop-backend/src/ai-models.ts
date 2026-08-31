@@ -20,9 +20,6 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
-import { createWorkshopLogger } from "./observability.js";
-
-const logger = createWorkshopLogger("workshop.ai-models");
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -375,6 +372,24 @@ function makeHandle(args: HandleArgs): ModelHandle {
               args.model.api, await options.onPayload?.(payload, payloadModel) ?? payload
           ) ?? payload;
 
+          const promptChars = JSON.stringify(finalPayload).length;
+          const promptTokens = Math.ceil(promptChars / 4);
+          const remainingWindow = args.model.contextWindow - promptTokens;
+          const currentMaxTokens = (finalPayload as any).max_tokens ??
+              (finalPayload as any).max_completion_tokens;
+          const cappedMaxTokens = currentMaxTokens !== undefined
+              ? Math.min(currentMaxTokens, Math.max(remainingWindow, 4096))
+              : undefined;
+
+          if (cappedMaxTokens !== undefined && cappedMaxTokens < currentMaxTokens) {
+            if ((finalPayload as any).max_tokens !== undefined) {
+              (finalPayload as any).max_tokens = cappedMaxTokens;
+            }
+            if ((finalPayload as any).max_completion_tokens !== undefined) {
+              (finalPayload as any).max_completion_tokens = cappedMaxTokens;
+            }
+          }
+
           handle.lastRequest = {
             url: args.model.baseUrl ?? "unknown",
             maxTokens: (finalPayload as any).max_tokens,
@@ -389,7 +404,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
                         : [typeof m.content],
                   }))
                 : [],
-            promptChars: JSON.stringify(finalPayload).length,
+            promptChars,
           };
 
           return finalPayload;

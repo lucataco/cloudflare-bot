@@ -8,7 +8,6 @@ export type WorkshopObservabilityFields = {
   autoProvisioned: boolean;
   blueprintId: string;
   callbackInitiated: boolean;
-  cappedMaxTokens: number;
   chatId: number;
   commitCount: number;
   contextWindow: number;

@@ -3540,9 +3540,6 @@ export async function runAgent(
   const finalContextTokens = estimateProjectionTokens(
       modelMessages.map((message, index) => ({message, ...modelMessageSources[index]}))
   ) + Math.ceil(systemPrompt.length / 4);
-  const cappedMaxTokens = maxOutputTokens !== undefined
-      ? Math.min(maxOutputTokens, Math.max(contextWindow - finalContextTokens, 4096))
-      : undefined;
 
   logger.debug("Agent turn starting", {
     event: "agent.turn.start",
@@ -3550,7 +3547,6 @@ export async function runAgent(
     contextWindow,
     finalContextTokens,
     maxOutputTokens,
-    cappedMaxTokens,
   });
 
   await runAgentLoopContinue(context, {
@@ -3558,7 +3554,7 @@ export async function runAgent(
     // Replay already produces LLM-shaped messages; no custom message types exist.
     convertToLlm: (messages) => messages as Message[],
     toolExecution: "sequential",
-    maxTokens: cappedMaxTokens,
+    maxTokens: maxOutputTokens,
     shouldStopAfterTurn: () =>
         // Cancelled during tool execution: the completed turn was persisted by the turn_end
         // barrier just above; don't start another (doomed) model request.
