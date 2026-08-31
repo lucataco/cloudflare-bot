@@ -149,7 +149,8 @@ export function computeTokenLimits(
     config: AiModelConfig, catalog: Model<Api> | undefined)
     : { contextWindow: number, maxTokens: number, maxOutputTokens?: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
-  const contextWindow = suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000;
+  const contextWindow = suggested?.contextWindow ?? catalog?.contextWindow ??
+      (config.provider === "cloudflare" ? 24000 : 128_000);
   const requestedMaxTokens = suggested?.outputLimit ??
       (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
       catalog?.maxTokens ?? 4096;

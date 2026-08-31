@@ -585,5 +585,58 @@ describe("Workers AI output cap for small-window models", () => {
     expect(largeWindowHandle.model.contextWindow).toBe(1048576);
     expect(largeWindowHandle.model.maxTokens).toBe(32768);
   });
+
+  it("defaults custom cloudflare models without catalog to 24k context window", () => {
+    const customHandle = getModel(env(), {
+      provider: "cloudflare",
+      model: "@cf/custom/uncataloged-model",
+      apiToken: "ignored-in-gateway-mode",
+    }, INITIATOR);
+    expect(customHandle.model.contextWindow).toBe(24000);
+    expect(customHandle.model.maxTokens).toBeLessThan(32768);
+    expect(customHandle.model.maxTokens).toBeGreaterThanOrEqual(15000);
+  });
+
+  it("keeps DeepSeek at full 32768 output limit via SUGGESTED_MODELS", () => {
+    const deepseekHandle = getModel(env(), {
+      provider: "cloudflare",
+      model: "@cf/deepseek-ai/deepseek-v4-pro-0813",
+      apiToken: "ignored-in-gateway-mode",
+    }, INITIATOR);
+    expect(deepseekHandle.model.contextWindow).toBe(1048576);
+    expect(deepseekHandle.model.maxTokens).toBe(32768);
+  });
+});
+
+describe("getModelTokenLimits for agent stream", () => {
+  it("caps Llama 3.3 70B maxOutputTokens for the agent stream path", async () => {
+    const { getModelTokenLimits } = await import("../src/agent-compaction.js");
+    const limits = getModelTokenLimits(WORKERS_AI_CONFIG);
+    expect(limits.maxOutputTokens).toBeLessThan(32768);
+    expect(limits.maxOutputTokens).toBeGreaterThanOrEqual(15000);
+    expect(limits.inputBudget).toBeGreaterThan(0);
+    expect(limits.inputBudget).toBeLessThan(24000);
+  });
+
+  it("defaults custom cloudflare models without catalog to 24k for agent stream", async () => {
+    const { getModelTokenLimits } = await import("../src/agent-compaction.js");
+    const limits = getModelTokenLimits({
+      provider: "cloudflare",
+      model: "@cf/custom/uncataloged-model",
+      apiToken: "ignored",
+    });
+    expect(limits.maxOutputTokens).toBeLessThan(32768);
+    expect(limits.maxOutputTokens).toBeGreaterThanOrEqual(15000);
+  });
+
+  it("keeps DeepSeek at full 32768 output limit in agent stream", async () => {
+    const { getModelTokenLimits } = await import("../src/agent-compaction.js");
+    const limits = getModelTokenLimits({
+      provider: "cloudflare",
+      model: "@cf/deepseek-ai/deepseek-v4-pro-0813",
+      apiToken: "ignored",
+    });
+    expect(limits.maxOutputTokens).toBe(32768);
+  });
 });
 
