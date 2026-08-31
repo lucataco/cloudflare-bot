@@ -210,6 +210,67 @@ class RestoreForgerImpl extends NativeRpcTarget {
   }
 }
 
+@validateRpc()
+class ComputerSessionWrapper extends RpcTarget {
+  #nativeStub: any;
+
+  constructor(nativeStub: any) {
+    super();
+    this.#nativeStub = nativeStub;
+  }
+
+  async navigate(url: string): Promise<void> {
+    return await this.#nativeStub.navigate(url);
+  }
+
+  async screenshot(): Promise<Uint8Array> {
+    return await this.#nativeStub.screenshot();
+  }
+
+  async click(x: number, y: number): Promise<void> {
+    return await this.#nativeStub.click(x, y);
+  }
+
+  async type(text: string): Promise<void> {
+    return await this.#nativeStub.type(text);
+  }
+
+  async scroll(deltaX: number, deltaY: number): Promise<void> {
+    return await this.#nativeStub.scroll(deltaX, deltaY);
+  }
+
+  async key(key: string): Promise<void> {
+    return await this.#nativeStub.key(key);
+  }
+
+  async wait(ms: number): Promise<void> {
+    return await this.#nativeStub.wait(ms);
+  }
+
+  async getState(): Promise<{ agentId: string; currentUrl: string | null; lastActivityAt: Date }> {
+    return await this.#nativeStub.getState();
+  }
+
+  async close(): Promise<void> {
+    return await this.#nativeStub.close();
+  }
+}
+
+export function resolveComputerSession(
+  ctx: { exports: any },
+  ownerId: string,
+  agentId: string
+): RpcStub<import("@gadgets/workshop-shared/api").ComputerSession> {
+  if (!ctx.exports.ComputerSessionImpl) {
+    throw new Error("Computer sessions require the BROWSER binding to be configured.");
+  }
+  const computerSessions = ctx.exports.ComputerSessionImpl;
+  const sessionKey = `${ownerId}:${agentId}`;
+  const id = computerSessions.idFromName(sessionKey);
+  const nativeStub = computerSessions.get(id);
+  return new ComputerSessionWrapper(nativeStub) as any;
+}
+
 // =======================================================================================
 
 // Per-chat in-memory state, used while an agent is running or agent callbacks are pending.
@@ -4638,11 +4699,7 @@ class OverseerImpl implements AgentHooks {
 
   async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
-    const computerSessions = this.ctx.exports.ComputerSessionImpl;
-    const sessionKey = `${this.ownerId}:${agentId}`;
-    const id = computerSessions.idFromName(sessionKey);
-    const stub = computerSessions.get(id);
-    return stub;
+    return resolveComputerSession(this.ctx, this.ownerId, agentId);
   }
 
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
@@ -10863,11 +10920,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Agent not found or does not belong to you");
     }
 
-    const computerSessions = this.impl.ctx.exports.ComputerSessionImpl;
-    const sessionKey = `${this.clientUserId}:${agentId}`;
-    const id = computerSessions.idFromName(sessionKey);
-    const stub = computerSessions.get(id);
-    return stub;
+    return resolveComputerSession(this.impl.ctx, this.clientUserId, agentId);
   }
 
   async computerScreenshot(agentId: string): Promise<Uint8Array> {

@@ -8647,6 +8647,11 @@ function ChatInterface({
           agentId={selectedMemberAgentId || currentAgentProfile?.id || ''}
           overseer={getOverseer()}
           onClose={() => setShowComputer(false)}
+          pendingTakeoverRequest={currentMessages.find(
+            (msg) => msg.type === "computerHumanTakeover" && msg.state === "pending"
+          ) as AiChatMessage & { type: "computerHumanTakeover" } | undefined}
+          onApproveTakeover={handleApproveComputerTakeover}
+          isProcessingTakeover={(requestId: string) => processingComputerTakeovers.has(requestId)}
         />
       )}
     </div>
