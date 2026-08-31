@@ -2964,11 +2964,13 @@ export async function runAgent(
     ) => {
       try {
         const screenshotBytes = await session.screenshot();
-        return toolResult(resultMessage, {
-          image: { type: "png" as const, data: screenshotBytes }
-        } as Partial<AiToolCall>);
+        const notes = handle.model.input.includes("image")
+          ? { image: { type: "png" as const, data: screenshotBytes } } as Partial<AiToolCall>
+          : {};
+        return toolResult(resultMessage, notes);
       } catch (screenshotError) {
         logger.warn("Failed to capture screenshot after action", {
+          event: "agent.screenshot.failed",
           error: screenshotError,
         });
         const errorText = screenshotError instanceof Error ? screenshotError.message : String(screenshotError);
@@ -3020,9 +3022,10 @@ export async function runAgent(
                 title: `Screenshot captured`,
                 description: `Browser screenshot captured (${screenshotBytes.length} bytes)`,
               });
-          return toolResult("Screenshot captured", {
-            image: { type: "png" as const, data: screenshotBytes }
-          } as Partial<AiToolCall>);
+          const notes = handle.model.input.includes("image")
+            ? { image: { type: "png" as const, data: screenshotBytes } } as Partial<AiToolCall>
+            : {};
+          return toolResult("Screenshot captured", notes);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -3193,10 +3196,11 @@ export async function runAgent(
                 description: `Browser paused for: ${reason}`,
               });
 
+          const notes = handle.model.input.includes("image")
+            ? { image: { type: "png" as const, data: screenshotBytes } } as Partial<AiToolCall>
+            : {};
           return toolResult(`Browser session paused. Waiting for you to complete: ${reason}. ` +
-              `Your turn will end now. Once you've completed the step, approve the request to resume.`, {
-            image: { type: "png" as const, data: screenshotBytes }
-          } as Partial<AiToolCall>);
+              `Your turn will end now. Once you've completed the step, approve the request to resume.`, notes);
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
           throw error;
@@ -3373,9 +3377,20 @@ export async function runAgent(
         // the model has seen.
         let message = event.message as AssistantMessage;
         if (message.stopReason === "error" || message.stopReason === "aborted") {
-          // Persist nothing from a failed or cancelled model request; rethrown after the loop
-          // returns.
-          turnFailure = {message: message.errorMessage ?? "The model request failed."};
+          const errorMsg = message.errorMessage ?? "The model request failed.";
+          turnFailure = {message: errorMsg};
+          if (errorMsg.trim().startsWith("400")) {
+            const hasToolResultImages = event.toolResults?.some(r =>
+              r.content.some(c => c.type === "image"));
+            logger.error("Model request failed with 400", {
+              event: "agent.turn.400",
+              chatId,
+              modelId: handle.model.id,
+              maxTokens: maxOutputTokens,
+              hasToolResultImages,
+              supportsImages: handle.model.input.includes("image"),
+            });
+          }
           break;
         }
         // Note: a turn the model completed is persisted even if the user cancelled while its
