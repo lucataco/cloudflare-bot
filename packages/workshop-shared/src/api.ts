@@ -2702,6 +2702,13 @@ export type AiChatAuthorInfo = {
   /** Display name for author, e.g. "Kenton Varda" or "GPT" */
   name: string;
 
+  /**
+   * For group chat agent messages: the AgentProfile ID that authored this message.
+   * When present, this message is attributed to a specific bot profile in a group chat,
+   * not just the underlying model. The `id` field still holds the model ID for billing/routing.
+   */
+  agentProfileId?: string;
+
   // Note: the avatar is intentionally not included here to keep this type lightweight (it's
   // embedded in every chat message). Fetch user avatars separately via
   // `AuthenticatedApi.getAvatar(userId)`.
