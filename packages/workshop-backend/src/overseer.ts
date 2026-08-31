@@ -6239,12 +6239,16 @@ class OverseerImpl implements AgentHooks {
   //
   // The session is reached through the owner's stored connected account, not by asserting the owner's
   // identity to the vendor — so the capability is the account the user actually holds.
-  async ensureAmbientCapsules(): Promise<void> {
+  //
+  // Per-agent ambient capsules (e.g. Context Library) are provisioned per-agent when agentId is known,
+  // typically from the first chat that uses an agent. User-global capsules are provisioned once.
+  async ensureAmbientCapsules(agentId?: string): Promise<void> {
     if (!this.ownerId) return;
     let ownerDo = this.#ownerUserDo();
     // listProvidedAccounts ensures the owner's auto-provisioned singleton accounts exist first, so this
     // single round trip both provisions them and reads them back before we wire up capsules.
-    let accounts = (await ownerDo.listProvidedAccounts())
+    // Pass agentId to get per-agent accounts (e.g. Context Library) for this specific agent.
+    let accounts = (await ownerDo.listProvidedAccounts(agentId))
         .filter(account => account.description.singleton?.tsType);
 
     // Reconcile existing ambient capsule records against the owner's current singleton accounts. Each
@@ -6458,6 +6462,17 @@ class OverseerImpl implements AgentHooks {
       : Promise<SeedBindingInfo[]> {
     let context = this.getChatAgentContext(chatId);
     let dirty = false;
+
+    // Ensure per-agent ambient capsules (e.g. Context Library) are provisioned for this agent.
+    // Per-agent capsules are scoped by agentId so each agent gets its own independent instance.
+    // User-global capsules (no agentId) are provisioned once per user and shared across all agents.
+    if (context.agentId) {
+      await this.ensureAmbientCapsules(context.agentId).catch((err) => {
+        this.logger.error("failed to ensure per-agent ambient capsules", {
+          event: "ambient.capsules.per-agent.ensure.failed", error: err,
+        });
+      });
+    }
 
     if (context.alwaysAvailableCapsuleIds === undefined) {
       // Freeze the ambient set on first use. Ordered by gatekeeper id for determinism.
