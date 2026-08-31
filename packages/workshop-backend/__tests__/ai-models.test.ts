@@ -225,7 +225,7 @@ describe("getModel AI Gateway routing", () => {
     expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
     expect(request.headers.get("x-session-affinity")).toBe("session-a");
     const body = JSON.parse(request.body) as { max_tokens?: number; max_completion_tokens?: number };
-    expect(body.max_tokens).toBe(15808);
+    expect(body.max_tokens).toBe(14000);
     expect(body.max_completion_tokens).toBeUndefined();
   }, 15000);
 });
@@ -440,7 +440,7 @@ describe("getModel direct routing (no gateway)", () => {
         "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1/chat/completions");
     expect(request.headers.get("authorization")).toBe("Bearer user-token");
     const body = JSON.parse(request.body) as { max_tokens?: number; max_completion_tokens?: number };
-    expect(body.max_tokens).toBe(15808);
+    expect(body.max_tokens).toBe(14000);
     expect(body.max_completion_tokens).toBeUndefined();
   }, 15000);
 
@@ -639,5 +639,59 @@ describe("getModelTokenLimits for agent stream", () => {
     });
     expect(limits.maxOutputTokens).toBe(32768);
   });
+});
+
+describe("getModel direct Workers AI binding (no gateway)", () => {
+  const fakeBinding = {
+    fetch: async (input: Request | string | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      capturedRequests.push({
+        url: request.url,
+        headers: request.headers,
+        body: await request.text()
+      });
+      return Response.json(
+          { error: { type: "bad_request", message: "stubbed" } }, { status: 400 });
+    },
+  } as unknown as Ai;
+
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+
+  it("uses the Workers AI binding when present and no gateway configured", async () => {
+    const handle = getModel(
+        env({ CF_AI_GATEWAY: undefined, WORKERS_AI: fakeBinding }),
+        WORKERS_AI_CONFIG, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-completions");
+    expect(handle.model.id).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(handle.model.baseUrl).toBe("https://workers-binding.ai/v1");
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("https://workers-binding.ai/v1/chat/completions");
+    expect(request.headers.get("cf-aig-authorization"))
+        .toBe("Bearer cloudflare-gateway-binding");
+    const headerNames = Array.from(request.headers.keys()).map(k => k.toLowerCase());
+    expect(headerNames).not.toContain("authorization");
+    expect(headerNames).not.toContain("x-api-key");
+  }, 15000);
+
+  it("falls back to REST when binding absent and credentials present", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      ...WORKERS_AI_CONFIG,
+      accountId: "user-account-id",
+      apiToken: "user-token",
+    }, INITIATOR);
+
+    expect(handle.model.baseUrl).toBe(
+        "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1");
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe(
+        "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1/chat/completions");
+    expect(request.headers.get("authorization")).toBe("Bearer user-token");
+  }, 15000);
 });
 
