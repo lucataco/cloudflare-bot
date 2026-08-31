@@ -2005,6 +2005,14 @@ export interface Overseer extends RpcTarget {
   denyConnectionRequest(requestId: string): Promise<void>;
 
   /**
+   * Approve an agent's pending computer human takeover request (a "computerHumanTakeover" chat
+   * message). The user has completed the required step (password, 2FA, captcha, payment) in the
+   * ComputerView. This marks the request approved, updates the inline card, and resumes the agent
+   * so it can continue with the authenticated/completed session.
+   */
+  approveComputerHumanTakeover(requestId: string): Promise<void>;
+
+  /**
    * Subscribe to action adds/updates. Dispose the returned stub to unsubscribe.
    *
    * The subscription delivers live deltas only — nothing pre-existing is replayed. Query for
@@ -3014,6 +3022,26 @@ export type AiChatMessageBody = {
    * turn-start naming chokepoint.
    */
   bindingName?: string;
+} | {
+  /**
+   * The agent requested human interaction with its computer session (browser). This is needed when
+   * the session encounters a step that requires credentials, 2FA, captcha, or payment information
+   * that the agent must not handle itself. Rendered inline as a card with an "approve" button.
+   * The user completes the step in the existing ComputerView, then approves to resume the agent.
+   */
+  type: "computerHumanTakeover";
+
+  /** Unique id used by approveComputerHumanTakeover(). */
+  requestId: string;
+
+  /** Explanation of why human interaction is needed (e.g., "needs password entry", "requires 2FA"). */
+  reason: string;
+
+  /** Current URL of the browser session when the request was made. */
+  currentUrl: string;
+
+  /** Lifecycle state. Starts "pending"; set to "approved" when the user completes the step. */
+  state: "pending" | "approved";
 };
 
 /**
