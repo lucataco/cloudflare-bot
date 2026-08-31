@@ -473,7 +473,7 @@ export interface AuthenticatedApi extends RpcTarget {
    * generated ID and timestamps. The `defaultModelId` can be null for a human-only agent.
    */
   createAgent(name: string, title: string, description: string, defaultModelId: string | null,
-              avatar?: AvatarImage, defaultBindings?: number[]): Promise<AgentProfile>;
+              avatar?: AvatarImage, defaultBindings?: number[], notifyOnUpdates?: boolean): Promise<AgentProfile>;
 
   /**
    * Update an existing agent profile. All fields except `id`, `created`, and `updated` can be
@@ -487,6 +487,7 @@ export interface AuthenticatedApi extends RpcTarget {
     defaultModelId?: string | null;
     avatar?: AvatarImage | null;
     defaultBindings?: number[];
+    notifyOnUpdates?: boolean;
   }): Promise<AgentProfile>;
 
   /**
@@ -1424,6 +1425,11 @@ export type AgentProfile = {
    * accounts. Empty array means no accounts are introduced. Undefined (not set) means legacy behavior.
    */
   defaultBindings?: number[];
+  /**
+   * Whether to notify the owner when this agent has updates (routine completion, HITL waiting, new messages).
+   * Defaults to true when omitted for backward compatibility.
+   */
+  notifyOnUpdates?: boolean;
   /** When this agent profile was created. */
   created: Date;
   /** When this agent profile was last updated. */

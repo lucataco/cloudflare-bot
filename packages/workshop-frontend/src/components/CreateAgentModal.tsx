@@ -33,8 +33,8 @@ export default function CreateAgentModal({
   const [connectedAccounts, setConnectedAccounts] = useState<AccountEvent[]>([])
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
+  const [notifyOnUpdates, setNotifyOnUpdates] = useState(true)
 
-  // Reset all state when dialog closes
   useEffect(() => {
     if (!visible) {
       setName('')
@@ -44,6 +44,7 @@ export default function CreateAgentModal({
       setErrors({})
       setAdvancedOpen(false)
       setSelectedAccountIds([])
+      setNotifyOnUpdates(true)
     }
   }, [visible])
 
@@ -108,6 +109,7 @@ export default function CreateAgentModal({
         defaultModelId,
         undefined,
         selectedAccountIds,
+        notifyOnUpdates
       )
 
       toasts.add({
@@ -205,7 +207,17 @@ export default function CreateAgentModal({
           />
         </div>
 
-        {/* Advanced Settings */}
+        <div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <Checkbox
+              checked={notifyOnUpdates}
+              onCheckedChange={(checked) => setNotifyOnUpdates(checked === true)}
+              disabled={loading}
+            />
+            <span className="text-sm text-kumo-default">Notify me about this assistant</span>
+          </label>
+        </div>
+
         <div>
           <button
             type="button"

@@ -35,8 +35,8 @@ export default function EditAgentModal({
   const [connectedAccounts, setConnectedAccounts] = useState<AccountEvent[]>([])
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
+  const [notifyOnUpdates, setNotifyOnUpdates] = useState(true)
 
-  // Initialize form with agent data when modal opens
   useEffect(() => {
     if (visible) {
       setName(agent.name)
@@ -44,6 +44,7 @@ export default function EditAgentModal({
       setDescription(agent.description)
       setDefaultModelId(agent.defaultModelId)
       setSelectedAccountIds(agent.defaultBindings ?? [])
+      setNotifyOnUpdates(agent.notifyOnUpdates ?? true)
       setErrors({})
       setAdvancedOpen(false)
     }
@@ -109,6 +110,7 @@ export default function EditAgentModal({
         description: description.trim(),
         defaultModelId,
         defaultBindings: selectedAccountIds,
+        notifyOnUpdates,
       })
 
       toasts.add({
@@ -217,7 +219,6 @@ export default function EditAgentModal({
           </p>
         </div>
 
-        {/* Description */}
         <div>
           <label htmlFor="edit-agent-description" className="block text-sm font-medium text-kumo-default mb-1.5">
             Description
@@ -231,7 +232,17 @@ export default function EditAgentModal({
           />
         </div>
 
-        {/* Advanced Settings */}
+        <div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <Checkbox
+              checked={notifyOnUpdates}
+              onCheckedChange={(checked) => setNotifyOnUpdates(checked === true)}
+              disabled={loading}
+            />
+            <span className="text-sm text-kumo-default">Notify me about this assistant</span>
+          </label>
+        </div>
+
         <div>
           <button
             type="button"
