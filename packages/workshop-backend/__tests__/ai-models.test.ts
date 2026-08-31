@@ -58,7 +58,7 @@ const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
 async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
   const stream = await handle.stream(handle.model, {
     messages: [{ role: "user", content: "hello", timestamp: 0 }],
-  }, { fetch: fetchStub, maxRetries: 0 });
+  }, { fetch: fetchStub, maxRetries: 0, maxTokens: handle.model.maxTokens });
   const message = await stream.result();
   expect(message.stopReason).toBe("error");
   expect(capturedRequests.length).toBeGreaterThan(0);
@@ -223,8 +223,10 @@ describe("getModel AI Gateway routing", () => {
         "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/workers-ai/" +
         "v1/chat/completions");
     expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
-    // Session affinity flows through (Workers AI models opt in to the affinity headers).
     expect(request.headers.get("x-session-affinity")).toBe("session-a");
+    const body = JSON.parse(request.body) as { max_tokens?: number; max_completion_tokens?: number };
+    expect(body.max_tokens).toBe(15808);
+    expect(body.max_completion_tokens).toBeUndefined();
   }, 15000);
 });
 
@@ -437,6 +439,9 @@ describe("getModel direct routing (no gateway)", () => {
     expect(request.url).toBe(
         "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1/chat/completions");
     expect(request.headers.get("authorization")).toBe("Bearer user-token");
+    const body = JSON.parse(request.body) as { max_tokens?: number; max_completion_tokens?: number };
+    expect(body.max_tokens).toBe(15808);
+    expect(body.max_completion_tokens).toBeUndefined();
   }, 15000);
 
   it.each([
