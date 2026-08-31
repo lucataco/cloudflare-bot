@@ -17,7 +17,9 @@ export type WorkshopObservabilityFields = {
   failureCount: number;
   gadgetId: string;
   gatekeeperId: number | string;
+  hasToolResultImages: boolean;
   logBytes: number;
+  maxTokens: number;
   modelId: string;
   observerId: string;
   operation: string;
@@ -29,6 +31,7 @@ export type WorkshopObservabilityFields = {
   status: number;
   statusCode: number;
   statusText: string;
+  supportsImages: boolean;
   toolCallId: string;
   toolName: string;
   vendorId: string;
