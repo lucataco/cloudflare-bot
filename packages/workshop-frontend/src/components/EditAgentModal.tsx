@@ -9,7 +9,8 @@ import { logRpcFailure } from '../rpcErrors'
 interface EditAgentModalProps {
   visible: boolean
   onCancel: () => void
-  onSuccess: () => void
+  onSuccess: (updatedAgent: AgentProfile) => void
+  onDelete: () => void
   authenticatedApi: RpcStub<AuthenticatedApi>
   agent: AgentProfile
   models: AiChatAuthorInfo[]
@@ -19,6 +20,7 @@ export default function EditAgentModal({
   visible,
   onCancel,
   onSuccess,
+  onDelete,
   authenticatedApi,
   agent,
   models,
@@ -104,7 +106,7 @@ export default function EditAgentModal({
 
     setLoading(true)
     try {
-      await authenticatedApi.updateAgent(agent.id, {
+      const updatedAgent = await authenticatedApi.updateAgent(agent.id, {
         name: name.trim(),
         title: title.trim(),
         description: description.trim(),
@@ -119,7 +121,7 @@ export default function EditAgentModal({
         variant: 'success',
       })
 
-      onSuccess()
+      onSuccess(updatedAgent)
     } catch (err) {
       console.error('Failed to update agent:', err)
       toasts.add({
@@ -147,7 +149,7 @@ export default function EditAgentModal({
         variant: 'success',
       })
 
-      onSuccess()
+      onDelete()
     } catch (err) {
       console.error('Failed to delete agent:', err)
       toasts.add({

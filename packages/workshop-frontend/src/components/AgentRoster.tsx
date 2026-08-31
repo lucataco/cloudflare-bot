@@ -101,7 +101,15 @@ export default function AgentRoster({
     setEditGroupModalVisible(true)
   }
 
-  const handleAgentUpdated = () => {
+  const handleAgentUpdated = (updatedAgent: AgentProfile) => {
+    setEditAgentModalVisible(false)
+    setEditingAgent(null)
+    setAgents((prevAgents) =>
+      prevAgents.map((a) => (a.id === updatedAgent.id ? updatedAgent : a))
+    )
+  }
+
+  const handleAgentDeleted = () => {
     setEditAgentModalVisible(false)
     setEditingAgent(null)
     loadAgents()
@@ -310,6 +318,7 @@ export default function AgentRoster({
             setEditingAgent(null)
           }}
           onSuccess={handleAgentUpdated}
+          onDelete={handleAgentDeleted}
           authenticatedApi={authenticatedApi}
           agent={editingAgent}
           models={models}
