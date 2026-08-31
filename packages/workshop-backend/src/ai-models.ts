@@ -388,7 +388,7 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
     return getModelViaGateway(gwConfig, config, initiator, options);
   }
 
-  return getModelDirect(config, options.sessionAffinity);
+  return getModelDirect(config, env, options.sessionAffinity);
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -521,7 +521,7 @@ function getModelViaGateway(
 }
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
-function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+function getModelDirect(config: AiModelConfig, env: Cloudflare.Env, sessionAffinity?: string): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
@@ -545,9 +545,30 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         sessionAffinity,
       });
     case "cloudflare": {
-      // Workers AI is fetch-only (no Workers-binding transport), so outside AI Gateway mode it's
-      // BYOK like every other provider: the user's own account ID and API token come from the
-      // model config. (The REST endpoint is account-scoped, hence the extra accountId field.)
+      const binding = (env as { WORKERS_AI?: Ai }).WORKERS_AI;
+      if (binding) {
+        return makeHandle({
+          model: {
+            id: config.model,
+            name: catalog?.name ?? config.model,
+            api: "openai-completions",
+            provider: "cloudflare-workers-ai",
+            baseUrl: "https://workers-binding.ai/ai-gateway/gateways/default/workers-ai/v1",
+            reasoning: catalog?.reasoning ?? false,
+            input: catalog?.input ?? ["text"],
+            cost: catalog?.cost ?? ZERO_COST,
+            ...window,
+            compat: workersAiCompat(catalog),
+          },
+          headers: {
+            "cf-aig-authorization": `Bearer ${CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL}`,
+            Authorization: null,
+            "x-api-key": null,
+          },
+          fetch: bindingFetch(binding),
+          sessionAffinity,
+        });
+      }
       if (!config.accountId || !config.apiToken) {
         throw new Error(
             "This Workers AI model has no Cloudflare credentials. Re-add it with your " +
