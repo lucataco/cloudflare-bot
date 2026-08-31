@@ -5374,8 +5374,16 @@ class OverseerImpl implements AgentHooks {
             let memberContext = await retryOnDoReset(
                 () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
             if (memberContext.aiModel) {
-              this.startAgent(chatId, memberContext.aiModel, userMeta.profile,
-                            clientUser.id.toString(), false, needsAgentTurnKeepAlive, memberProfile);
+              this.#registerRunningAgent(chatId);
+              this.storage.activeAgents.put({
+                chatId,
+                initiatorUserId: clientUser.id.toString(),
+                modelId: memberContext.aiModel.profile.id,
+                initiator: userMeta.profile,
+                callbackInitiated: false,
+              });
+              let liveChat = this.#getLiveChat(chatId);
+              await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
             }
           }
         }
@@ -5476,8 +5484,16 @@ class OverseerImpl implements AgentHooks {
             let memberContext = await retryOnDoReset(
                 () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
             if (memberContext.aiModel) {
-              this.startAgent(chatId, memberContext.aiModel, userMeta.profile,
-                            clientUser.id.toString(), false, needsAgentTurnKeepAlive, memberProfile);
+              this.#registerRunningAgent(chatId);
+              this.storage.activeAgents.put({
+                chatId,
+                initiatorUserId: clientUser.id.toString(),
+                modelId: memberContext.aiModel.profile.id,
+                initiator: userMeta.profile,
+                callbackInitiated: false,
+              });
+              let liveChat = this.#getLiveChat(chatId);
+              await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
             }
           }
         }
