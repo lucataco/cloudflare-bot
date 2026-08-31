@@ -65,7 +65,6 @@ import { useUiFeatureFlag } from "./FeatureFlagsContext";
 import {
   getInitialSelectedModel,
   getStoredSelectedModel,
-  persistSelectedModel,
 } from "./modelSelection";
 import {
   Overseer,
@@ -117,6 +116,7 @@ import { FormatMiniature } from "./components/format/FormatVisuals";
 import { formatIconDataUrl } from "./components/format/formatIconImage";
 import { locateMessageFormatRefs } from "./components/format/messageFormatRefs";
 import ComposerFormatMenuItems from "./components/format/ComposerFormatMenuItems";
+import AddModelModal from "./AddModelModal";
 import { HookToggle } from "./components/HookToggle";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
@@ -2045,6 +2045,15 @@ export const ChatInput = ({
   // Save the cursor position when the attach modal opens, so we can insert the capsule there.
   const attachCursorPosRef = useRef(0);
 
+  // Add model modal state
+  const [addModelModalOpen, setAddModelModalOpen] = useState(false);
+  const [aiConfig, setAiConfig] = useState<import("@gadgets/workshop-shared/api").AiGatewayInfo | null>(null);
+
+  // Fetch AI config for AddModelModal
+  useEffect(() => {
+    authenticatedApi.getAiConfig().then(setAiConfig).catch(() => setAiConfig(null));
+  }, [authenticatedApi]);
+
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null);
   const promptCardRef = useRef<HTMLDivElement>(null);
@@ -3699,6 +3708,13 @@ export const ChatInput = ({
                       <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
                     )}
                   </DropdownMenu.Item>
+                  <div className="my-1 border-t border-kumo-line/70" />
+                  <DropdownMenu.Item
+                    onClick={() => setAddModelModalOpen(true)}
+                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                  >
+                    <span className="min-w-0 flex-1 truncate">Advanced...</span>
+                  </DropdownMenu.Item>
                 </DropdownMenu.Content>
               </DropdownMenu>
               {isAgentActive && onStop ? (
@@ -3750,6 +3766,17 @@ export const ChatInput = ({
         onCreated={handleAttachCreated}
         workspaceId={workspaceId}
         agentId={agentId}
+      />
+
+      <AddModelModal
+        visible={addModelModalOpen}
+        onCancel={() => setAddModelModalOpen(false)}
+        onSuccess={() => {
+          setAddModelModalOpen(false);
+          toasts.add({ title: 'Model added. Reload to see it in the list.', variant: 'success' });
+        }}
+        authenticatedApi={authenticatedApi}
+        aiConfig={aiConfig}
       />
     </div>
   );
@@ -6036,7 +6063,6 @@ function ChatInterface({
   // Handle model change
   const handleModelChange = (modelId: string | null) => {
     setSelectedModel(modelId);
-    persistSelectedModel(modelId);
   };
 
   // Handle stopping the agent

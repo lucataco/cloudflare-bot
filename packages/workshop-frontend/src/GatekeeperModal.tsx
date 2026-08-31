@@ -57,6 +57,10 @@ export interface GatekeeperModalProps {
    */
   workspaceId?: string
   /**
+   * If set, use this specific agent profile to filter bindings (overrides workspace lookup).
+   */
+  agentId?: string
+  /**
    * Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
    * normally the gadget the spawner is being created for plus that gadget's own bindings. All are
    * enabled by default, reproducing the pre-multi-gadget "spawned agents inherit everything"

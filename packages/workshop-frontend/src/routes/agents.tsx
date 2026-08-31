@@ -39,7 +39,7 @@ function AgentsPage() {
       })
   }, [authenticatedApi, firstLoad, navigate])
 
-  const handleAgentCreated = (agentId: string, workspaceId: string) => {
+  const handleAgentCreated = (_agentId: string, workspaceId: string) => {
     // Navigate to the newly created agent's workspace
     navigate({ to: '/workspace/$id', params: { id: workspaceId } })
   }
