@@ -401,6 +401,19 @@ function makeHandle(args: HandleArgs): ModelHandle {
             }
           }
 
+          const isWorkersAi = args.model.provider === "cloudflare-workers-ai" ||
+              (args.model.baseUrl !== undefined &&
+                  (args.model.baseUrl.includes("workers-binding.ai") ||
+                   args.model.baseUrl.includes("api.cloudflare.com"))) ||
+              (args.model as { workersAiCompat?: boolean }).workersAiCompat;
+          if (isWorkersAi && Array.isArray(finalPayload.messages)) {
+            for (const msg of finalPayload.messages) {
+              if (msg.content === null || msg.content === undefined) {
+                msg.content = "";
+              }
+            }
+          }
+
           const payloadKeys = Object.keys(finalPayload).sort().join(",");
           const toolsCount = Array.isArray(finalPayload.tools) ? finalPayload.tools.length : 0;
           const messages = Array.isArray(finalPayload.messages) ? finalPayload.messages : [];
