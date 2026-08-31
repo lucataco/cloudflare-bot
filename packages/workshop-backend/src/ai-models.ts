@@ -154,7 +154,7 @@ export function computeTokenLimits(
   const requestedMaxTokens = suggested?.outputLimit ??
       (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
       catalog?.maxTokens ?? 4096;
-  const maxTokens = Math.min(requestedMaxTokens, Math.max(contextWindow - 8192, 4096));
+  const maxTokens = Math.min(requestedMaxTokens, Math.max(contextWindow - 10000, 4096));
   const maxOutputTokens = suggested?.outputLimit !== undefined ||
       config.provider === "cloudflare" ? maxTokens : undefined;
   return { contextWindow, maxTokens, maxOutputTokens };

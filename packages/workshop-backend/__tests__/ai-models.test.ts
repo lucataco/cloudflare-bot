@@ -572,8 +572,7 @@ describe("Workers AI output cap for small-window models", () => {
   it("caps Llama 3.3 70B maxTokens well below its 24k window to fit agent prompts", () => {
     const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR);
     expect(handle.model.contextWindow).toBe(24000);
-    expect(handle.model.maxTokens).toBeLessThanOrEqual(16000);
-    expect(handle.model.maxTokens).toBeGreaterThanOrEqual(15000);
+    expect(handle.model.maxTokens).toBe(14000);
   });
 
   it("uses the full output limit for catalog models with large windows", () => {
@@ -593,8 +592,7 @@ describe("Workers AI output cap for small-window models", () => {
       apiToken: "ignored-in-gateway-mode",
     }, INITIATOR);
     expect(customHandle.model.contextWindow).toBe(24000);
-    expect(customHandle.model.maxTokens).toBeLessThan(32768);
-    expect(customHandle.model.maxTokens).toBeGreaterThanOrEqual(15000);
+    expect(customHandle.model.maxTokens).toBe(14000);
   });
 
   it("keeps DeepSeek at full 32768 output limit via SUGGESTED_MODELS", () => {
@@ -612,10 +610,8 @@ describe("getModelTokenLimits for agent stream", () => {
   it("caps Llama 3.3 70B maxOutputTokens for the agent stream path", async () => {
     const { getModelTokenLimits } = await import("../src/agent-compaction.js");
     const limits = getModelTokenLimits(WORKERS_AI_CONFIG);
-    expect(limits.maxOutputTokens).toBeLessThan(32768);
-    expect(limits.maxOutputTokens).toBeGreaterThanOrEqual(15000);
-    expect(limits.inputBudget).toBeGreaterThan(0);
-    expect(limits.inputBudget).toBeLessThan(24000);
+    expect(limits.maxOutputTokens).toBe(14000);
+    expect(limits.inputBudget).toBe(10000);
   });
 
   it("defaults custom cloudflare models without catalog to 24k for agent stream", async () => {
@@ -625,8 +621,8 @@ describe("getModelTokenLimits for agent stream", () => {
       model: "@cf/custom/uncataloged-model",
       apiToken: "ignored",
     });
-    expect(limits.maxOutputTokens).toBeLessThan(32768);
-    expect(limits.maxOutputTokens).toBeGreaterThanOrEqual(15000);
+    expect(limits.maxOutputTokens).toBe(14000);
+    expect(limits.inputBudget).toBe(10000);
   });
 
   it("keeps DeepSeek at full 32768 output limit in agent stream", async () => {
