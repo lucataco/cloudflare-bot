@@ -553,7 +553,7 @@ function getModelDirect(config: AiModelConfig, env: Cloudflare.Env, sessionAffin
             name: catalog?.name ?? config.model,
             api: "openai-completions",
             provider: "cloudflare-workers-ai",
-            baseUrl: "https://workers-binding.ai/v1",
+            baseUrl: "https://workers-binding.ai/ai-gateway/gateways/default/workers-ai/v1",
             reasoning: catalog?.reasoning ?? false,
             input: catalog?.input ?? ["text"],
             cost: catalog?.cost ?? ZERO_COST,

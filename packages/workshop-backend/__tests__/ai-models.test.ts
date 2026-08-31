@@ -666,11 +666,13 @@ describe("getModel direct Workers AI binding (no gateway)", () => {
 
     expect(handle.model.api).toBe("openai-completions");
     expect(handle.model.id).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
-    expect(handle.model.baseUrl).toBe("https://workers-binding.ai/v1");
+    expect(handle.model.baseUrl).toBe(
+        "https://workers-binding.ai/ai-gateway/gateways/default/workers-ai/v1");
     expect(handle.aiGatewayLogRoute).toBeUndefined();
 
     const request = await captureRequest(handle);
-    expect(request.url).toBe("https://workers-binding.ai/v1/chat/completions");
+    expect(request.url).toBe(
+        "https://workers-binding.ai/ai-gateway/gateways/default/workers-ai/v1/chat/completions");
     expect(request.headers.get("cf-aig-authorization"))
         .toBe("Bearer cloudflare-gateway-binding");
     const headerNames = Array.from(request.headers.keys()).map(k => k.toLowerCase());
