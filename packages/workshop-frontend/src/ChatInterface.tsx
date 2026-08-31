@@ -4769,6 +4769,9 @@ function ChatInterface({
   const [processingConnections, setProcessingConnections] = useState<Set<string>>(
     new Set(),
   );
+  const [processingComputerTakeovers, setProcessingComputerTakeovers] = useState<Set<string>>(
+    new Set(),
+  );
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>(
     [],
   );
@@ -5033,6 +5036,14 @@ function ChatInterface({
   const hasPendingConnectionRequest = useMemo(
     () => currentMessages.some(
       (msg) => msg.type === "connectionRequest" && msg.state === "pending",
+    ),
+    [currentMessages],
+  );
+  // A pending computer human takeover request blocks the composer: the agent turn is suspended
+  // until the user completes the step and approves continuation.
+  const hasPendingComputerHumanTakeover = useMemo(
+    () => currentMessages.some(
+      (msg) => msg.type === "computerHumanTakeover" && msg.state === "pending",
     ),
     [currentMessages],
   );
@@ -6486,6 +6497,22 @@ function ChatInterface({
     }
   };
 
+  const handleApproveComputerTakeover = async (requestId: string) => {
+    setProcessingComputerTakeovers((prev) => new Set(prev).add(requestId));
+    try {
+      await overseer.approveComputerHumanTakeover(requestId);
+    } catch (err) {
+      console.error("Failed to approve computer takeover:", err);
+      toasts.add({ title: "Failed to approve request", variant: "error" });
+    } finally {
+      setProcessingComputerTakeovers((prev) => {
+        const next = new Set(prev);
+        next.delete(requestId);
+        return next;
+      });
+    }
+  };
+
   const toggleToolCallExpansion = useCallback((expansionKey: string) => {
     setExpandedToolCalls((prev) => {
       const next = new Set(prev);
@@ -6832,6 +6859,61 @@ function ChatInterface({
                   className="cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Set up
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderComputerHumanTakeoverCard = (
+    msg: AiChatMessage & { type: "computerHumanTakeover" },
+  ) => {
+    const isPending = msg.state === "pending";
+    const isApproved = msg.state === "approved";
+    const isProc = processingComputerTakeovers.has(msg.requestId);
+
+    const stateLabel = isApproved ? "Completed" : null;
+    const stateLabelCls = "text-kumo-success";
+
+    return (
+      <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+        <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-tint text-kumo-brand">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 256 256" fill="currentColor">
+                <path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24h72v16H96a8,8,0,0,0,0,16h64a8,8,0,0,0,0-16H136V200h72a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V64a8,8,0,0,1,8-8H208a8,8,0,0,1,8,8Z"></path>
+              </svg>
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="font-medium text-kumo-default">
+                  Human interaction needed
+                </span>
+                {stateLabel && (
+                  <span className={`text-[12px] font-medium ${stateLabelCls}`}>
+                    {stateLabel}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
+                {msg.reason}
+              </p>
+              <p className="mt-1 text-[12px] leading-[16px] text-kumo-inactive">
+                URL: {msg.currentUrl}
+              </p>
+            </div>
+            {isPending && (
+              <div className="ml-3 flex flex-shrink-0 items-center gap-2 self-center text-[13px] leading-4">
+                <button
+                  type="button"
+                  onClick={() => handleApproveComputerTakeover(msg.requestId)}
+                  disabled={isProc}
+                  className="cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Done
                 </button>
               </div>
             )}
@@ -8047,6 +8129,8 @@ function ChatInterface({
 
                         {msg.type === "connectionRequest" && renderConnectionRequestCard(msg)}
 
+                        {msg.type === "computerHumanTakeover" && renderComputerHumanTakeoverCard(msg)}
+
                         {msg.type === "useGadget" && (
                           <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
                             <Tooltip content={`Used the gadget at ${formatFullTimestamp(msg.timestamp)}`} asChild>
@@ -8375,9 +8459,11 @@ function ChatInterface({
                     blockedReason={
                       hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."
-                        : hasPendingAwaitedAction
-                          ? "Approve or reject the pending action above to continue."
-                          : undefined
+                        : hasPendingComputerHumanTakeover
+                          ? "Complete the step in the browser and approve the request above to continue."
+                          : hasPendingAwaitedAction
+                            ? "Approve or reject the pending action above to continue."
+                            : undefined
                     }
                     draftUpdateBanner={(() => {
                       if (!currentChatMetadata?.hasProposedChanges) return null;

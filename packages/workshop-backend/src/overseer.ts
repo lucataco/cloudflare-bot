@@ -4410,6 +4410,10 @@ class OverseerImpl implements AgentHooks {
   // consumeCapturedConnectionRequests), so they appear after the assistant's tool-call message.
   #capturedConnectionRequests = new Map<number, AiChatMessageBody[]>();
 
+  // Maps chat ID to computerHumanTakeover message bodies created by that chat's agent during the
+  // current step. Spliced into the chat log after the tool call returns.
+  #capturedComputerHumanTakeovers = new Map<number, AiChatMessageBody[]>();
+
   #getOrCreateCapturedActions(chatId: number) {
     let result = this.#capturedActions.get(chatId);
     if (!result) {
@@ -7808,6 +7812,30 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
+  requestComputerHumanTakeover(chatId: number, reason: string, currentUrl: string): void {
+    let requestId = `${chatId}:${crypto.randomUUID()}`;
+    let body: AiChatMessageBody = {
+      type: "computerHumanTakeover",
+      requestId,
+      reason,
+      currentUrl,
+      state: "pending",
+    };
+
+    let list = this.#capturedComputerHumanTakeovers.get(chatId);
+    if (!list) {
+      list = [];
+      this.#capturedComputerHumanTakeovers.set(chatId, list);
+    }
+    list.push(body);
+  }
+
+  consumeCapturedComputerHumanTakeovers(chatId: number): AiChatMessageBody[] {
+    let result = this.#capturedComputerHumanTakeovers.get(chatId) ?? [];
+    this.#capturedComputerHumanTakeovers.delete(chatId);
+    return result;
+  }
+
   // --- Blueprint hooks for the agent ---
 
   // List the blueprints the turn's initiator could instantiate with createGadget: their own
@@ -10281,6 +10309,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     throw new Error(`No such connection request: ${requestId}`);
   }
 
+  #findComputerHumanTakeoverRequest(requestId: string)
+      : AiChatMessage & {type: "computerHumanTakeover"} {
+    let colonIdx = requestId.indexOf(":");
+    if (colonIdx < 0) throw new Error(`Malformed computer takeover request id: ${requestId}`);
+    let chatId = Number(requestId.slice(0, colonIdx));
+    if (!Number.isFinite(chatId)) throw new Error(`Malformed computer takeover request id: ${requestId}`);
+
+    for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+      if (msg.type === "computerHumanTakeover" && msg.requestId === requestId) {
+        return msg as AiChatMessage & {type: "computerHumanTakeover"};
+      }
+    }
+    throw new Error(`No such computer takeover request: ${requestId}`);
+  }
+
   // Restart a suspended agent turn after its outcome is recorded in chat history (accepted
   // connection, or all awaited actions approved). Denials intentionally don't call this.
   async #resumeSuspendedAgent(chatId: number): Promise<void> {
@@ -10366,6 +10409,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // request; leaving it ended lets the user say what they want done instead, rather than forcing
     // the agent to guess from a bare "denied" signal. The denial is recorded in history and the
     // agent sees it the next time the user sends a message (see the connectionRequest history case).
+  }
+
+  async approveComputerHumanTakeover(requestId: string): Promise<void> {
+    let msg = this.#findComputerHumanTakeoverRequest(requestId);
+    if (msg.state !== "pending") {
+      throw new Error(`Computer takeover request is not pending: ${requestId}`);
+    }
+
+    msg.state = "approved";
+    msg.timestamp = this.impl.getChatTimestamp();
+    this.impl.storage.chats.put(msg);
+
+    await this.#resumeSuspendedAgent(msg.chatId);
   }
 
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
@@ -11282,6 +11338,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async acceptConnectionRequest(_requestId: string, _result: {gatekeeperId: number}): Promise<void> { this.#deny(); }
   async denyConnectionRequest(_requestId: string): Promise<void>  { this.#deny(); }
+  async approveComputerHumanTakeover(_requestId: string): Promise<void> { this.#deny(); }
   async subscribeToActions(
       subscriber: RpcStub<ActionsSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     // Inert: "use" sessions have no visibility into the action log. Signal a settled, empty log

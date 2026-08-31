@@ -552,6 +552,19 @@ export interface AgentHooks {
   consumeCapturedConnectionRequests(chatId: number): AiChatMessageBody[];
 
   /**
+   * Request human interaction with the computer session (browser). Used when the session
+   * encounters a step that requires credentials, 2FA, captcha, or payment. Creates a pending
+   * request that blocks the agent turn until the user approves it.
+   */
+  requestComputerHumanTakeover(chatId: number, reason: string, currentUrl: string): void;
+
+  /**
+   * Drain computer human takeover requests captured during the current step so they can be
+   * appended to the chat (analogous to consumeCapturedConnectionRequests).
+   */
+  consumeCapturedComputerHumanTakeovers(chatId: number): AiChatMessageBody[];
+
+  /**
    * Blueprint hooks for the agent.
    *
    * List the blueprints available to the turn's initiator (their own published blueprints, their
@@ -1970,6 +1983,24 @@ export async function runAgent(
         break;
       }
 
+      case "computerHumanTakeover": {
+        // Surface the outcome of a computer human takeover request. While pending, the agent
+        // doesn't need to know (it already saw the tool's "awaiting" output and ended its turn).
+        // On approve the agent is resumed and reads this as a user message confirming the step
+        // was completed.
+        if (msg.state === "approved") {
+          modelMessages.push({
+            role: "user",
+            content:
+                `You requested human interaction for the browser session. ` +
+                `The user has completed the required step and approved continuation. ` +
+                `You can now continue with the authenticated/completed browser session.`,
+            timestamp: msgTimestamp,
+          });
+        }
+        break;
+      }
+
       case "action":
       case "useGadget":
       case "error":
@@ -2023,6 +2054,11 @@ export async function runAgent(
   // without the turn ending (which would strand it, since there'd be no card to accept/deny and
   // thus no resume).
   let connectionRequested = false;
+
+  // Set to true once the agent has successfully requested computer human takeover this turn. Used
+  // by shouldStopAfterTurn to end the turn (the agent must wait for the user to complete the step
+  // and approve continuation).
+  let computerHumanTakeoverRequested = false;
 
   // Latched by the turn_end barrier when this step submitted an awaitDecision action.
   // shouldStopAfterTurn reads it afterwards to end the turn until approval resumes it.
@@ -3132,6 +3168,42 @@ export async function runAgent(
       }
     });
 
+    tools.computerRequestHuman = defineTool({
+      name: "computerRequestHuman",
+      label: "Request human interaction",
+      description: "Pause the agent and request human interaction with the browser session for steps that require credentials, 2FA, captcha, or payment information. The agent will resume after the user completes the step and approves continuation.",
+      parameters: Type.Object({
+        reason: Type.String({description: "Explanation of why human interaction is needed (e.g., 'needs password entry', 'requires 2FA code', 'captcha verification needed', 'payment information required')."}),
+      }),
+      execute: async (toolCallId, {reason}) => {
+        try {
+          let session = await hooks.getComputerSession(agentContext.agentId!);
+          let screenshotBytes = await session.screenshot();
+          let state = await session.getState();
+          
+          hooks.requestComputerHumanTakeover(chatId, reason, state.currentUrl || 'about:blank');
+          computerHumanTakeoverRequested = true;
+
+          await hooks.recordAgentObservation(
+              chatId,
+              `Computer human interaction: ${reason}`,
+              state.currentUrl || undefined,
+              {
+                title: `Requested human interaction`,
+                description: `Browser paused for: ${reason}`,
+              });
+
+          return toolResult(`Browser session paused. Waiting for you to complete: ${reason}. ` +
+              `Your turn will end now. Once you've completed the step, approve the request to resume.`, {
+            image: { type: "png" as const, data: screenshotBytes }
+          } as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    });
+
     tools.computerGetState = defineTool({
       name: "computerGetState",
       label: "Get browser state",
@@ -3391,6 +3463,11 @@ export async function runAgent(
           msgs.push(cr);
         }
 
+        // Append any computer human takeover requests the agent made this step.
+        for (let req of hooks.consumeCapturedComputerHumanTakeovers(chatId)) {
+          msgs.push(req);
+        }
+
         // The barrier itself: one transaction persists the step's messages and its buffered
         // effects -- rows, the step's single "changes" message, retirement, registry stamps --
         // so the effects are durable iff the transcript that explains them is. The buffer is
@@ -3454,6 +3531,9 @@ export async function runAgent(
         // unresolvable resource) leaves this false so the agent can fix the request and retry
         // in the same turn.
         connectionRequested ||
+        // End the turn once the agent has requested computer human takeover: it must wait for
+        // the user to complete the step and approve continuation.
+        computerHumanTakeoverRequested ||
         // Wait for approval before continuing against state that may not reflect the action.
         awaitingActionDecision ||
         // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
