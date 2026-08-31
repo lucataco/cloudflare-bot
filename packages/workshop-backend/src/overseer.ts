@@ -5366,8 +5366,31 @@ class OverseerImpl implements AgentHooks {
 
     if (prepared.message !== undefined && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive, userMeta.agentProfile);
+      
+      if (userMeta.group && userMeta.group.memberAgentIds.length >= 2 && !userMeta.agentProfile) {
+        for (let memberId of userMeta.group.memberAgentIds) {
+          let memberProfile = await clientUser.getAgent(memberId);
+          if (memberProfile && memberProfile.defaultModelId) {
+            let memberContext = await retryOnDoReset(
+                () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
+            if (memberContext.aiModel) {
+              this.#registerRunningAgent(chatId);
+              this.storage.activeAgents.put({
+                chatId,
+                initiatorUserId: clientUser.id.toString(),
+                modelId: memberContext.aiModel.profile.id,
+                initiator: userMeta.profile,
+                callbackInitiated: false,
+              });
+              let liveChat = this.#getLiveChat(chatId);
+              await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
+            }
+          }
+        }
+      } else {
+        this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                        clientUser.id.toString(), false, needsAgentTurnKeepAlive, userMeta.agentProfile);
+      }
     }
 
     if (userMeta.quickModel) {
@@ -5453,8 +5476,31 @@ class OverseerImpl implements AgentHooks {
 
     if (runsAgentTurn && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive, userMeta.agentProfile);
+      
+      if (userMeta.group && userMeta.group.memberAgentIds.length >= 2 && !userMeta.agentProfile) {
+        for (let memberId of userMeta.group.memberAgentIds) {
+          let memberProfile = await clientUser.getAgent(memberId);
+          if (memberProfile && memberProfile.defaultModelId) {
+            let memberContext = await retryOnDoReset(
+                () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
+            if (memberContext.aiModel) {
+              this.#registerRunningAgent(chatId);
+              this.storage.activeAgents.put({
+                chatId,
+                initiatorUserId: clientUser.id.toString(),
+                modelId: memberContext.aiModel.profile.id,
+                initiator: userMeta.profile,
+                callbackInitiated: false,
+              });
+              let liveChat = this.#getLiveChat(chatId);
+              await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
+            }
+          }
+        }
+      } else {
+        this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                        clientUser.id.toString(), false, needsAgentTurnKeepAlive, userMeta.agentProfile);
+      }
     }
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
