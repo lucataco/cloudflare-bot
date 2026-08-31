@@ -112,8 +112,19 @@ export type ModelHandle = {
     maxTokens?: number;
     maxCompletionTokens?: number;
     messageCount: number;
-    messages: Array<{ role: string; contentTypes: string[] }>;
     promptChars: number;
+    payloadKeys: string;
+    toolsCount: number;
+    requestMessages: Array<{
+      role: string;
+      contentKind: string;
+      contentChars: number;
+      contentPartTypes: string;
+      hasToolCalls: boolean;
+      toolCallNames: string;
+      contentPrefix?: string;
+      looksLikeImage?: boolean;
+    }>;
   };
 };
 
@@ -333,7 +344,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
     model: args.model,
     aiGatewayLogRoute: args.aiGatewayLogRoute,
     stream: (model, context, { thinking = true, ...options } = {}) => {
-      // Never let a failed request read a previous request's response metadata.
+      // Never let a failed request read a previous request's response/request metadata.
       handle.lastResponse = undefined;
       handle.lastRequest = undefined;
       const headers: ProviderHeaders = {
@@ -390,21 +401,84 @@ function makeHandle(args: HandleArgs): ModelHandle {
             }
           }
 
+          const payloadKeys = Object.keys(finalPayload).sort().join(",");
+          const toolsCount = Array.isArray(finalPayload.tools) ? finalPayload.tools.length : 0;
+          const messages = Array.isArray(finalPayload.messages) ? finalPayload.messages : [];
+          
+          const requestMessages = messages.map((msg: any) => {
+            const role = msg.role ?? "unknown";
+            const content = msg.content;
+            const contentKind = content === null ? "null" :
+                content === undefined ? "undefined" :
+                typeof content === "string" ? "string" :
+                Array.isArray(content) ? "array" :
+                typeof content;
+            const contentChars = typeof content === "string" ? content.length :
+                JSON.stringify(content ?? "").length;
+            
+            let contentPartTypes = "string";
+            let contentPrefix: string | undefined;
+            let looksLikeImage = false;
+            
+            if (Array.isArray(content)) {
+              const types = content.map((part: any) => part?.type ?? "unknown");
+              contentPartTypes = types.join(",");
+              
+              if (role === "tool" || role === "function") {
+                const textParts = content
+                    .filter((part: any) => part?.type === "text")
+                    .map((part: any) => part.text ?? "");
+                const allText = textParts.join("");
+                if (allText.includes("iVBOR") || allText.includes("data:image")) {
+                  contentPrefix = "[omitted binary-looking content]";
+                  looksLikeImage = true;
+                } else {
+                  contentPrefix = allText.slice(0, 80);
+                }
+              }
+            } else if (typeof content === "string" && (role === "tool" || role === "function")) {
+              if (content.includes("iVBOR") || content.includes("data:image")) {
+                contentPrefix = "[omitted binary-looking content]";
+                looksLikeImage = true;
+              } else {
+                contentPrefix = content.slice(0, 80);
+              }
+            }
+            
+            const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+            const toolCallNames = hasToolCalls
+                ? msg.tool_calls.map((tc: any) => tc?.function?.name ?? tc?.name ?? "unknown").join(",")
+                : "";
+            
+            const result: any = {
+              role,
+              contentKind,
+              contentChars,
+              contentPartTypes,
+              hasToolCalls,
+              toolCallNames,
+            };
+            
+            if (contentPrefix !== undefined) {
+              result.contentPrefix = contentPrefix;
+            }
+            if (looksLikeImage) {
+              result.looksLikeImage = looksLikeImage;
+            }
+            
+            return result;
+          });
+
           handle.lastRequest = {
             url: args.model.baseUrl ?? "unknown",
             maxTokens: (finalPayload as any).max_tokens,
             maxCompletionTokens: (finalPayload as any).max_completion_tokens,
             messageCount: Array.isArray((finalPayload as any).messages)
                 ? (finalPayload as any).messages.length : 0,
-            messages: Array.isArray((finalPayload as any).messages)
-                ? (finalPayload as any).messages.map((m: any) => ({
-                    role: m.role ?? "unknown",
-                    contentTypes: Array.isArray(m.content)
-                        ? m.content.map((c: any) => c.type ?? typeof c)
-                        : [typeof m.content],
-                  }))
-                : [],
             promptChars,
+            payloadKeys,
+            toolsCount,
+            requestMessages,
           };
 
           return finalPayload;

@@ -28,12 +28,23 @@ export type WorkshopObservabilityFields = {
   operation: string;
   outcome: "ok" | "error" | "usage_limit" | "callbacks_stalled" | "no_email" | "signups_disabled";
   path: string;
+  payloadKeys: string;
   requestMaxCompletionTokens: number;
   requestMaxTokens: number;
   requestMessageCount: number;
-  requestMessages: Array<{ role: string; contentTypes: string[] }>;
+  requestMessages: Array<{
+    role: string;
+    contentKind: string;
+    contentChars: number;
+    contentPartTypes: string;
+    hasToolCalls: boolean;
+    toolCallNames: string;
+    contentPrefix?: string;
+    looksLikeImage?: boolean;
+  }>;
   requestPromptChars: number;
   requestUrl: string;
+  toolsCount: number;
   resourceTitle: string;
   sequence: number;
   size: number;
