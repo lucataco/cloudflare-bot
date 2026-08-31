@@ -900,24 +900,30 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(`Agent not found: ${id}`);
     }
 
-    if (updates.name !== undefined) agent.name = updates.name;
-    if (updates.title !== undefined) agent.title = updates.title;
-    if (updates.description !== undefined) agent.description = updates.description;
-    if (updates.defaultModelId !== undefined) agent.defaultModelId = updates.defaultModelId;
+    let updatedAgent: AgentRecord = {
+      id: agent.id,
+      name: updates.name !== undefined ? updates.name : agent.name,
+      title: updates.title !== undefined ? updates.title : agent.title,
+      description: updates.description !== undefined ? updates.description : agent.description,
+      defaultModelId: updates.defaultModelId !== undefined ? updates.defaultModelId : agent.defaultModelId,
+      workspaceId: agent.workspaceId,
+      defaultBindings: updates.defaultBindings !== undefined ? updates.defaultBindings : agent.defaultBindings,
+      notifyOnUpdates: updates.notifyOnUpdates !== undefined ? updates.notifyOnUpdates : agent.notifyOnUpdates,
+      created: agent.created,
+      updated: new Date(),
+    };
+
     if (updates.avatar !== undefined) {
-      if (updates.avatar === null) {
-        delete agent.avatar;
-      } else {
-        agent.avatar = updates.avatar;
+      if (updates.avatar !== null) {
+        updatedAgent.avatar = updates.avatar;
       }
+    } else if (agent.avatar !== undefined) {
+      updatedAgent.avatar = agent.avatar;
     }
-    if (updates.defaultBindings !== undefined) agent.defaultBindings = updates.defaultBindings;
-    if (updates.notifyOnUpdates !== undefined) agent.notifyOnUpdates = updates.notifyOnUpdates;
 
-    agent.updated = new Date();
-    this.storage.agents.put(agent);
+    this.storage.agents.put(updatedAgent);
 
-    return agent;
+    return updatedAgent;
   }
 
   /** Get an agent by ID. */
