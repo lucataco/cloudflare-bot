@@ -2065,6 +2065,8 @@ export async function runAgent(
   // shouldStopAfterTurn reads it afterwards to end the turn until approval resumes it.
   let awaitingActionDecision = false;
 
+  let stopFollowUpDueToUnknownTools = false;
+
   // Buffer one file edit into the step and apply it to the session content; it becomes durable
   // (row + broadcast) only at the step's persistence barrier. The first write to an unpinned
   // gadget with committed code pins it at the given head -- always the current head, never an
@@ -3410,6 +3412,16 @@ export async function runAgent(
         // recorded as errors below, and shouldStopAfterTurn ends the loop right after this
         // barrier.
 
+        let knownToolNames = new Set(toolList.map(t => t.name));
+        let {content, stopFollowUp, rewriteAsText} =
+            processUnknownToolCalls(message.content, knownToolNames);
+        if (rewriteAsText) {
+          message = {...message, content};
+        }
+        if (stopFollowUp) {
+          stopFollowUpDueToUnknownTools = true;
+        }
+
         let msgs: AiChatMessageBodyWithModelData[] = [];
 
         {
@@ -3575,7 +3587,8 @@ export async function runAgent(
         // Wait for approval before continuing against state that may not reflect the action.
         awaitingActionDecision ||
         // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
-        (callbackInitiated && hooks.activeAgentCallbackCount(chatId) === 0),
+        (callbackInitiated && hooks.activeAgentCallbackCount(chatId) === 0) ||
+        stopFollowUpDueToUnknownTools,
   }, emit, abortSignal, handle.stream);
 
   // (No end-of-turn flush: every completed step's effects were barrier-committed with its
@@ -3681,6 +3694,37 @@ export function makeStorableArgs(
  */
 export function summarizeArgs(args: unknown[]): string {
   return args.map((arg, i) => `[${i}]: ${summarizeValue(arg, 0)}`).join("\n");
+}
+
+export function processUnknownToolCalls(
+    content: (TextContent | ThinkingContent | ToolCall)[],
+    knownToolNames: Set<string>): {
+  content: (TextContent | ThinkingContent | ToolCall)[],
+  stopFollowUp: boolean,
+  rewriteAsText: boolean,
+} {
+  let toolCallBlocks = content.filter((block): block is ToolCall => block.type === "toolCall");
+  if (toolCallBlocks.length === 0) {
+    return {content, stopFollowUp: false, rewriteAsText: false};
+  }
+
+  let unknownToolCalls = toolCallBlocks.filter(block => !knownToolNames.has(block.name));
+  if (unknownToolCalls.length === 0) {
+    return {content, stopFollowUp: false, rewriteAsText: false};
+  }
+
+  if (unknownToolCalls.length === toolCallBlocks.length) {
+    let unknownNames = unknownToolCalls.map(block => block.name).join("\n");
+    let textAndThinkingBlocks = content.filter(
+        block => block.type === "text" || block.type === "thinking");
+    let rewrittenContent: (TextContent | ThinkingContent)[] = [
+      ...textAndThinkingBlocks,
+      {type: "text", text: unknownNames},
+    ];
+    return {content: rewrittenContent, stopFollowUp: true, rewriteAsText: true};
+  }
+
+  return {content, stopFollowUp: true, rewriteAsText: false};
 }
 
 // Summarize the content of params passed to an agent callback. This is presented to the agent
