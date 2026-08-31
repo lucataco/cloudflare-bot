@@ -107,7 +107,7 @@ describe("compaction trigger", () => {
   // Cloudflare model configured by hand needs the reservation the model table can't declare for it.
   it("reserves Workers AI output capacity for a model the registry doesn't list", () => {
     expect(getModelTokenLimits({provider: "cloudflare", model: "@cf/custom", apiToken: ""}))
-        .toEqual({inputBudget: 95_232, maxOutputTokens: 32_768});
+        .toEqual({inputBudget: 8_192, maxOutputTokens: 15_808});
 
     // Other providers fall back to the assumed window with nothing withheld.
     expect(getModelTokenLimits({provider: "ollama", model: "local", apiToken: ""}))
