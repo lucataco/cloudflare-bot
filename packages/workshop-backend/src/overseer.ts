@@ -5781,6 +5781,132 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Agent-to-agent communication for group chats: after a member bot completes its turn, check
+  // if it @mentioned other group members in its response. If so, queue turns for those mentioned
+  // members. This enables bots to respond to each other without unbounded ping-pong (only explicit
+  // @mentions trigger follow-up turns).
+  //
+  // Hard hop cap: mentionDepth >= 1 blocks further queuing, limiting agent-to-agent chains to
+  // one round (user → agent A → agent B, stop). This prevents infinite recursion when models
+  // keep @mentioning each other.
+  async #queueMentionedGroupMembers(
+      chatId: number, startSequence: number,
+      currentAgentModel: UserAiModelRecord, currentAgentAuthor: AiChatAuthorInfo,
+      mentionDepth: number): Promise<void> {
+    try {
+      // Hard stop: only allow one round of mention-triggered turns per user-initiated turn.
+      if (mentionDepth >= 1) return;
+
+      if (!this.ownerId) return;
+
+      // Get the owner's user DO to access group and agent profile information.
+      let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
+      
+      // Get chat context to determine if this is a group chat.
+      let chatContext = this.storage.chatContext.get(chatId);
+      if (!chatContext?.agentId) return;  // Not an agent chat
+      
+      // Get the agent profile and its workspace to find the associated group.
+      let agentProfile = await ownerStub.getAgent(chatContext.agentId);
+      if (!agentProfile) return;
+      
+      let group = await ownerStub.getGroupByWorkspaceId(agentProfile.workspaceId);
+      if (!group || group.memberAgentIds.length <= 1) return;  // Not a group or single member
+      
+      // Collect messages posted during this turn.
+      let newMessages: Array<{sequence: number, text: string}> = [];
+      for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+        if (msg.sequence > startSequence && msg.author.type === "agent") {
+          // Only process regular message types that have a message field
+          if (msg.type === "message" && typeof msg.message === "string") {
+            newMessages.push({sequence: msg.sequence, text: msg.message});
+          }
+        }
+      }
+      
+      if (newMessages.length === 0) return;
+      
+      // Extract @mentions from all new messages. Look for @name patterns where name matches
+      // a group member's name or agentId.
+      let mentionedAgentIds = new Set<string>();
+      let mentionPattern = /@(\w[\w\s-]*)/g;
+      
+      for (let msg of newMessages) {
+        let matches = msg.text.matchAll(mentionPattern);
+        for (let match of matches) {
+          let mentionText = match[1].trim();
+          // Check if this mention matches any group member by name or ID
+          for (let memberId of group.memberAgentIds) {
+            if (memberId === chatContext.agentId) continue;  // Skip the current agent
+            let memberProfile = await ownerStub.getAgent(memberId);
+            if (!memberProfile) continue;
+            
+            // Match by name (case-insensitive) or exact ID
+            if (memberProfile.name.toLowerCase() === mentionText.toLowerCase() ||
+                memberProfile.title.toLowerCase() === mentionText.toLowerCase() ||
+                memberId === mentionText) {
+              mentionedAgentIds.add(memberId);
+            }
+          }
+        }
+      }
+      
+      // Queue a turn for each mentioned member agent (sequentially to avoid overlapping turns).
+      for (let mentionedAgentId of mentionedAgentIds) {
+        let memberProfile = await ownerStub.getAgent(mentionedAgentId);
+        if (!memberProfile) continue;
+        
+        // Get the member's model configuration.
+        let memberMeta = await ownerStub.getChatContext(
+          memberProfile.defaultModelId,
+          memberProfile.workspaceId,
+          mentionedAgentId
+        );
+        
+        if (!memberMeta.aiModel) {
+          this.logger.warn("skipping mentioned group member with no model", {
+            event: "agent.group.mention.skip",
+            chatId,
+          });
+          continue;
+        }
+        
+        this.logger.info("starting agent turn for mentioned group member", {
+          event: "agent.group.mention.turn",
+          chatId,
+        });
+        
+        this.#registerRunningAgent(chatId);
+        this.storage.activeAgents.put({
+          chatId,
+          initiatorUserId: ownerStub.id.toString(),
+          modelId: memberMeta.aiModel.profile.id,
+          initiator: memberMeta.aiModel.profile,
+          callbackInitiated: false,
+        });
+        
+        let meta = this.storage.chatMeta.get(chatId);
+        if (meta) {
+          meta.activeAgent = memberMeta.aiModel.profile;
+          meta.lastActive = this.getChatTimestamp();
+          this.storage.chatMeta.put(meta);
+        }
+        
+        let liveChat = this.#getLiveChat(chatId);
+        await this.#runAgentTurn(chatId, memberMeta.aiModel, memberMeta.aiModel.profile,
+                                 false, liveChat, memberProfile, mentionDepth + 1);
+      }
+    } catch (err) {
+      // Log but don't throw: agent-to-agent triggering is best-effort and should never
+      // block the primary turn's completion.
+      this.logger.warn("failed to queue mentioned group members", {
+        event: "agent.group.mention.failed",
+        chatId,
+        error: err,
+      });
+    }
+  }
+
   // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
   // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
   // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
@@ -5826,26 +5952,30 @@ class OverseerImpl implements AgentHooks {
                 initiator: AiChatAuthorInfo,
                 callbackInitiated: boolean,
                 liveChat: LiveChatContext,
-                agentProfile?: AgentProfile): Promise<void> {
+                agentProfile?: AgentProfile,
+                mentionDepth: number = 0): Promise<void> {
     return obsContext.with({
       operation: "agent.run",
       gadgetId: this.ctx.id.toString(),
       chatId,
       modelId: aiModel.profile.id,
     }, () => traced("agent.run", () => this.#runAgentTurnWithContext(
-        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile)));
+        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile, mentionDepth)));
   }
 
   async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
                                  initiator: AiChatAuthorInfo,
                                  callbackInitiated: boolean,
                                  liveChat: LiveChatContext,
-                                 agentProfile?: AgentProfile): Promise<void> {
+                                 agentProfile?: AgentProfile,
+                                 mentionDepth: number = 0): Promise<void> {
     // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
     let byokOwnerStub: DurableObjectStub<UserDurableObject> | undefined;
     let startedAt = Date.now();
+    // Track the sequence number at turn start to identify messages added during this turn.
+    let startSequence = this.nextChatSequence(chatId) - 1;
     const turnLogger = this.logger.with({
       operation: "agent.run",
       chatId,
@@ -6058,6 +6188,11 @@ class OverseerImpl implements AgentHooks {
         cb.resolve(undefined);
       }
       liveChat.activeAgentCallbacks.clear();
+
+      // Agent-to-agent communication for group chats: if this turn posted messages that @mention
+      // other group member agents, queue turns for those mentioned members. This enables bots to
+      // respond to each other without unbounded ping-pong (only explicit @mentions trigger).
+      await this.#queueMentionedGroupMembers(chatId, startSequence, aiModel, initiator, mentionDepth);
 
       // If any new messages were queued waiting for the agent to finish, deliver them now.
       if (liveChat.pendingAgentCallbacks.length > 0) {
