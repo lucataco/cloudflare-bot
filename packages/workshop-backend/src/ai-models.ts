@@ -20,6 +20,9 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import { createWorkshopLogger } from "./observability.js";
+
+const logger = createWorkshopLogger("workshop.ai-models");
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -101,6 +104,20 @@ export type ModelHandle = {
    * is safe.
    */
   lastResponse?: { status: number; aiGatewayLogId?: string };
+
+  /**
+   * Request shape metadata for the most recent stream call, captured for diagnostic logging on
+   * failure. Reset at the start of every request and populated from the payload. Never contains
+   * secrets or full message text.
+   */
+  lastRequest?: {
+    url: string;
+    maxTokens?: number;
+    maxCompletionTokens?: number;
+    messageCount: number;
+    messages: Array<{ role: string; contentTypes: string[] }>;
+    promptChars: number;
+  };
 };
 
 function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
@@ -321,6 +338,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
     stream: (model, context, { thinking = true, ...options } = {}) => {
       // Never let a failed request read a previous request's response metadata.
       handle.lastResponse = undefined;
+      handle.lastRequest = undefined;
       const headers: ProviderHeaders = {
         ...args.headers,
         ...options.headers,
@@ -353,8 +371,28 @@ function makeHandle(args: HandleArgs): ModelHandle {
         // PDF attachments ride pi image parts and are rewritten here into the provider's native
         // document blocks (no-op for payloads without one; see chat-attachment-pdf.ts).
         onPayload: async (payload, payloadModel) => {
-          const replaced = await options.onPayload?.(payload, payloadModel);
-          return bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced;
+          const finalPayload = bridgePdfAttachments(
+              args.model.api, await options.onPayload?.(payload, payloadModel) ?? payload
+          ) ?? payload;
+
+          handle.lastRequest = {
+            url: args.model.baseUrl ?? "unknown",
+            maxTokens: (finalPayload as any).max_tokens,
+            maxCompletionTokens: (finalPayload as any).max_completion_tokens,
+            messageCount: Array.isArray((finalPayload as any).messages)
+                ? (finalPayload as any).messages.length : 0,
+            messages: Array.isArray((finalPayload as any).messages)
+                ? (finalPayload as any).messages.map((m: any) => ({
+                    role: m.role ?? "unknown",
+                    contentTypes: Array.isArray(m.content)
+                        ? m.content.map((c: any) => c.type ?? typeof c)
+                        : [typeof m.content],
+                  }))
+                : [],
+            promptChars: JSON.stringify(finalPayload).length,
+          };
+
+          return finalPayload;
         },
       };
       return streamFn(model, context, merged);
