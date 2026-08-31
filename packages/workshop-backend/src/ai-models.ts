@@ -174,6 +174,7 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
     supportsDeveloperRole: false,
     supportsLongCacheRetention: false,
     ...(catalog?.compat as OpenAICompletionsCompat | undefined),
+    maxTokensField: "max_tokens",
     sendSessionAffinityHeaders: true,
   };
 }
