@@ -5337,13 +5337,17 @@ function ChatInterface({
 
   // Update currentAgentProfile when selected member changes in a group
   useEffect(() => {
-    if (currentGroup && selectedMemberAgentId && groupMemberAgents.length > 0) {
-      const selectedMember = groupMemberAgents.find(a => a.id === selectedMemberAgentId);
-      if (selectedMember) {
-        setCurrentAgentProfile(selectedMember);
-        if (selectedChatId === null) {
-          setSelectedModel(getInitialSelectedModel(availableModels, selectedMember));
+    if (currentGroup && groupMemberAgents.length > 0) {
+      if (selectedMemberAgentId) {
+        const selectedMember = groupMemberAgents.find(a => a.id === selectedMemberAgentId);
+        if (selectedMember) {
+          setCurrentAgentProfile(selectedMember);
+          if (selectedChatId === null) {
+            setSelectedModel(getInitialSelectedModel(availableModels, selectedMember));
+          }
         }
+      } else {
+        setCurrentAgentProfile(null);
       }
     }
   }, [selectedMemberAgentId, currentGroup, groupMemberAgents, selectedChatId, availableModels]);
@@ -7535,12 +7539,13 @@ function ChatInterface({
                     {/* Member picker for groups */}
                     {currentGroup && groupMemberAgents.length > 0 && (
                       <div className="mb-4 flex items-center gap-3 rounded-lg border border-kumo-border bg-kumo-elevated px-4 py-2.5">
-                        <span className="text-sm font-medium text-kumo-default">Active member:</span>
+                        <span className="text-sm font-medium text-kumo-default">Respond as:</span>
                         <select
                           value={selectedMemberAgentId || ''}
-                          onChange={(e) => setSelectedMemberAgentId(e.target.value)}
+                          onChange={(e) => setSelectedMemberAgentId(e.target.value || null)}
                           className="flex-1 rounded border border-kumo-border bg-kumo-base px-3 py-1.5 text-sm text-kumo-default focus:border-kumo-brand focus:outline-none focus:ring-1 focus:ring-kumo-brand"
                         >
+                          <option value="">All members</option>
                           {groupMemberAgents.map((agent) => (
                             <option key={agent.id} value={agent.id}>
                               {agent.name} - {agent.title}
