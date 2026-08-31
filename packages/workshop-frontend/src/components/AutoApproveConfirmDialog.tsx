@@ -39,7 +39,7 @@ export default function AutoApproveConfirmDialog({
         <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
           <div className="min-w-0">
             <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
-              Always approve “{actionLabel}”?
+              Allow always “{actionLabel}”?
             </Dialog.Title>
             <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
               Future <span className="font-medium text-kumo-default">{actionLabel}</span> actions on{' '}
@@ -75,7 +75,7 @@ export default function AutoApproveConfirmDialog({
             disabled={isProcessing}
             className="!h-9 min-w-[64px]"
           >
-            {isProcessing ? 'Enabling...' : 'Always approve'}
+            {isProcessing ? 'Enabling...' : 'Allow always'}
           </WorkshopButton>
         </div>
       </Dialog>
