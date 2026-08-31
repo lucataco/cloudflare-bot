@@ -114,6 +114,25 @@ describe("compaction trigger", () => {
         .toEqual({inputBudget: 128_000, maxOutputTokens: undefined});
   });
 
+  it("caps Llama 3.3 70B maxOutputTokens to fit within its 24k window", () => {
+    const limits = getModelTokenLimits({
+      provider: "cloudflare",
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      apiToken: "",
+    });
+    expect(limits.maxOutputTokens).toBeLessThanOrEqual(16000);
+    expect(limits.maxOutputTokens).toBeGreaterThanOrEqual(15000);
+    expect(limits.inputBudget).toBe(24000 - limits.maxOutputTokens!);
+  });
+
+  it("uses full output limit for catalog models with large windows", () => {
+    expect(getModelTokenLimits({
+      provider: "cloudflare",
+      model: "@cf/deepseek-ai/deepseek-v4-pro-0813",
+      apiToken: "",
+    })).toEqual({inputBudget: 1015808, maxOutputTokens: 32768});
+  });
+
   it("recognizes /compact as the newest message, and only there", () => {
     let compact = record(1, user, {
       type: "slashCommand", request: {id: {builtin: true, commandId: "compact"}, args: ""},

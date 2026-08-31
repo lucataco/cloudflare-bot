@@ -126,8 +126,9 @@ const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 // Consult pi's builtin catalog for cost/compat metadata of a known model id. Unknown models are
-// fine (synthesized with zero cost). Import per-provider, not providers/all.
-function catalogModel(provider: AiModelConfig["provider"], modelId: string): Model<Api> | undefined {
+// fine (synthesized with zero cost). Import per-provider, not providers/all. Exported for use by
+// agent-compaction.ts.
+export function catalogModel(provider: AiModelConfig["provider"], modelId: string): Model<Api> | undefined {
   switch (provider) {
     case "anthropic": return (ANTHROPIC_MODELS as Record<string, Model<Api>>)[modelId];
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
@@ -138,17 +139,30 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
   }
 }
 
-// Token limits for a synthesized model. SUGGESTED_MODELS remains authoritative (compaction
-// budgets in agent-compaction.ts are computed from it and must not change); pi's catalog fills
-// gaps for models we don't list, and unknown models get conservative defaults.
-function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined)
-    : { contextWindow: number, maxTokens: number } {
+/**
+ * Computes token window limits for a model, used by both model descriptors and compaction budgets
+ * so the agent's maxOutputTokens matches the handle's maxTokens. SUGGESTED_MODELS remains
+ * authoritative; pi's catalog fills gaps for models we don't list, and unknown models get
+ * conservative defaults.
+ */
+export function computeTokenLimits(
+    config: AiModelConfig, catalog: Model<Api> | undefined)
+    : { contextWindow: number, maxTokens: number, maxOutputTokens?: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
   const contextWindow = suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000;
   const requestedMaxTokens = suggested?.outputLimit ??
       (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
       catalog?.maxTokens ?? 4096;
   const maxTokens = Math.min(requestedMaxTokens, Math.max(contextWindow - 8192, 4096));
+  const maxOutputTokens = suggested?.outputLimit !== undefined ||
+      config.provider === "cloudflare" ? maxTokens : undefined;
+  return { contextWindow, maxTokens, maxOutputTokens };
+}
+
+// Token limits for a synthesized model.
+function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined)
+    : { contextWindow: number, maxTokens: number } {
+  const { contextWindow, maxTokens } = computeTokenLimits(config, catalog);
   return { contextWindow, maxTokens };
 }
 

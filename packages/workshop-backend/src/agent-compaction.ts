@@ -1,9 +1,10 @@
-import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiModelConfig}
+import {type AiChatMessage, type AiModelConfig}
   from "@gadgets/workshop-shared/api";
 import {composeCodeChange, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
 import type {ChatBindingEntry, CompactionCheckpoint} from "./agent";
 import {zeroUsage} from "./ai-invoke";
+import {computeTokenLimits, catalogModel} from "./ai-models";
 
 // Context compaction keeps long chats within the model's limit. It summarizes the messages before a
 // boundary and stores their replay state in a checkpoint. Canonical history keeps every message, so
@@ -16,22 +17,17 @@ const COMPACTION_TRIGGER_RATIO = 0.85;
 // the turns that follow.
 const COMPACTION_TARGET_RATIO = 0.3;
 
-// Assumed window for a model that SUGGESTED_MODELS doesn't list. A model whose real window is
-// smaller still fails at the provider before compaction triggers.
-const DEFAULT_CONTEXT_WINDOW = 128_000;
-
 /**
  * How the turn divides the model's window. The reserved response capacity is both withheld from the
- * prompt's budget and sent as the request's response cap. A Cloudflare model configured by hand has
- * no SUGGESTED_MODELS entry to declare its reservation, so the provider's applies.
+ * prompt's budget and sent as the request's response cap. Uses the same logic as modelTokenWindow
+ * in ai-models.ts so the agent's maxOutputTokens matches the handle's maxTokens.
  */
 export function getModelTokenLimits(config: AiModelConfig):
     {inputBudget: number, maxOutputTokens?: number} {
-  let model = SUGGESTED_MODELS[config.provider][config.model];
-  let maxOutputTokens = model?.outputLimit ??
-      (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined);
+  const catalog = catalogModel(config.provider, config.model);
+  const {contextWindow, maxOutputTokens} = computeTokenLimits(config, catalog);
   return {
-    inputBudget: (model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) - (maxOutputTokens ?? 0),
+    inputBudget: contextWindow - (maxOutputTokens ?? 0),
     maxOutputTokens,
   };
 }
