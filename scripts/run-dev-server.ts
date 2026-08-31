@@ -4,8 +4,8 @@
 // then launches `wrangler dev` with all discovered workers.
 //
 // Flags:
-//   --use-workers-ai-binding   Include the Workers AI binding in
-//                               workshop-backend (requires Cloudflare login).
+//   --no-workers-ai-binding     Exclude the Workers AI binding from workshop-backend.
+//                               By default, the binding is included for wrangler-login dogfood.
 //   --port PORT                 Listen on PORT instead of 8787. Overrides VITE_BACKEND_HOST.
 //
 // Env:
@@ -61,7 +61,7 @@ function loadDevVars(): void {
 }
 loadDevVars();
 
-const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
+const useWorkersAi = !process.argv.includes("--no-workers-ai-binding");
 
 // In `run-local` mode the backend serves the pre-built frontend bundle as static assets (there is no
 // Vite dev server). In normal dev mode we leave assets unconfigured so the frontend is served by
@@ -483,7 +483,7 @@ for (const gk of gatekeepers) {
     "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
     // Platform AI Gateway — makes the cross-provider model catalog available. CF_AI_GATEWAY
     // always needs CF_AI_GATEWAY_ACCOUNT_ID plus one transport: the WORKERS_AI binding
-    // (start with --use-workers-ai-binding; CF_AI_GATEWAY_USE_BINDING=false opts out, e.g.
+    // (included by default; --no-workers-ai-binding opts out, e.g. when not logged in or
     // when the gateway lives in a different account than the dev binding) or
     // CF_AI_GATEWAY_API_TOKEN over HTTPS. The google provider can't ride the binding and
     // needs the token even when the binding is present.
