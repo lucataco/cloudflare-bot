@@ -55,6 +55,7 @@ export type ProvidedAccountInfo = {
 // shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
+type AccountCreatorWithIdStub = Required<Pick<GatekeeperVendor, "createAccountWithId">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
@@ -1714,33 +1715,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     await this.#createAutoProvisionedAccount(vendorId, vendor);
   }
 
-  // Mint a vendor's connected account with no OAuth flow and persist it as auto-provisioned. The
-  // caller must have already confirmed the vendor sets autoProvisionsAccount (so createAccount is
-  // present) and that the user has no account for it yet.
-  //
-  // For Context Library (vendorId "context"), when agentId is provided, creates a per-agent account
-  // by directly instantiating ContextAccount with the agentId as its accountId. This scopes the
-  // library's data (collections, documents) to that specific agent. Other auto-provisioned gatekeepers
-  // remain user-global.
   async #createAutoProvisionedAccount(vendorId: string, vendor: Service<GatekeeperVendor>, agentId?: string): Promise<void> {
     let account: Fetcher<GatekeeperUser>;
     
     if (vendorId === "context" && agentId) {
-      // Create a per-agent Context Library account. The Context Library keys its data by accountId,
-      // so using the agentId makes each agent's library independent.
-      let vendorCtx = (vendor as any).ctx;
-      if (!vendorCtx?.exports?.ContextAccount) {
-        throw new Error("Context Library vendor missing ContextAccount export");
-      }
-      let sharingDomain = vendorCtx.props?.sharingDomain || "default";
-      account = vendorCtx.exports.ContextAccount({
-        props: { sharingDomain, accountId: agentId },
-      });
+      account = await (vendor as unknown as AccountCreatorWithIdStub).createAccountWithId(agentId);
     } else {
       account = await (vendor as unknown as AccountCreatorStub).createAccount();
     }
     
-    // Resolve the description before allocating the id, so a describe() failure doesn't burn a slot.
     let description = await account.describe();
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);
@@ -1750,7 +1733,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       description,
       vendorId,
       autoProvisioned: true,
-      agentId,  // Store the agentId for per-agent accounts (e.g. Context Library)
+      agentId,
     });
   }
 
@@ -1806,27 +1789,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  /**
-   * Ensure the user's auto-provisioned accounts exist (idempotent; see #ensureAutoProvisionedAccounts),
-   * then list those that declare an agent singleton and/or a management UI. Folding the ensure in lets
-   * callers (gadget open, app nav) provision and read the accounts back in a single round trip to this
-   * DO. Callers filter on `description.singleton` (ambient capsules / catalog) or
-   * `description.providesUi` (management-UI listing).
-   * 
-   * @param agentId - Optional agent ID to filter per-agent singleton accounts. When provided, returns
-   *   only accounts for that specific agent. User-global accounts (no agentId) are always included.
-   */
   async listProvidedAccounts(agentId?: string): Promise<ProvidedAccountInfo[]> {
     await this.#ensureAutoProvisionedAccounts(agentId);
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
       if (!rec.description.singleton && !rec.description.providesUi) continue;
-      // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
-      // or management UI. (Its data is preserved, so re-enabling restores it.)
       if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
-      // Filter per-agent accounts: include if no agentId filter, or matches the requested agent, or is user-global
-      if (agentId && rec.agentId && rec.agentId !== agentId) continue;
+      
+      if (agentId && rec.vendorId === "context") {
+        if (rec.agentId !== agentId) continue;
+      } else if (agentId && rec.agentId && rec.agentId !== agentId) {
+        continue;
+      }
+      
       result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
     }
     return result;

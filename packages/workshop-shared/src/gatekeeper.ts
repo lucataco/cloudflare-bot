@@ -520,6 +520,15 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * RPC stubs cannot report optional-method presence.
    */
   createAccount?(): Promise<Fetcher<GatekeeperUser>>;
+
+  /**
+   * Mint a NEW connected account with a specified accountId, for per-agent account scoping. Like
+   * createAccount() but accepts an accountId parameter that the vendor uses to key the account's
+   * data. Used by the Workshop to create per-agent singleton accounts (e.g. Context Library) where
+   * each agent needs its own isolated data store. Optional; vendors that don't support per-agent
+   * scoping can omit this.
+   */
+  createAccountWithId?(accountId: string): Promise<Fetcher<GatekeeperUser>>;
 }
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {

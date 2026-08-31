@@ -405,6 +405,20 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env, Gatekeepe
     }) as unknown as Fetcher<GatekeeperUser>;
   }
 
+  /**
+   * Mint a per-agent account capability with a specified accountId. The accountId is used to scope
+   * the account's data (collections, documents) independently per agent.
+   *
+   * Skip return validation: proxy-wrapping a WorkerEntrypoint stub breaks Workers serialization.
+   */
+  @skipRpcValidation()
+  async createAccountWithId(accountId: string): Promise<Fetcher<GatekeeperUser>> {
+    let sharingDomain = this.ctx.props.sharingDomain ?? DEFAULT_SHARING_DOMAIN;
+    return this.ctx.exports.ContextAccount({
+      props: { sharingDomain, accountId },
+    }) as unknown as Fetcher<GatekeeperUser>;
+  }
+
   // --- Resource-connection GatekeeperVendor surface (not applicable to this vendor) ---
 
   connectAccount(_callback: Fetcher<GatekeeperConnectCallback>,
