@@ -39,7 +39,16 @@ export class ComputerSessionImpl extends DurableObject implements ComputerSessio
     }
 
     if (!this.#browser || !this.#page) {
-      this.#browser = await launch(this.env.BROWSER);
+      try {
+        this.#browser = await launch(this.env.BROWSER);
+      } catch (error) {
+        logger.error("failed to launch browser", {
+          event: "computer.session.launch.failed",
+          agentId: this.#agentId,
+          error,
+        });
+        throw new Error("Failed to start Computer");
+      }
       this.#page = await this.#browser.newPage();
       await this.#page.setViewport(DEFAULT_VIEWPORT);
       

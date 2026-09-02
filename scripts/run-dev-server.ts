@@ -514,6 +514,13 @@ for (const gk of gatekeepers) {
     config.ai = { binding: "WORKERS_AI" };
   }
 
+  // Miniflare's bundled Chrome needs a user-namespace sandbox. Linux kernels often
+  // lack one (`zygote_host_impl_linux.cc: No usable sandbox`), so local Computer
+  // dumps a puppeteer stack. Use Cloudflare's remote Browser Rendering API instead.
+  if (process.platform === "linux" && config.browser && typeof config.browser === "object") {
+    config.browser.remote = true;
+  }
+
   // In run-local mode, serve the pre-built frontend bundle as static assets directly from the
   // backend Worker (mirrors the production layout). The dev-router forwards all non-gatekeeper
   // requests here; `run_worker_first` ensures the Worker handles the API routes while everything
