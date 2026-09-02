@@ -21,9 +21,11 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
+import { Route as AgentsIdRouteImport } from './routes/agents_.$id'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
+import { Route as GroupsIdRouteImport } from './routes/groups.$id'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
 import { Route as AgentIdMemoryRouteImport } from './routes/agent.$id.memory'
 import { Route as AgentIdRoutinesRouteImport } from './routes/agent.$id.routines'
@@ -89,6 +91,11 @@ const WorkspacesRoute = WorkspacesRouteImport.update({
   path: '/workspaces',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentsIdRoute = AgentsIdRouteImport.update({
+  id: '/agents_/$id',
+  path: '/agents/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BlueprintIdRoute = BlueprintIdRouteImport.update({
   id: '/blueprint/$id',
   path: '/blueprint/$id',
@@ -102,6 +109,11 @@ const GadgetIdRoute = GadgetIdRouteImport.update({
 const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
   id: '/gatekeepers_/$appId',
   path: '/gatekeepers/$appId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GroupsIdRoute = GroupsIdRouteImport.update({
+  id: '/groups/$id',
+  path: '/groups/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
@@ -138,9 +150,11 @@ export interface FileRoutesByFullPath {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/agents/$id': typeof AgentsIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
+  '/groups/$id': typeof GroupsIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/agent/$id/memory': typeof AgentIdMemoryRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
@@ -159,9 +173,11 @@ export interface FileRoutesByTo {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/agents/$id': typeof AgentsIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
+  '/groups/$id': typeof GroupsIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/agent/$id/memory': typeof AgentIdMemoryRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
@@ -181,9 +197,11 @@ export interface FileRoutesById {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/agents_/$id': typeof AgentsIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
+  '/groups/$id': typeof GroupsIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/agent/$id/memory': typeof AgentIdMemoryRoute
   '/agent/$id/routines': typeof AgentIdRoutinesRoute
@@ -204,9 +222,11 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/agents/$id'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
+    | '/groups/$id'
     | '/workspace/$id'
     | '/agent/$id/memory'
     | '/agent/$id/routines'
@@ -225,9 +245,11 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/agents/$id'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
+    | '/groups/$id'
     | '/workspace/$id'
     | '/agent/$id/memory'
     | '/agent/$id/routines'
@@ -246,9 +268,11 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/agents_/$id'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
+    | '/groups/$id'
     | '/workspace/$id'
     | '/agent/$id/memory'
     | '/agent/$id/routines'
@@ -268,9 +292,11 @@ export interface RootRouteChildren {
   ProvidersRoute: typeof ProvidersRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
+  AgentsIdRoute: typeof AgentsIdRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
+  GroupsIdRoute: typeof GroupsIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
   AgentIdMemoryRoute: typeof AgentIdMemoryRoute
   AgentIdRoutinesRoute: typeof AgentIdRoutinesRoute
@@ -363,6 +389,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspacesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agents_/$id': {
+      id: '/agents_/$id'
+      path: '/agents/$id'
+      fullPath: '/agents/$id'
+      preLoaderRoute: typeof AgentsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/blueprint/$id': {
       id: '/blueprint/$id'
       path: '/blueprint/$id'
@@ -382,6 +415,13 @@ declare module '@tanstack/react-router' {
       path: '/gatekeepers/$appId'
       fullPath: '/gatekeepers/$appId'
       preLoaderRoute: typeof GatekeepersAppIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/groups/$id': {
+      id: '/groups/$id'
+      path: '/groups/$id'
+      fullPath: '/groups/$id'
+      preLoaderRoute: typeof GroupsIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/workspace/$id': {
@@ -428,9 +468,11 @@ const rootRouteChildren: RootRouteChildren = {
   ProvidersRoute: ProvidersRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
+  AgentsIdRoute: AgentsIdRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
+  GroupsIdRoute: GroupsIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
   AgentIdMemoryRoute: AgentIdMemoryRoute,
   AgentIdRoutinesRoute: AgentIdRoutinesRoute,

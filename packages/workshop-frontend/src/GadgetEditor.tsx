@@ -29,6 +29,9 @@ import {
   WorkpieceSummary,
   BlueprintOutput,
   WorkpiecesSubscriber,
+  AgentProfile,
+  Group,
+  AiChatMessage,
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
 import GadgetCodeInterface from './GadgetCodeInterface'
@@ -64,6 +67,20 @@ import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
 import { isImeComposing } from './keyboardEvent'
+import BotThreadHeader from './components/BotThreadHeader'
+import { ComputerView } from './components/ComputerView'
+import SkillsList from './components/SkillsList'
+import MemoryList from './components/MemoryList'
+import RoutinesList from './components/RoutinesList'
+import AgentSettingsPane from './components/AgentSettingsPane'
+import InspectorFilesPane from './components/InspectorFilesPane'
+import {
+  isInspectorTab,
+  persistInspector,
+  readStoredInspector,
+  type MessengerInspector,
+} from './inspectorPane'
+import { useDocumentTitle } from './useDocumentTitle'
 
 const NO_GADGETS: ReadonlySet<WorkpieceId> = new Set()
 
@@ -424,14 +441,37 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
 
 // ─── component ────────────────────────────────────────────────────────────────
 
-export default function GadgetEditor() {
+export default function GadgetEditor({
+  workspaceId: workspaceIdProp,
+  messenger,
+}: {
+  workspaceId?: string
+  messenger?: { agent?: AgentProfile; group?: Group }
+} = {}) {
   const params = useParams({ strict: false }) as { id?: string }
-  const id = params.id
+  const id = workspaceIdProp ?? params.id
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
+  const messengerMode = messenger != null
+  useDocumentTitle(messenger?.agent?.name ?? messenger?.group?.name)
 
-  const { chat: chatParam, w: workpieceParam } = useSearch({ strict: false }) as
-    { chat?: number; w?: number }
+  const navigateWorkspace = useCallback((options: {
+    search?: Record<string, unknown> | ((prev: Record<string, unknown>) => Record<string, unknown>)
+    replace?: boolean
+  } = {}) => {
+    if (messenger?.agent) {
+      navigate({ to: '/agents/$id', params: { id: messenger.agent.id }, ...options })
+      return
+    }
+    if (messenger?.group) {
+      navigate({ to: '/groups/$id', params: { id: messenger.group.id }, ...options })
+      return
+    }
+    navigate({ to: '/workspace/$id', params: { id: id! }, ...options })
+  }, [id, messenger, navigate])
+
+  const { chat: chatParam, w: workpieceParam, pane: paneParam } = useSearch({ strict: false }) as
+    { chat?: number; w?: number; pane?: string }
   const urlChatId = chatParam !== undefined ? chatParam : null
   const urlWorkpieceId = workpieceParam !== undefined ? workpieceParam : null
 
@@ -472,7 +512,7 @@ export default function GadgetEditor() {
       if (!isEditingTitleRef.current) setTitleInput(nextMetadata.title)
     },
     onShareKeyConsumed: () => {
-      if (id) navigate({ to: '/workspace/$id', params: { id }, search: {}, replace: true })
+      if (id) navigateWorkspace({ search: {}, replace: true })
     },
     onInvalidShareKey: () => {
       toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
@@ -498,8 +538,25 @@ export default function GadgetEditor() {
   const [isResizing, setIsResizing] = useState(false)
   const [activeTab, setActiveTab] = useState<RightTab>('app')
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(() =>
-    getStoredWorkspaceView(id)
+    messengerMode ? { mode: 'chat' } : getStoredWorkspaceView(id)
   )
+  const [inspector, setInspector] = useState<MessengerInspector>(() => {
+    if (isInspectorTab(paneParam)) return paneParam
+    if (messenger?.agent) return readStoredInspector(messenger.agent.id)
+    return 'none'
+  })
+  const [agentProfile, setAgentProfile] = useState(messenger?.agent)
+  const [pendingComputerTakeover, setPendingComputerTakeover] = useState<
+    (AiChatMessage & { type: 'computerHumanTakeover' }) | undefined
+  >(undefined)
+
+  useEffect(() => {
+    setAgentProfile(messenger?.agent)
+  }, [messenger?.agent])
+
+  useEffect(() => {
+    if (isInspectorTab(paneParam)) setInspector(paneParam)
+  }, [paneParam])
   const [workspaceTransitionEnabled, setWorkspaceTransitionEnabled] = useState(false)
   const activityReturnViewRef = useRef<WorkspaceView | null>(null)
   const [activityView, setActivityView] = useState<ActivityView>('history')
@@ -807,10 +864,17 @@ export default function GadgetEditor() {
     && singleInitialChat && visibleGadgets.length <= 1
   const hasAnyApps = allGadgets.length > 0
   const showingActivity = workspaceView?.mode === 'activity'
-  const showFullEditor = layoutModeReady && (
-    showingActivity || (hasAnyApps && (workspaceView === null ? !simpleMode : workspaceView.mode === 'app'))
+  const messengerListPane = inspector === 'skills' || inspector === 'memory'
+    || inspector === 'routines' || inspector === 'files' || inspector === 'settings'
+  const messengerPane = messengerMode && (
+    inspector === 'gadget' || inspector === 'computer' || messengerListPane
   )
-  const showOutputRail = layoutModeReady && hasAnyApps && !showFullEditor
+  const showFullEditor = layoutModeReady && (
+    showingActivity || (messengerMode
+      ? messengerPane
+      : (hasAnyApps && (workspaceView === null ? !simpleMode : workspaceView.mode === 'app')))
+  )
+  const showOutputRail = !messengerMode && layoutModeReady && hasAnyApps && !showFullEditor
   const paneShowsActivity = showingActivity || activityClosing
   useEffect(() => {
     if (!activityClosing) return
@@ -902,6 +966,7 @@ export default function GadgetEditor() {
     if (!visibleGadgets.some(g => g.id === urlWorkpieceId)) return
     openedWorkpieceParamRef.current = urlWorkpieceId
     setWorkspaceVisibility('open', urlWorkpieceId)
+    if (messengerMode) setInspector('gadget')
   }, [workpiecesReady, urlWorkpieceId, visibleGadgets, setWorkspaceVisibility])
 
   const openActivity = useCallback((initialView: ActivityView) => {
@@ -913,6 +978,10 @@ export default function GadgetEditor() {
   }, [workspaceView])
 
   const closeWorkspacePane = useCallback(() => {
+    if (messengerMode) {
+      setInspector('none')
+      if (messenger?.agent) persistInspector(messenger.agent.id, 'none')
+    }
     if (workspaceView?.mode !== 'activity') {
       setWorkspaceVisibility('closed')
       return
@@ -945,9 +1014,8 @@ export default function GadgetEditor() {
 
     setActiveTab('app')
     setWorkspaceVisibility('open', target.id)
-    navigate({
-      to: '/workspace/$id',
-      params: { id: id! },
+    if (messengerMode) setInspector('gadget')
+    navigateWorkspace({
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.id }),
       replace: true,
     })
@@ -1026,7 +1094,12 @@ export default function GadgetEditor() {
     setHasChatZero(false)
     setHasAnyProposedChanges(false)
     setSelectedChatHasProposedChanges(false)
-    setWorkspaceView(getStoredWorkspaceView(id))
+    setWorkspaceView(messengerMode ? { mode: 'chat' } : getStoredWorkspaceView(id))
+    setInspector(
+      isInspectorTab(paneParam) ? paneParam
+        : messenger?.agent ? readStoredInspector(messenger.agent.id)
+        : 'none',
+    )
     openedWorkpieceParamRef.current = null
     activityReturnViewRef.current = null
     setActivityClosing(false)
@@ -1036,7 +1109,7 @@ export default function GadgetEditor() {
     knownWorkpieceIdsRef.current = null
     turnOutputRef.current = null
     setUserNavigatedToList(false)
-  }, [id])
+  }, [id, messengerMode])
 
   // ── navigation helper ────────────────────────────────────────────────────────
   const navigateToChat = useCallback(
@@ -1053,10 +1126,7 @@ export default function GadgetEditor() {
           setWorkspaceView({ mode: 'chat' })
         }
       }
-      navigate({
-        to: '/workspace/$id',
-        params: { id: id! },
-        // Keep committed selections, but clear draft selections outside their branch.
+      navigateWorkspace({
         search: (prev: Record<string, unknown>) => ({
           ...prev,
           chat: chatId !== null ? chatId : undefined,
@@ -1077,9 +1147,7 @@ export default function GadgetEditor() {
 
     if (simpleMode) {
       if (urlChatId === 0) {
-        navigate({
-          to: '/workspace/$id',
-          params: { id: id! },
+        navigateWorkspace({
           search: (prev: Record<string, unknown>) => ({ ...prev, chat: undefined }),
           replace: true,
         })
@@ -1188,9 +1256,7 @@ export default function GadgetEditor() {
     if (target == null || target.workpieceId === selectedGadgetId) return
     if (userPickedWorkpieceThisTurnRef.current) return
     if (!visibleGadgets.some(g => g.id === target.workpieceId)) return
-    navigate({
-      to: '/workspace/$id',
-      params: { id: id! },
+    navigateWorkspace({
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.workpieceId }),
       replace: true,
     })
@@ -1202,11 +1268,9 @@ export default function GadgetEditor() {
     // Picking a gadget is a deliberate move to its view, so the turn must not pull the tab back.
     handleTabSelect('app')
     setWorkspaceVisibility('open', workpieceId)
+    if (messengerMode) setInspector('gadget')
     const pendingChatId = workpieces.get(workpieceId)?.chatId
-    navigate({
-      to: '/workspace/$id',
-      params: { id: id! },
-      // Selecting a draft also returns to its creating conversation.
+    navigateWorkspace({
       search: (prev: Record<string, unknown>) => ({
         ...prev,
         chat: pendingChatId ?? (typeof prev.chat === 'number' ? prev.chat : undefined),
@@ -1381,9 +1445,26 @@ export default function GadgetEditor() {
   // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
+      {messengerMode && (
+        <BotThreadHeader
+          agent={agentProfile}
+          group={messenger?.group}
+          inspector={inspector}
+          onInspectorChange={(next) => {
+            setInspector(next)
+            if (messenger?.agent) persistInspector(messenger.agent.id, next)
+            if (next === 'gadget') {
+              setWorkspaceVisibility('open', selectedGadgetId ?? undefined)
+            }
+          }}
+          onOpenActivity={openActivity}
+          overseer={overseer?.stub ?? null}
+          reconnecting={showReconnecting}
+        />
+      )}
       {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
       <div
-        className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
+        className={`relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3 ${messengerMode ? 'hidden' : ''}`}
         style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)' }}
       >
         <TopBarNotice />
@@ -1517,7 +1598,7 @@ export default function GadgetEditor() {
         </div>
       </div>
 
-      <div className="flex h-12 shrink-0 items-center gap-1 border-b border-kumo-line bg-kumo-base px-2 md:hidden">
+      <div className={`flex h-12 shrink-0 items-center gap-1 border-b border-kumo-line bg-kumo-base px-2 md:hidden ${messengerMode ? 'hidden' : ''}`}>
         <button
           type="button"
           onClick={() => setWorkspaceVisibility('closed')}
@@ -1679,6 +1760,13 @@ export default function GadgetEditor() {
                   onConsumeConsoleLogs={consumeConsoleLogs}
                   onDiscardConsoleLogs={discardConsoleLogs}
                   constrainChatWidth
+                  threadChrome={messengerMode}
+                  hideComputerOverlay={messengerMode}
+                  onComputerAttention={() => {
+                    setInspector('computer')
+                    if (messenger?.agent) persistInspector(messenger.agent.id, 'computer')
+                  }}
+                  onPendingComputerTakeover={setPendingComputerTakeover}
                   onChatCountChange={handleChatCountChange}
                   onAgentActiveChange={handleAgentActiveChange}
                   onAutoApproveChange={() => setAutoApproveReloadTrigger(t => t + 1)}
@@ -1727,7 +1815,7 @@ export default function GadgetEditor() {
         >
           <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <div
-            className="hidden flex-shrink-0 items-center gap-2 border-b border-kumo-line px-3 md:flex"
+            className={`hidden flex-shrink-0 items-center gap-2 border-b border-kumo-line px-3 md:flex ${messengerMode && inspector !== 'gadget' ? '!hidden' : ''}`}
             style={{ height: TABBAR_H }}
           >
             <div className="flex min-w-0 flex-1 items-center overflow-hidden">
@@ -1802,6 +1890,66 @@ export default function GadgetEditor() {
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            {messengerMode && inspector !== 'gadget' && inspector !== 'none' && (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="flex h-12 shrink-0 items-center justify-between border-b border-kumo-line px-3">
+                  <span className="text-[13px] font-medium text-kumo-default">
+                    {inspector === 'computer' ? 'Computer'
+                      : inspector === 'files' ? 'Files'
+                      : inspector === 'skills' ? 'Skills'
+                      : inspector === 'memory' ? 'Memory'
+                      : inspector === 'routines' ? 'Routines'
+                      : inspector === 'settings' ? 'Settings'
+                      : 'Pane'}
+                  </span>
+                  <WorkshopIconButton
+                    aria-label="Close"
+                    title="Close"
+                    onClick={closeWorkspacePane}
+                  >
+                    <X size={16} />
+                  </WorkshopIconButton>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  {inspector === 'computer' && agentProfile && overseer && (
+                    <ComputerView
+                      embedded
+                      agentId={agentProfile.id}
+                      overseer={overseer.stub}
+                      onClose={closeWorkspacePane}
+                      pendingTakeoverRequest={pendingComputerTakeover}
+                      onApproveTakeover={async (requestId) => {
+                        await overseer.stub.approveComputerHumanTakeover(requestId)
+                      }}
+                      isProcessingTakeover={() => false}
+                    />
+                  )}
+                  {inspector === 'files' && (
+                    <InspectorFilesPane
+                      gadgets={visibleGadgets}
+                      selectedId={selectedGadgetId}
+                      onSelect={(workpieceId) => {
+                        handleSelectWorkpiece(workpieceId)
+                        setInspector('gadget')
+                        if (messenger?.agent) persistInspector(messenger.agent.id, 'gadget')
+                      }}
+                    />
+                  )}
+                  {inspector === 'skills' && agentProfile && <div className="h-full overflow-y-auto"><SkillsList agent={agentProfile} /></div>}
+                  {inspector === 'memory' && agentProfile && <div className="h-full overflow-y-auto"><MemoryList agent={agentProfile} /></div>}
+                  {inspector === 'routines' && agentProfile && <div className="h-full overflow-y-auto"><RoutinesList agent={agentProfile} /></div>}
+                  {inspector === 'settings' && agentProfile && (
+                    <div className="h-full overflow-y-auto">
+                      <AgentSettingsPane
+                        agent={agentProfile}
+                        authenticatedApi={authenticatedApi}
+                        onUpdated={setAgentProfile}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {paneShowsActivity && (
               <div className="flex h-11 items-center gap-1 overflow-x-auto border-b border-kumo-line px-2 md:hidden">
                 {ACTIVITY_TABS.map(tab => (
@@ -1826,7 +1974,7 @@ export default function GadgetEditor() {
                 />
               </div>
             )}
-            <div className={paneShowsActivity ? 'hidden' : 'contents'}>
+            <div className={paneShowsActivity || (messengerMode && inspector !== 'gadget') ? 'hidden' : 'contents'}>
             <div
               ref={fullscreenOverlayRef}
               tabIndex={isGadgetFullscreen ? -1 : undefined}

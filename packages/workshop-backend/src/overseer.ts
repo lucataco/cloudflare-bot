@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, AgentProfile, AgentRoutineSchedule, AgentSkill } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime,   AgentProfile, AgentRoutineSchedule, AgentSkill, ChatQueueItem } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -55,6 +55,20 @@ import {
   validateChatAttachmentUpload,
 } from "./chat-attachment-validation";
 import { renderGadgetInBrowser } from "./browser-export";
+import {
+  cancelChatQueueItem,
+  chatQueueKey,
+  deleteChatQueue,
+  enqueueChatQueueItem,
+  moveChatQueueItemToHead,
+  publicChatQueue,
+  reorderChatQueue,
+  restoreChatQueueHead,
+  takeChatQueueHead,
+  toPublicQueueItem,
+  updateChatQueueItem,
+  type ChatQueueRecord,
+} from "./chat-queue";
 import {
   defaultExportFormats,
   exportServerFormat,
@@ -1248,6 +1262,13 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      // User prompts waiting to run after the current turn. Drained one-per-turn; not transcript.
+      chatQueue: collection<ChatQueueRecord>()({
+        primaryKey(record: ChatQueueRecord) {
+          return chatQueueKey(record.chatId, record.id);
+        },
+      }),
+
       // READ-ONLY LEGACY: pre-git-storage live drafts. Retained only as migration input (the
       // conversion change folds them in and deletes them); nothing else reads or writes it, apart
       // from deleteChat's defensive sweep.
@@ -1826,6 +1847,13 @@ class OverseerImpl implements AgentHooks {
       let liveChat = this.#getLiveChat(record.chatId);
 
       this.#resumeAgent(record, liveChat);
+    }
+
+    for (let meta of Array.from(this.storage.chatMeta.list())) {
+      if (!meta.activeAgent && !meta.queuePaused &&
+          publicChatQueue(this.storage.chatQueue, meta.id).length > 0) {
+        void this.drainChatQueue(meta.id);
+      }
     }
 
     // Backwards compatibility: Prior to the introduction of the `activeAgents` table, we could
@@ -5180,6 +5208,128 @@ class OverseerImpl implements AgentHooks {
     return meta;
   }
 
+  chatMetadataForClient(meta: AiChatMetadata): AiChatMetadata {
+    let queue = publicChatQueue(this.storage.chatQueue, meta.id);
+    return {
+      ...meta,
+      queue: queue.length > 0 ? queue : undefined,
+    };
+  }
+
+  #touchChatMeta(chatId: number): AiChatMetadata {
+    let meta = this.getChatMetaOrThrow(chatId);
+    this.storage.chatMeta.put(meta);
+    return meta;
+  }
+
+  enqueueChatPrompt(
+    chatId: number,
+    initiatorUserId: string,
+    message: string | SlashCommandRequest,
+    modelId: string | null,
+    capsules?: CapsuleSpecifier[],
+    attachments?: ChatAttachmentHandle[],
+    formats?: MessageFormatRef[],
+    agentId?: string,
+  ): ChatQueueItem {
+    if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
+      throw new Error("Slash commands cannot include resources or attachments.");
+    }
+    this.getChatMetaOrThrow(chatId);
+    let record = enqueueChatQueueItem(this.storage.chatQueue, chatId, {
+      message,
+      modelId,
+      capsules,
+      attachments,
+      formats,
+      agentId,
+      initiatorUserId,
+    });
+    this.#touchChatMeta(chatId);
+    return toPublicQueueItem(record);
+  }
+
+  cancelQueuedMessage(chatId: number, id: string): void {
+    this.getChatMetaOrThrow(chatId);
+    cancelChatQueueItem(this.storage.chatQueue, chatId, id);
+    this.#touchChatMeta(chatId);
+  }
+
+  updateQueuedMessage(
+    chatId: number,
+    id: string,
+    message: string | SlashCommandRequest,
+    attachments?: ChatAttachmentHandle[],
+  ): void {
+    this.getChatMetaOrThrow(chatId);
+    if (typeof message !== "string" && attachments?.length) {
+      throw new Error("Slash commands cannot include resources or attachments.");
+    }
+    updateChatQueueItem(this.storage.chatQueue, chatId, id, message, attachments);
+    this.#touchChatMeta(chatId);
+  }
+
+  reorderChatQueue(chatId: number, ids: string[]): void {
+    this.getChatMetaOrThrow(chatId);
+    reorderChatQueue(this.storage.chatQueue, chatId, ids);
+    this.#touchChatMeta(chatId);
+  }
+
+  setChatQueuePaused(chatId: number, paused: boolean): void {
+    let meta = this.getChatMetaOrThrow(chatId);
+    if (paused) meta.queuePaused = true;
+    else delete meta.queuePaused;
+    this.storage.chatMeta.put(meta);
+  }
+
+  steerQueuedMessage(chatId: number, id: string): { shouldStop: boolean; shouldDrain: boolean } {
+    let meta = this.getChatMetaOrThrow(chatId);
+    moveChatQueueItemToHead(this.storage.chatQueue, chatId, id);
+    this.storage.chatMeta.put(meta);
+    if (meta.activeAgent) return { shouldStop: true, shouldDrain: false };
+    return { shouldStop: false, shouldDrain: !meta.queuePaused };
+  }
+
+  async drainChatQueue(chatId: number): Promise<void> {
+    let meta = this.storage.chatMeta.get(chatId);
+    if (!meta || meta.activeAgent || meta.queuePaused || this.isPreparingChatMessage(chatId)
+        || this.#drainingChats.has(chatId)) {
+      return;
+    }
+    let head = takeChatQueueHead(this.storage.chatQueue, chatId);
+    if (!head) return;
+    this.storage.chatMeta.put(meta);
+    this.#drainingChats.add(chatId);
+    try {
+      await this.#deliverQueuedPrompt(head);
+    } catch (err) {
+      restoreChatQueueHead(this.storage.chatQueue, head);
+      this.storage.chatMeta.put(meta);
+      this.logger.error("failed to drain chat queue", {
+        event: "chat.queue.drain.failed",
+        chatId,
+        error: err,
+      });
+      this.postAgentErrorMessage(chatId,
+          { type: "user", id: head.initiatorUserId, name: "User" },
+          err instanceof Error ? err.message : `${err}`);
+    } finally {
+      this.#drainingChats.delete(chatId);
+    }
+  }
+
+  async #deliverQueuedPrompt(item: ChatQueueRecord): Promise<void> {
+    let user = wrapDoStubForTelemetry(
+        this.users.get(this.users.idFromString(item.initiatorUserId)), this.logger);
+    let userMeta = await retryOnDoReset(
+        () => user.getChatContext(item.modelId, this.ctx.id.toString(), item.agentId), this.logger);
+    await this.sendChatMessage(
+        user, userMeta, item.chatId, item.message, item.capsules, item.attachments, undefined,
+        item.formats, true);
+  }
+
+  #drainingChats = new Set<number>();
+
   // In-flight chat mutations, keyed by chat, serialized by withChatLock().
   #chatChangeLocks = new Map<number, Promise<unknown>>();
 
@@ -5480,6 +5630,7 @@ class OverseerImpl implements AgentHooks {
     attachments?: ChatAttachmentHandle[],
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     formats?: MessageFormatRef[],
+    forceImmediate = false,
   ): Promise<void> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -5487,6 +5638,19 @@ class OverseerImpl implements AgentHooks {
     }
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
+    }
+    let existing = this.storage.chatMeta.get(chatId);
+    if (!existing) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    if (!forceImmediate && !responseTargetRegistration &&
+        (existing.activeAgent || this.isPreparingChatMessage(chatId)
+          || this.#drainingChats.has(chatId))) {
+      this.enqueueChatPrompt(
+          chatId, clientUser.id.toString(), message,
+          userMeta.aiModel?.profile.id ?? null, capsules, attachments, formats,
+          userMeta.agentProfile?.id);
+      return;
     }
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
         attachments, userMeta.aiModel?.config.provider);
@@ -6263,6 +6427,7 @@ class OverseerImpl implements AgentHooks {
 
         // LiveChatContext is now empty.
         this.#liveChats.delete(chatId);
+        await this.drainChatQueue(chatId);
       }
     }
   }
@@ -10570,7 +10735,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listChats(): Promise<AiChatMetadata[]> {
-    return [...this.impl.storage.chatMeta.list({reverse: true})];
+    return [...this.impl.storage.chatMeta.list({reverse: true})]
+        .map(meta => this.impl.chatMetadataForClient(meta));
   }
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
@@ -10683,19 +10849,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // detect a full DO restart and discard stale provisional stream state.
     subscriber.streamGeneration(this.impl.streamGeneration).catch(unsubscribe);
 
+    let self = this;
     let metaSubscriber = {
       add(record: AiChatMetadata) {
-        subscriber.metadata(record).catch(unsubscribe);
+        subscriber.metadata(self.impl.chatMetadataForClient(record)).catch(unsubscribe);
       },
       update(oldRecord: AiChatMetadata, newRecord: AiChatMetadata): void {
-        subscriber.metadata(newRecord).catch(unsubscribe);
+        subscriber.metadata(self.impl.chatMetadataForClient(newRecord)).catch(unsubscribe);
       },
       remove(record: AiChatMetadata): void {
         subscriber.deleted(record.id);
       }
     }
 
-    let self = this;
     function deliverMessage(record: AiChatMessage) {
       subscriber.message(self.#getChatMessageForClient(record)).catch(unsubscribe);
     }
@@ -10738,7 +10904,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
       // Messages establish the durable state that the corresponding metadata describes.
       for (let meta of changedChatMetadata) {
-        subscriber.metadata(meta).catch(unsubscribe);
+        subscriber.metadata(self.impl.chatMetadataForClient(meta)).catch(unsubscribe);
       }
     }
 
@@ -10791,6 +10957,31 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         () => this.#clientUser.getChatContext(chosenModelId, workspaceId, agentId), this.impl.logger);
     return this.impl.sendChatMessage(
         this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
+  }
+
+  async cancelQueuedMessage(chatId: number, id: string): Promise<void> {
+    this.impl.cancelQueuedMessage(chatId, id);
+  }
+
+  async updateQueuedMessage(
+      chatId: number, id: string, message: string | SlashCommandRequest,
+      attachments?: ChatAttachmentHandle[]): Promise<void> {
+    this.impl.updateQueuedMessage(chatId, id, message, attachments);
+  }
+
+  async reorderChatQueue(chatId: number, ids: string[]): Promise<void> {
+    this.impl.reorderChatQueue(chatId, ids);
+  }
+
+  async setChatQueuePaused(chatId: number, paused: boolean): Promise<void> {
+    this.impl.setChatQueuePaused(chatId, paused);
+    if (!paused) await this.impl.drainChatQueue(chatId);
+  }
+
+  async steerQueuedMessage(chatId: number, id: string): Promise<void> {
+    let result = this.impl.steerQueuedMessage(chatId, id);
+    if (result.shouldStop) this.impl.cancelAgent(chatId);
+    else if (result.shouldDrain) await this.impl.drainChatQueue(chatId);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -10847,6 +11038,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     this.impl.storage.chatMeta.delete(chatId);
     this.impl.storage.chatContext.delete(chatId);
+    deleteChatQueue(this.impl.storage.chatQueue, chatId);
     // Buffer the keys first: deleting invalidates the list cursor.
     let checkpoints = Array.from(
         this.impl.storage.chatCompactions.list({prefix: `${keyString(chatId)}.`}),
@@ -11440,6 +11632,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
                         _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> {
     this.#deny();
   }
+  async cancelQueuedMessage(_chatId: number, _id: string): Promise<void> { this.#deny(); }
+  async updateQueuedMessage(_chatId: number, _id: string, _message: string | SlashCommandRequest,
+                            _attachments?: ChatAttachmentHandle[]): Promise<void> { this.#deny(); }
+  async reorderChatQueue(_chatId: number, _ids: string[]): Promise<void> { this.#deny(); }
+  async setChatQueuePaused(_chatId: number, _paused: boolean): Promise<void> { this.#deny(); }
+  async steerQueuedMessage(_chatId: number, _id: string): Promise<void> { this.#deny(); }
   async uploadChatAttachment(
     _attachment: ChatAttachmentUpload,
     _modelId: string | null,

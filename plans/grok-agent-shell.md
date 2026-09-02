@@ -25,6 +25,7 @@ HEAD `0cef8f462333f4f091364de5feddc93562f095ff`. PRs 1–19 landed on lucataco/c
 ### Shipped
 
 - **Agent shell foundation**: Sidebar Bots list, AgentProfile with persistent defaultModelId, description field, avatar. AgentShell flag enabled for dogfood.
+- **Messenger chrome**: Persistent bot rail on every screen (`MessengerShell`). Home is `/agents` → last bot or first-bot setup. Clicking a bot opens `/agents/$id` (group: `/groups/$id`) without dropping the list. GadgetEditor is a thread: bot header, chat-first, Gadget/Computer/Skills/Memory/Routines as panes. Workspace URLs for agent chats redirect into the thread.
 - **Per-bot bindings**: Connector accounts remain user-scoped; bindings are per-agent.
 - **Group chats (partial)**: Chat supports multiple members, but one active agent only. User still routes between agents.
 - **Computer access**: Per-bot BROWSER session (not full Dynamic Worker desktop yet), computer tools integrated, ComputerView in UI, auto-screenshot on tool use.
@@ -33,9 +34,13 @@ HEAD `0cef8f462333f4f091364de5feddc93562f095ff`. PRs 1–19 landed on lucataco/c
 - **Approval UX polish**: Bordered cards, filled Approve button. Always-approve available when eligible.
 - **Workers AI limits**: `max_tokens` remaining-window cap, shared `computeTokenLimits`, catalog-miss 24k fallback, workersAiCompat `maxTokensField` routing to `max_tokens` (PRs 16–19).
 
+- **FIFO chat queue**: Send while a turn is running enqueues on the workspace DO (`chatQueue`). Drain is one prompt per subsequent turn. Cancel, edit, reorder, pause, and steer. Stop aborts only the current turn (next queued item starts unless paused). Gatekeeper HITL is unchanged.
+- **Unified inspector**: One docked right pane (Computer / Gadget / Files / Skills / Memory / Routines / Settings). Computer is embedded, not a modal. `/agent/$id/{skills,memory,routines}` redirect into the thread.
+- **Composer model picker**: Empty bot threads use `AgentProfile.defaultModelId` (not “No agent”). Per-bot composer override in localStorage. Explicit No agent still works.
+
 ### Remaining Work
 
-1. **Model picker completion** (next slice): Composer model picker needs wiring, default model persistence across sessions, Send button stuck on "No agent" when model exists.
+1. **Roster presence**: Last-message preview, unread, and working dots on bot rows (small `listAgents` projection).
 2. **Approval labels**: May still say "Approve" not "Allow once / Always / Deny" in some flows.
 3. **Multi-bot routing**: Groups still user-routed, not true agent-to-agent over Cap'n Web with multiple active authors.
 4. **Computer full vision**: Current BROWSER session vs target Dynamic Worker desktop with human takeover for password/2FA/captcha.
