@@ -1,62 +1,81 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState, useEffect } from 'react'
-import AgentRoster from '../components/AgentRoster'
+import { useEffect, useState } from 'react'
+import type { AgentProfile, Group } from '@gadgets/workshop-shared/api'
+import FirstBotSetup from '../components/FirstBotSetup'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useAuthenticatedApi } from '../AuthContext'
+import { useUiFeatureFlag } from '../FeatureFlagsContext'
+import { persistLastThread, readLastThread } from '../lastThread'
+import { logRpcFailure } from '../rpcErrors'
 
-/**
- * Agent roster page - shows when agentShell feature flag is enabled.
- * This replaces the workspace-centric home with a Bot/Agent-centric messenger UI.
- */
 export const Route = createFileRoute('/agents')({
   component: AgentsPage,
 })
 
 function AgentsPage() {
-  useDocumentTitle('Agents')
+  useDocumentTitle('Bots')
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
-  const [firstLoad, setFirstLoad] = useState(true)
+  const { enabled: agentShellEnabled, loading: flagsLoading } = useUiFeatureFlag('agentShell')
+  const [empty, setEmpty] = useState(false)
 
   useEffect(() => {
-    if (!firstLoad) return
+    if (flagsLoading) return
+    if (!agentShellEnabled) {
+      navigate({ to: '/', replace: true })
+      return
+    }
 
-    authenticatedApi.listAgents()
-      .then(() => {
-        setFirstLoad(false)
+    let cancelled = false
+    Promise.all([authenticatedApi.listAgents(), authenticatedApi.listGroups()])
+      .then(([agents, groups]: [AgentProfile[], Group[]]) => {
+        if (cancelled) return
+        if (agents.length === 0 && groups.length === 0) {
+          setEmpty(true)
+          return
+        }
+        const last = readLastThread()
+        if (last?.kind === 'agent' && agents.some((agent) => agent.id === last.id)) {
+          navigate({ to: '/agents/$id', params: { id: last.id }, replace: true })
+          return
+        }
+        if (last?.kind === 'group' && groups.some((group) => group.id === last.id)) {
+          navigate({ to: '/groups/$id', params: { id: last.id }, replace: true })
+          return
+        }
+        const firstAgent = agents[0]
+        if (firstAgent) {
+          persistLastThread({ kind: 'agent', id: firstAgent.id })
+          navigate({ to: '/agents/$id', params: { id: firstAgent.id }, replace: true })
+          return
+        }
+        const firstGroup = groups[0]
+        if (firstGroup) {
+          persistLastThread({ kind: 'group', id: firstGroup.id })
+          navigate({ to: '/groups/$id', params: { id: firstGroup.id }, replace: true })
+        }
       })
       .catch((err: unknown) => {
-        console.error('Failed to load agents:', err)
-        setFirstLoad(false)
+        logRpcFailure('Failed to load agents:', err)
+        if (!cancelled) setEmpty(true)
       })
-  }, [authenticatedApi, firstLoad])
+    return () => { cancelled = true }
+  }, [authenticatedApi, agentShellEnabled, flagsLoading, navigate])
 
-  const handleAgentCreated = (_agentId: string, workspaceId: string) => {
-    // Navigate to the newly created agent's workspace
-    navigate({ to: '/workspace/$id', params: { id: workspaceId } })
-  }
-  
-  if (firstLoad) {
+  if (empty) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-      </div>
+      <FirstBotSetup
+        onCreated={(agentId) => {
+          persistLastThread({ kind: 'agent', id: agentId })
+          navigate({ to: '/agents/$id', params: { id: agentId } })
+        }}
+      />
     )
   }
 
   return (
-    <div className="flex h-full">
-      <div className="w-80 border-r border-kumo-border">
-        <AgentRoster onAgentCreated={handleAgentCreated} />
-      </div>
-      <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
-          <h2 className="text-lg font-semibold text-kumo-default">Select an agent</h2>
-          <p className="mt-2 text-sm text-kumo-subtle">
-            Choose an agent from the sidebar to start chatting
-          </p>
-        </div>
-      </div>
+    <div className="flex h-full items-center justify-center">
+      <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
     </div>
   )
 }

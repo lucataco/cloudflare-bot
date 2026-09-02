@@ -2,6 +2,24 @@ import { useState, useEffect, useRef } from 'react';
 import { RpcStub } from 'capnweb';
 import { Overseer, ComputerSession, AiChatMessage } from '@gadgets/workshop-shared/api';
 
+function computerErrorMessage(err: unknown, fallback: string): string {
+  if (!(err instanceof Error)) return fallback;
+  const message = err.message;
+  if (message.includes('BROWSER binding')) {
+    return 'Computer sessions require the BROWSER binding to be configured.';
+  }
+  if (message.includes('Proxy could not be serialized')) return fallback;
+  if (
+    message.includes('No usable sandbox') ||
+    message.includes('/browser/launch') ||
+    message.includes('zygote_host')
+  ) {
+    return 'Computer could not start a local browser.';
+  }
+  if (message.length > 180 || message.includes('\n')) return fallback;
+  return message;
+}
+
 interface ComputerViewProps {
   agentId: string;
   overseer: RpcStub<Overseer>;
@@ -9,9 +27,10 @@ interface ComputerViewProps {
   pendingTakeoverRequest?: AiChatMessage & { type: "computerHumanTakeover" };
   onApproveTakeover?: (requestId: string) => Promise<void>;
   isProcessingTakeover?: (requestId: string) => boolean;
+  embedded?: boolean;
 }
 
-export function ComputerView({ agentId, overseer, onClose, pendingTakeoverRequest, onApproveTakeover, isProcessingTakeover }: ComputerViewProps) {
+export function ComputerView({ agentId, overseer, onClose, pendingTakeoverRequest, onApproveTakeover, isProcessingTakeover, embedded = false }: ComputerViewProps) {
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,15 +53,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
         }
       } catch (err) {
         if (mounted) {
-          let errorMsg = 'Failed to initialize computer';
-          if (err instanceof Error) {
-            if (err.message.includes('BROWSER binding')) {
-              errorMsg = 'Computer sessions require the BROWSER binding to be configured.';
-            } else if (!err.message.includes('Proxy could not be serialized')) {
-              errorMsg = err.message;
-            }
-          }
-          setError(errorMsg);
+          setError(computerErrorMessage(err, 'Failed to initialize computer'));
         }
       }
     }
@@ -81,7 +92,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
       setCurrentUrl(state.currentUrl || 'about:blank');
       setUrl(state.currentUrl || 'about:blank');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load computer');
+      setError(computerErrorMessage(err, 'Failed to load computer'));
     } finally {
       if (showSpinner) {
         setLoading(false);
@@ -97,7 +108,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
       await sessionRef.current.navigate(url);
       await loadScreenshot(sessionRef.current);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Navigation failed');
+      setError(computerErrorMessage(err, 'Navigation failed'));
       setLoading(false);
     }
   }
@@ -120,7 +131,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
       await sessionRef.current.click(Math.round(x), Math.round(y));
       await loadScreenshot(sessionRef.current, false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Click failed');
+      setError(computerErrorMessage(err, 'Click failed'));
     }
   }
 
@@ -141,7 +152,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
         }
       }, 150);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Scroll failed');
+      setError(computerErrorMessage(err, 'Scroll failed'));
     }
   }
 
@@ -156,7 +167,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
         await sessionRef.current.key(e.key);
         await loadScreenshot(sessionRef.current, false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Key failed');
+        setError(computerErrorMessage(err, 'Key failed'));
       }
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
@@ -164,7 +175,7 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
         await sessionRef.current.type(e.key);
         await loadScreenshot(sessionRef.current, false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Type failed');
+        setError(computerErrorMessage(err, 'Type failed'));
       }
     }
   }
@@ -182,9 +193,9 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
   const hasPendingTakeover = pendingTakeoverRequest && pendingTakeoverRequest.state === 'pending';
   const isProcessing = hasPendingTakeover && isProcessingTakeover?.(pendingTakeoverRequest.requestId);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="flex h-[90vh] w-[90vw] flex-col rounded-lg bg-kumo-elevated shadow-xl">
+  const body = (
+    <>
+        {!embedded && (
         <div className="flex items-center justify-between border-b border-kumo-border px-4 py-3">
           <h2 className="text-lg font-semibold text-kumo-default">Agent Computer</h2>
           <div className="flex gap-2">
@@ -205,8 +216,18 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
             </button>
           </div>
         </div>
+        )}
 
-        <div className="flex items-center gap-2 border-b border-kumo-border px-4 py-2">
+        <div className="flex items-center gap-2 border-b border-kumo-border px-3 py-2">
+            {embedded && hasPendingTakeover && onApproveTakeover && (
+              <button
+                onClick={handleApproveTakeover}
+                disabled={isProcessing || approvingTakeover}
+                className="rounded bg-kumo-brand px-3 py-1.5 text-sm text-white hover:bg-kumo-brand-hover disabled:opacity-50"
+              >
+                Done
+              </button>
+            )}
           <input
             type="text"
             value={url}
@@ -275,6 +296,17 @@ export function ComputerView({ agentId, overseer, onClose, pendingTakeoverReques
             </div>
           )}
         </div>
+    </>
+  );
+
+  if (embedded) {
+    return <div className="flex h-full min-h-0 flex-col bg-kumo-base">{body}</div>;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="flex h-[90vh] w-[90vw] flex-col rounded-lg bg-kumo-elevated shadow-xl">
+        {body}
       </div>
     </div>
   );

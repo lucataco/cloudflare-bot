@@ -10,6 +10,8 @@ import { AuthProvider } from '../AuthContext'
 import { FeatureFlagsProvider } from '../FeatureFlagsContext'
 import Header from '../components/Header'
 import AppShell from '../components/AppShell/AppShell'
+import MessengerShell from '../components/AppShell/MessengerShell'
+import { useUiFeatureFlag } from '../FeatureFlagsContext'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
@@ -162,10 +164,11 @@ function AuthenticatedShell({
     return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
   }
 
-  // Normal app shell. The workspace editor is rendered fullscreen (no chrome); everything else
-  // gets the persistent left-rail AppShell. Connection loss is surfaced by a chip in whichever of
-  // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
-  const fullscreen = isWorkspaceEditor
+  const { enabled: agentShell } = useUiFeatureFlag('agentShell')
+
+  // Bot-first chrome keeps the bot list on every screen, including threads. The workspace editor
+  // is fullscreen only in the classic workshop shell.
+  const fullscreen = isWorkspaceEditor && !agentShell
   return (
     <>
       <AccountSelectionModal />
@@ -173,6 +176,10 @@ function AuthenticatedShell({
         <main className="h-full min-h-0">
           <Outlet />
         </main>
+      ) : agentShell ? (
+        <MessengerShell>
+          <Outlet />
+        </MessengerShell>
       ) : (
         <AppShell>
           <Outlet />

@@ -61,10 +61,13 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
 import { ComputerView } from "./components/ComputerView";
+import ChatQueueTray from "./components/ChatQueueTray";
 import { useUiFeatureFlag } from "./FeatureFlagsContext";
 import {
   getInitialSelectedModel,
-  getStoredSelectedModel,
+  persistBotComposerModel,
+  persistSelectedModel,
+  resolveComposerModel,
 } from "./modelSelection";
 import {
   Overseer,
@@ -3299,7 +3302,7 @@ export const ChatInput = ({
   const hasUnreadyAttachment = pendingAttachments.some(
     (attachment) => attachment.uploadState !== "ready",
   );
-  const canSend = !isSending && !isAgentActive && !isBlocked &&
+  const canSend = !isSending && !isBlocked &&
     (inputValue.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
     !hasUnreadyAttachment;
   const canAttachMore = pendingAttachments.length < MAX_PENDING_ATTACHMENTS;
@@ -3472,7 +3475,7 @@ export const ChatInput = ({
                 isBlocked
                   ? blockedReason
                   : isAgentActive
-                    ? "Waiting for agent…"
+                    ? "Send to queue…"
                     : newChat
                       ? "Start a new conversation…"
                       : "Ask a follow-up…"
@@ -3552,7 +3555,7 @@ export const ChatInput = ({
                 // Enter sends message (unless Shift is held)
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (!isAgentActive && !isBlocked) submitMessage();
+                  if (!isBlocked) submitMessage();
                   return;
                 }
                 if (activeUrl) {
@@ -3717,10 +3720,9 @@ export const ChatInput = ({
                   </DropdownMenu.Item>
                 </DropdownMenu.Content>
               </DropdownMenu>
-              {isAgentActive && onStop ? (
+              {isAgentActive && onStop && (
                 <WorkshopIconButton
                   onClick={onStop}
-                  tone="primary"
                   className="!h-10 !w-10 sm:!h-8 sm:!w-8"
                   aria-label="Stop agent"
                 >
@@ -3733,28 +3735,26 @@ export const ChatInput = ({
                     <rect x="5" y="5" width="14" height="14" rx="2" />
                   </svg>
                 </WorkshopIconButton>
-              ) : (
-                <WorkshopIconButton
-                  onClick={submitMessage}
-                  disabled={!canSend}
-                  tone="primary"
-                  className="!h-10 !w-10 disabled:cursor-not-allowed disabled:opacity-30 sm:!h-8 sm:!w-8"
-                  aria-label="Send message"
-                >
-                  {/* Arrow-up icon */}
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.5"
-                  >
-                    <line x1="12" y1="19" x2="12" y2="5" />
-                    <polyline points="5 12 12 5 19 12" />
-                  </svg>
-                </WorkshopIconButton>
               )}
+              <WorkshopIconButton
+                onClick={submitMessage}
+                disabled={!canSend}
+                tone="primary"
+                className="!h-10 !w-10 disabled:cursor-not-allowed disabled:opacity-30 sm:!h-8 sm:!w-8"
+                aria-label="Send message"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                >
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </WorkshopIconButton>
           </div>
         </div>
       </div>
@@ -4439,17 +4439,6 @@ function inferSelectedModelFromMessages(messages: AiChatMessage[]): string | nul
   return null;
 }
 
-function fallbackToStoredModelSelection(
-  modelId: string | null,
-  availableModels: AiChatAuthorInfo[],
-): string | null {
-  if (modelId !== null || availableModels.length > 0) {
-    return modelId;
-  }
-
-  return getStoredSelectedModel(availableModels);
-}
-
 interface ChatInterfaceProps {
   workspaceId: string | undefined;
   overseer: RpcStub<Overseer>;
@@ -4486,6 +4475,12 @@ interface ChatInterfaceProps {
   onHasAnyCodeChange?: (hasAnyCode: boolean) => void;
   onSelectedChatHasProposedChangesChange?: (hasProposedChanges: boolean) => void;
   constrainChatWidth?: boolean;
+  threadChrome?: boolean;
+  hideComputerOverlay?: boolean;
+  onComputerAttention?: () => void;
+  onPendingComputerTakeover?: (
+    pending: (AiChatMessage & { type: "computerHumanTakeover" }) | undefined,
+  ) => void;
   onOpenGadget: (gadgetId: WorkpieceId) => void;
 
   // The output format a workpiece was built as, so a created-app card can name and draw it as the
@@ -4668,6 +4663,10 @@ function ChatInterface({
   onHasAnyCodeChange,
   onSelectedChatHasProposedChangesChange,
   constrainChatWidth,
+  threadChrome,
+  hideComputerOverlay,
+  onComputerAttention,
+  onPendingComputerTakeover,
   onOpenGadget,
   outputOfWorkpiece,
 }: ChatInterfaceProps) {
@@ -4776,6 +4775,7 @@ function ChatInterface({
     [],
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const userPickedModelRef = useRef(false);
   const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
   const [currentGroup, setCurrentGroup] = useState<Group | null>(null);
   const [groupMemberAgents, setGroupMemberAgents] = useState<AgentProfile[]>([]);
@@ -5002,17 +5002,17 @@ function ChatInterface({
     }
   }, [anyHasProposedChanges, chatListReady]);
 
-  // In sidebar mode, auto-select the most recent chat when none is selected.
+  // In sidebar/thread mode, auto-select the most recent chat when none is selected.
   useEffect(() => {
     if (
-      sidebarMode &&
+      (sidebarMode || threadChrome) &&
       selectedChatId === null &&
       chatListReady &&
       chatList.length > 0
     ) {
       onNavigateToChatRef.current(chatList[0].id, { replace: true });
     }
-  }, [sidebarMode, selectedChatId, chatListReady, chatList]);
+  }, [sidebarMode, threadChrome, selectedChatId, chatListReady, chatList]);
 
   // Get messages for selected chat (filter out any undefined slots in sparse array)
   // Memoized to prevent creating new array on every render
@@ -5047,6 +5047,22 @@ function ChatInterface({
     ),
     [currentMessages],
   );
+  const pendingComputerTakeover = useMemo(
+    () => currentMessages.find(
+      (msg) => msg.type === "computerHumanTakeover" && msg.state === "pending",
+    ) as (AiChatMessage & { type: "computerHumanTakeover" }) | undefined,
+    [currentMessages],
+  );
+
+  useEffect(() => {
+    onPendingComputerTakeover?.(pendingComputerTakeover);
+  }, [onPendingComputerTakeover, pendingComputerTakeover]);
+
+  const onComputerAttentionRef = useRef(onComputerAttention);
+  onComputerAttentionRef.current = onComputerAttention;
+  useEffect(() => {
+    if (hasPendingComputerHumanTakeover) onComputerAttentionRef.current?.();
+  }, [hasPendingComputerHumanTakeover]);
   // A pending awaitDecision action also blocks the composer: the agent turn is suspended until the
   // user approves or rejects it, so (like a connection request) further input must wait.
   const hasPendingAwaitedAction = useMemo(
@@ -5325,26 +5341,18 @@ function ChatInterface({
     }
   }, [currentChatMetadata?.title]);
 
-  // Update selected model when switching chats
   useEffect(() => {
-    if (selectedChatId === null) {
-      setSelectedModel(getInitialSelectedModel(availableModels, currentAgentProfile));
-    } else {
-      // For existing threads:
-      // 1. If an AI agent is currently active, use that agent's model
-      if (activeAgent) {
-        setSelectedModel(activeAgent.id);
-      } else {
-        // 2. Otherwise, derive the model from the most recent agent message or agent error.
-        setSelectedModel(
-          fallbackToStoredModelSelection(
-            inferSelectedModelFromMessages(currentMessages),
-            availableModels,
-          ),
-        );
-      }
-    }
-  }, [selectedChatId, availableModels, currentMessages, activeAgent, currentAgentProfile]);
+    userPickedModelRef.current = false;
+  }, [selectedChatId, currentAgentProfile?.id]);
+
+  useEffect(() => {
+    if (userPickedModelRef.current) return;
+    setSelectedModel(resolveComposerModel({
+      models: availableModels,
+      agentProfile: currentAgentProfile,
+      inferredFromMessages: inferSelectedModelFromMessages(currentMessages),
+    }));
+  }, [selectedChatId, availableModels, currentAgentProfile, currentMessages]);
 
   // Update currentAgentProfile when selected member changes in a group
   useEffect(() => {
@@ -6077,7 +6085,10 @@ function ChatInterface({
 
   // Handle model change
   const handleModelChange = (modelId: string | null) => {
+    userPickedModelRef.current = true;
     setSelectedModel(modelId);
+    if (currentAgentProfile) persistBotComposerModel(currentAgentProfile.id, modelId);
+    else persistSelectedModel(modelId);
   };
 
   // Handle stopping the agent
@@ -7482,7 +7493,13 @@ function ChatInterface({
 
       {/* ── Non-sidebar mode: show list OR chat ────────────────────────────── */}
       {!sidebarMode && selectedChatId === null ? (
-        chatListPanel
+        threadChrome ? (
+          <div className="flex flex-1 items-center justify-center">
+            <div className="w-5 h-5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : (
+          chatListPanel
+        )
       ) : selectedChatId !== null ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar — in sidebar mode, show Chat / Connections tabs */}
@@ -7523,8 +7540,8 @@ function ChatInterface({
           {/* Chat content — hidden when connections tab is active in sidebar mode */}
           {(!sidebarMode || sidebarActiveTab === "chat") && (
             <>
-              {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
-              {!sidebarMode && (
+              {/* Chat sub-header — hidden in sidebar/thread mode (list or bot header is visible) */}
+              {!sidebarMode && !threadChrome && (
                 <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
@@ -8429,6 +8446,38 @@ function ChatInterface({
               {/* ── Bottom: input, update state, and cost ──────────────── */}
               <div className={`flex-shrink-0 bg-kumo-base ${sidebarMode ? "" : "border-t border-kumo-line"}`}>
                 <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
+                  {selectedChatId !== null &&
+                    ((currentChatMetadata?.queue?.length ?? 0) > 0 || currentChatMetadata?.queuePaused) && (
+                    <ChatQueueTray
+                      items={currentChatMetadata?.queue ?? []}
+                      paused={!!currentChatMetadata?.queuePaused}
+                      onCancel={(id) => {
+                        void overseer.cancelQueuedMessage(selectedChatId, id).catch((err: unknown) => {
+                          logRpcFailure("Failed to cancel queued message:", err);
+                        });
+                      }}
+                      onSteer={(id) => {
+                        void overseer.steerQueuedMessage(selectedChatId, id).catch((err: unknown) => {
+                          logRpcFailure("Failed to steer queued message:", err);
+                        });
+                      }}
+                      onReorder={(ids) => {
+                        void overseer.reorderChatQueue(selectedChatId, ids).catch((err: unknown) => {
+                          logRpcFailure("Failed to reorder queue:", err);
+                        });
+                      }}
+                      onUpdate={(id, message) => {
+                        void overseer.updateQueuedMessage(selectedChatId, id, message).catch((err: unknown) => {
+                          logRpcFailure("Failed to update queued message:", err);
+                        });
+                      }}
+                      onSetPaused={(paused) => {
+                        void overseer.setChatQueuePaused(selectedChatId, paused).catch((err: unknown) => {
+                          logRpcFailure("Failed to pause queue:", err);
+                        });
+                      }}
+                    />
+                  )}
                   {/* Remount all transient composer state when the conversation changes. */}
                   <ChatInput
                     key={`${workspaceId}:${selectedChatId}`}
@@ -8642,7 +8691,7 @@ function ChatInterface({
         open={usageModalOpen}
         onClose={() => setUsageModalOpen(false)}
       />
-      {showComputer && (currentAgentProfile?.id || selectedMemberAgentId) && (
+      {!hideComputerOverlay && showComputer && (currentAgentProfile?.id || selectedMemberAgentId) && (
         <ComputerView
           agentId={selectedMemberAgentId || currentAgentProfile?.id || ''}
           overseer={getOverseer()}

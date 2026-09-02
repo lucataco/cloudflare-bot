@@ -10,6 +10,12 @@ vi.stubGlobal('ResizeObserver', class {
   observe() {}
   disconnect() {}
 })
+vi.stubGlobal('localStorage', {
+  getItem: () => null,
+  setItem: () => {},
+  removeItem: () => {},
+  clear: () => {},
+})
 
 vi.mock('@cloudflare/kumo', async (importOriginal) => {
   const actual = await importOriginal() as typeof import('@cloudflare/kumo')
@@ -29,9 +35,19 @@ vi.mock('@cloudflare/kumo', async (importOriginal) => {
   }
 })
 
+vi.mock('./FeatureFlagsContext', () => ({
+  useUiFeatureFlag: () => ({ enabled: false, loading: false }),
+  useUiFeatureFlags: () => ({ flags: {}, loading: false }),
+}))
+
 vi.mock('./AuthContext', () => {
   const context = {
-    authenticatedApi: { listGatekeeperVendors: async () => [] },
+    authenticatedApi: {
+      listGatekeeperVendors: async () => [],
+      getAiConfig: async () => null,
+      getAgentByWorkspaceId: async () => null,
+      getGroupByWorkspaceId: async () => null,
+    },
     currentUser: null,
   }
   return {
