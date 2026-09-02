@@ -64,7 +64,6 @@ import { ComputerView } from "./components/ComputerView";
 import ChatQueueTray from "./components/ChatQueueTray";
 import { useUiFeatureFlag } from "./FeatureFlagsContext";
 import {
-  getInitialSelectedModel,
   persistBotComposerModel,
   persistSelectedModel,
   resolveComposerModel,
@@ -5362,7 +5361,10 @@ function ChatInterface({
         if (selectedMember) {
           setCurrentAgentProfile(selectedMember);
           if (selectedChatId === null) {
-            setSelectedModel(getInitialSelectedModel(availableModels, selectedMember));
+            setSelectedModel(resolveComposerModel({
+              models: availableModels,
+              agentProfile: selectedMember,
+            }));
           }
         }
       } else {
@@ -5854,7 +5856,7 @@ function ChatInterface({
             }
           }
 
-          setSelectedModel(getInitialSelectedModel(models, agentProfile));
+          setSelectedModel(resolveComposerModel({ models, agentProfile }));
 
           forceUpdate();
         }

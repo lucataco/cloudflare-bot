@@ -36,9 +36,6 @@ HEAD `0cef8f462333f4f091364de5feddc93562f095ff`. PRs 1–19 landed on lucataco/c
 
 - **FIFO chat queue**: Send while a turn is running enqueues on the workspace DO (`chatQueue`). Drain is one prompt per subsequent turn. Cancel, edit, reorder, pause, and steer. Stop aborts only the current turn (next queued item starts unless paused). Gatekeeper HITL is unchanged.
 - **Unified inspector**: One docked right pane (Computer / Gadget / Files / Skills / Memory / Routines / Settings). Computer is embedded, not a modal. `/agent/$id/{skills,memory,routines}` redirect into the thread.
-
-### Remaining Work
-
 - **Composer model picker**: Empty bot threads use `AgentProfile.defaultModelId` (not “No agent”). Per-bot composer override in localStorage. Explicit No agent still works.
 
 ### Remaining Work
