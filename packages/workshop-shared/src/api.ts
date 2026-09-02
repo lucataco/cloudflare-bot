@@ -2112,10 +2112,47 @@ export interface Overseer extends RpcTarget {
    * `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
    * (useful when using chat to talk between humans).
    *
+   * If an agent turn is already running, the prompt is appended to this chat's FIFO queue
+   * (`AiChatMetadata.queue`) instead of starting a second turn. Queued prompts are not in the
+   * transcript until they drain, one per subsequent turn. Throws if the queue is full
+   * (`MAX_CHAT_QUEUE`). External-message submissions that carry a response target still require
+   * the chat to be idle.
    */
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                   formats?: MessageFormatRef[], agentId?: string): Promise<void>;
+
+  /**
+   * Remove a prompt from the chat's FIFO queue before it drains. No-op if the id is unknown.
+   * Does not affect a turn that is already running.
+   */
+  cancelQueuedMessage(chatId: number, id: string): Promise<void>;
+
+  /**
+   * Replace the text (and optional attachments) of a queued prompt. Throws if the id is not in
+   * this chat's queue. Capsules and model/agent targeting are unchanged.
+   */
+  updateQueuedMessage(chatId: number, id: string, message: string | SlashCommandRequest,
+                      attachments?: ChatAttachmentHandle[]): Promise<void>;
+
+  /**
+   * Set the drain order of this chat's queue. `ids` must be a permutation of the current queued
+   * ids; position 0 is the next prompt to run.
+   */
+  reorderChatQueue(chatId: number, ids: string[]): Promise<void>;
+
+  /**
+   * When paused, finishing a turn (including Stop) does not start the next queued prompt.
+   * Unpausing while idle drains the head immediately. Explicit Send while idle still starts a
+   * turn even if the queue is paused.
+   */
+  setChatQueuePaused(chatId: number, paused: boolean): Promise<void>;
+
+  /**
+   * Move a queued prompt to the head of the FIFO. If a turn is running, that turn is stopped so
+   * the steered prompt can start next (unless the queue is paused). If idle, drains immediately.
+   */
+  steerQueuedMessage(chatId: number, id: string): Promise<void>;
 
   /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to
@@ -2393,6 +2430,39 @@ export interface Overseer extends RpcTarget {
   previewRevokeShareLink(linkId: string): Promise<AffectedCollaborator[]>;
 }
 
+/**
+ * Maximum number of prompts a chat may hold in its FIFO queue waiting for the current turn to
+ * finish. Enqueue beyond this throws.
+ */
+export const MAX_CHAT_QUEUE = 20;
+
+/**
+ * A user prompt waiting to become the next agent turn. Stored on the workspace Durable Object
+ * and delivered via `AiChatMetadata.queue`; it is not a transcript message until drained.
+ */
+export type ChatQueueItem = {
+  /** Opaque id assigned at enqueue; used by cancel/update/reorder/steer. */
+  id: string;
+  /** Drain order; `0` is the next prompt to run. */
+  position: number;
+  /** Prompt text, or a slash-command request to invoke when this item drains. */
+  message: string | SlashCommandRequest;
+  /**
+   * Model id from `listModels()`, or null for a human-only message (no agent turn when drained).
+   */
+  modelId: string | null;
+  /** Capsule insertions for the prompt, if any. */
+  capsules?: CapsuleSpecifier[];
+  /** Attachment handles already uploaded via `uploadChatAttachment`. */
+  attachments?: ChatAttachmentHandle[];
+  /** Display-only format chips that ride along with the prompt. */
+  formats?: MessageFormatRef[];
+  /** Agent profile to run as when this item drains, for group threads. */
+  agentId?: string;
+  /** When this prompt was enqueued. */
+  created: Date;
+};
+
 export type AiChatMetadata = {
   id: number,
   title: string,
@@ -2404,6 +2474,18 @@ export type AiChatMetadata = {
    * chat.
    */
   activeAgent?: AiChatAuthorInfo,
+
+  /**
+   * Prompts waiting to run after the current turn, in drain order. Absent or empty means nothing
+   * is queued. Not part of the transcript until an item drains into a turn.
+   */
+  queue?: ChatQueueItem[];
+
+  /**
+   * When true, finishing a turn does not start the next queued prompt. Explicit Send while idle
+   * still starts a turn.
+   */
+  queuePaused?: boolean,
 
   /**
    * If true, this chat thread has proposed changes which have not been accepted yet,
