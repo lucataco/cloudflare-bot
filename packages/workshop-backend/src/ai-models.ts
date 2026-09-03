@@ -497,6 +497,9 @@ function makeHandle(args: HandleArgs): ModelHandle {
           return finalPayload;
         },
       };
+      if (args.model.provider === "cloudflare-workers-ai") {
+        merged.fetch = wrapCloudflareAiFetch(merged.fetch ?? fetch);
+      }
       return streamFn(model, context, merged);
     },
   };
@@ -593,6 +596,45 @@ function bindingFetch(binding: Ai): FetchFunction {
   return (input, init) => (binding as unknown as AiFetchBinding).fetch(input, init);
 }
 
+// Workers AI 403s with `{errors:[{message}]}`. The OpenAI SDK only reads `{error:{message}}`,
+// so pi otherwise reports "403 status code (no body)".
+function cloudflareAiErrorMessage(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as {
+      errors?: Array<{ message?: unknown }>;
+      error?: { message?: unknown } | string;
+    };
+    const cf = parsed.errors?.[0]?.message;
+    if (typeof cf === "string" && cf.trim()) return cf.trim();
+    const openai = parsed.error;
+    if (typeof openai === "string" && openai.trim()) return openai.trim();
+    if (openai && typeof openai === "object" && typeof openai.message === "string" &&
+        openai.message.trim()) {
+      return openai.message.trim();
+    }
+  } catch { /* not JSON */ }
+  const trimmed = body.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function wrapCloudflareAiFetch(inner: FetchFunction): FetchFunction {
+  return async (input, init) => {
+    const response = await inner(input, init);
+    if (response.ok) return response;
+    const body = await response.text();
+    const message = cloudflareAiErrorMessage(body) ??
+        `${response.status} status code (no body)`;
+    const headers = new Headers(response.headers);
+    headers.set("content-type", "application/json");
+    headers.delete("content-length");
+    return new Response(JSON.stringify({ error: { message } }), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+}
+
 // Platform free-tier path: route through the deployment's configured AI Gateway (platform-funded).
 // Used only for requests that are NOT billed to a connected user's account.
 function getModelViaGateway(
@@ -685,6 +727,27 @@ function getModelDirect(config: AiModelConfig, env: Cloudflare.Env, sessionAffin
         sessionAffinity,
       });
     case "cloudflare": {
+      // Prefer the config's own REST credentials. The WORKERS_AI binding is only a fallback for
+      // configs that have none — binding-first ignored Add Model tokens and 403'd when wrangler's
+      // remote AI proxy was unavailable.
+      if (config.accountId && config.apiToken) {
+        return makeHandle({
+          model: {
+            id: config.model,
+            name: catalog?.name ?? config.model,
+            api: "openai-completions",
+            provider: "cloudflare-workers-ai",
+            baseUrl: `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/ai/v1`,
+            reasoning: catalog?.reasoning ?? false,
+            input: catalog?.input ?? ["text"],
+            cost: catalog?.cost ?? ZERO_COST,
+            ...window,
+            compat: workersAiCompat(catalog),
+          },
+          apiKey: config.apiToken,
+          sessionAffinity,
+        });
+      }
       const binding = (env as { WORKERS_AI?: Ai }).WORKERS_AI;
       if (binding) {
         return makeHandle({
@@ -709,27 +772,9 @@ function getModelDirect(config: AiModelConfig, env: Cloudflare.Env, sessionAffin
           sessionAffinity,
         });
       }
-      if (!config.accountId || !config.apiToken) {
-        throw new Error(
-            "This Workers AI model has no Cloudflare credentials. Re-add it with your " +
-            "Cloudflare account ID and an API token that permits Workers AI.");
-      }
-      return makeHandle({
-        model: {
-          id: config.model,
-          name: catalog?.name ?? config.model,
-          api: "openai-completions",
-          provider: "cloudflare-workers-ai",
-          baseUrl: `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/ai/v1`,
-          reasoning: catalog?.reasoning ?? false,
-          input: catalog?.input ?? ["text"],
-          cost: catalog?.cost ?? ZERO_COST,
-          ...window,
-          compat: workersAiCompat(catalog),
-        },
-        apiKey: config.apiToken,
-        sessionAffinity,
-      });
+      throw new Error(
+          "This Workers AI model has no Cloudflare credentials. Re-add it with your " +
+          "Cloudflare account ID and an API token that permits Workers AI.");
     }
     case "google":
       return makeHandle({

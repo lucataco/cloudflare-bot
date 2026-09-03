@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { classifyRpcError } from './rpcErrors'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
@@ -51,7 +52,10 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     authenticatedApi.whoami().then((info) => {
       // Only a real user account names a person: for a gadget author `id` is its owner's id.
       if (!cancelled && info.type === 'user') setReportedUserId(info.id)
-    }).catch(() => {})
+    }).catch((err: unknown) => {
+      if (cancelled) return
+      if (classifyRpcError(err) === 'auth') logout()
+    })
     return () => { cancelled = true }
   }, [authState.authenticatedApi])
 

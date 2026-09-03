@@ -3291,9 +3291,11 @@ export const ChatInput = ({
     : consoleLogSeverity === "warn"
       ? "warning"
       : "log";
-  const selectedModelLabel = selectedModel == null
-    ? "No agent"
-    : models.find((model) => model.id === selectedModel)?.name ?? selectedModel;
+  const selectedModelLabel = models.length === 0
+    ? "Add a model"
+    : selectedModel == null
+      ? "No agent"
+      : models.find((model) => model.id === selectedModel)?.name ?? selectedModel;
 
   const hasReadyAttachment = pendingAttachments.some(
     (attachment) => attachment.uploadState === "ready" && attachment.ref,
@@ -3685,6 +3687,14 @@ export const ChatInput = ({
                   }
                 />
                 <DropdownMenu.Content className="themed-floating-shadow-lg !z-[1100] !min-w-[190px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1">
+                  {models.length === 0 && (
+                    <DropdownMenu.Item
+                      onClick={() => setAddModelModalOpen(true)}
+                      className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                    >
+                      <span className="min-w-0 flex-1 truncate">Add a model</span>
+                    </DropdownMenu.Item>
+                  )}
                   {models.map((model) => {
                     const active = selectedModel === model.id;
                     return (
@@ -3700,16 +3710,20 @@ export const ChatInput = ({
                       </DropdownMenu.Item>
                     );
                   })}
-                  <div className="my-1 border-t border-kumo-line/70" />
-                  <DropdownMenu.Item
-                    onClick={() => onModelChange(null)}
-                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
-                  >
-                    <span className="min-w-0 flex-1 truncate">No agent</span>
-                    {selectedModel == null && (
-                      <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
-                    )}
-                  </DropdownMenu.Item>
+                  {models.length > 0 && (
+                    <>
+                      <div className="my-1 border-t border-kumo-line/70" />
+                      <DropdownMenu.Item
+                        onClick={() => onModelChange(null)}
+                        className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                      >
+                        <span className="min-w-0 flex-1 truncate">No agent</span>
+                        {selectedModel == null && (
+                          <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
+                        )}
+                      </DropdownMenu.Item>
+                    </>
+                  )}
                   <div className="my-1 border-t border-kumo-line/70" />
                   <DropdownMenu.Item
                     onClick={() => setAddModelModalOpen(true)}
@@ -5865,6 +5879,8 @@ function ChatInterface({
           reportIssue('chat.subscription-load', err)
           toasts.add({ title: "Unable to load conversations", variant: "error" });
         }
+      } finally {
+        if (isMounted) setChatListReady(true);
       }
     };
 
@@ -7496,9 +7512,44 @@ function ChatInterface({
       {/* ── Non-sidebar mode: show list OR chat ────────────────────────────── */}
       {!sidebarMode && selectedChatId === null ? (
         threadChrome ? (
-          <div className="flex flex-1 items-center justify-center">
-            <div className="w-5 h-5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-          </div>
+          !chatListReady ? (
+            <div className="flex flex-1 items-center justify-center">
+              <div className="w-5 h-5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6">
+                <p className="text-center text-[22px] font-semibold tracking-[-0.4px] text-kumo-default">
+                  What can I help you with?
+                </p>
+              </div>
+              <div className="flex-shrink-0">
+                <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
+                  <ChatInput
+                    key={workspaceId}
+                    createCapsuleGatekeeper={(accountId, url) =>
+                      overseer.newGatekeeper(accountId, url, selectedMemberAgentId || undefined)
+                    }
+                    getOverseer={getOverseer}
+                    onSend={handleSend}
+                    isAgentActive={false}
+                    models={availableModels}
+                    selectedModel={selectedModel}
+                    onModelChange={handleModelChange}
+                    showThinkingTraces={showThinkingTraces}
+                    onToggleThinkingTraces={toggleShowThinkingTraces}
+                    minRows={2}
+                    newChat
+                    draftStorageKey={currentUser && workspaceId
+                      ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
+                      : undefined}
+                    workspaceId={workspaceId}
+                    agentId={selectedMemberAgentId || undefined}
+                  />
+                </div>
+              </div>
+            </div>
+          )
         ) : (
           chatListPanel
         )

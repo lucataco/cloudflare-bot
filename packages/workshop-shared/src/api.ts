@@ -1255,12 +1255,12 @@ export const SUGGESTED_MODELS: Record<
   Record<string, {name: string, contextWindow: number, outputLimit?: number}>
 > = {
   "cloudflare": {
-    "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {
-      name: "Llama 3.3 70B Instruct (Workers AI)", contextWindow: 24000,
+    "@cf/zai-org/glm-4.7-flash": {
+      name: "GLM 4.7 Flash (Workers AI)", contextWindow: 131072,
       outputLimit: WORKERS_AI_OUTPUT_LIMIT,
     },
-    "@cf/moonshotai/kimi-k2.7-code": {
-      name: "Kimi K2.7 Code (Workers AI)", contextWindow: 262144,
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {
+      name: "Llama 3.3 70B Instruct (Workers AI)", contextWindow: 24000,
       outputLimit: WORKERS_AI_OUTPUT_LIMIT,
     },
     "@cf/zai-org/glm-5.2": {

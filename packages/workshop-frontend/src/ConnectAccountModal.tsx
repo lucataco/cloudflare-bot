@@ -4,6 +4,7 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api'
 import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import VendorCard from './VendorCard'
+import { openOAuthPopup } from './openOAuthPopup'
 
 interface ConnectAccountModalProps {
   visible: boolean
@@ -65,7 +66,7 @@ export default function ConnectAccountModal({
     setConnecting(vendorId)
     try {
       const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      openOAuthPopup(result.url)
       onInitiated()
     } catch (error) {
       console.error('Failed to initiate connection:', error)

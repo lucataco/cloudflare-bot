@@ -832,10 +832,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
+    let threadWorkspaces = new Set<string>();
+    for (let agent of this.storage.agents.list()) threadWorkspaces.add(agent.workspaceId);
+    for (let group of this.storage.groups.list()) threadWorkspaces.add(group.workspaceId);
+
     let result: GadgetMetadataWithTimestamps[] = [];
     for (let gadget of this.storage.gadgets.list()) {
       if (isFullyCreated(gadget)) {
         result.push(gadget);
+      } else if (gadget.created && threadWorkspaces.has(gadget.id)) {
+        result.push({ ...gadget, lastActive: gadget.created });
       }
     }
     return result;

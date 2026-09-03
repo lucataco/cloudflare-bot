@@ -70,6 +70,13 @@ export type VendorDescription = {
   providesAuth?: boolean;
 
   /**
+   * False when this vendor cannot start a connect flow (typically missing OAuth client
+   * credentials). The Workshop hides Connect rather than opening a dead popup. Omit or true
+   * when connect works.
+   */
+  configured?: boolean;
+
+  /**
    * If set, this vendor can mint a connected account with no OAuth flow (see
    * GatekeeperVendor.createAccount) and recommends the Workshop auto-provision one account per user.
    * The account — not the vendor — declares whether it provides an agent singleton and/or a

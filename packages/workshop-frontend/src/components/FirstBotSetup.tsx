@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { Link } from '@tanstack/react-router'
 import { Button, Input, Textarea, Select, useKumoToastManager } from '@cloudflare/kumo'
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
+import { notifyAgentsChanged } from '../agentsChanged'
 import { persistLastThread } from '../lastThread'
 import { logRpcFailure } from '../rpcErrors'
 
@@ -81,6 +83,7 @@ export default function FirstBotSetup({
         defaultModelId || null,
       )
       persistLastThread({ kind: 'agent', id: agent.id })
+      notifyAgentsChanged()
       onCreated(agent.id)
     } catch (err) {
       logRpcFailure('Failed to create agent:', err)
@@ -142,39 +145,56 @@ export default function FirstBotSetup({
         </button>
 
         <div className="mt-6 flex flex-col gap-3">
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[12px] font-medium text-kumo-default">Name</span>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Alex" />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[12px] font-medium text-kumo-default">Title</span>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Builder" />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[12px] font-medium text-kumo-default">Description</span>
-            <Textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-              placeholder="What this bot is for"
-            />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[12px] font-medium text-kumo-default">Default model</span>
-            <Select
-              className="w-full text-sm"
-              placeholder="Select a model"
-              value={defaultModelId}
-              onValueChange={(value) => setDefaultModelId(value ?? '')}
-              renderValue={(id) => modelOptions.find((opt) => opt.value === id)?.label || 'Select a model'}
-            >
-              {modelOptions.map((option) => (
-                <Select.Option key={option.value || 'human'} value={option.value}>
-                  {option.label}
-                </Select.Option>
-              ))}
-            </Select>
-          </label>
+          <Input
+            label="Name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Alex"
+          />
+          <Input
+            label="Title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Builder"
+          />
+          <Textarea
+            aria-label="Description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            placeholder="What this bot is for"
+          />
+          {models.length === 0 ? (
+            <div className="flex flex-col gap-2 rounded-xl border border-dashed border-kumo-line px-3 py-3">
+              <p className="text-[12px] font-medium text-kumo-default">Default model</p>
+              <p className="text-[12px] text-kumo-subtle">
+                No models yet. You can create this bot without AI, then add a model later.
+              </p>
+              <Link
+                to="/providers"
+                className="text-[12px] font-medium text-kumo-brand hover:underline"
+              >
+                Add a model
+              </Link>
+            </div>
+          ) : (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[12px] font-medium text-kumo-default">Default model</span>
+              <Select
+                className="w-full text-sm"
+                placeholder="Select a model"
+                value={defaultModelId}
+                onValueChange={(value) => setDefaultModelId(value ?? '')}
+                renderValue={(id) => modelOptions.find((opt) => opt.value === id)?.label || 'Select a model'}
+              >
+                {modelOptions.map((option) => (
+                  <Select.Option key={option.value || 'human'} value={option.value}>
+                    {option.label}
+                  </Select.Option>
+                ))}
+              </Select>
+            </label>
+          )}
         </div>
 
         <Button
@@ -182,7 +202,7 @@ export default function FirstBotSetup({
           disabled={submitting || !name.trim() || !title.trim()}
           onClick={() => { void handleCreate() }}
         >
-          {submitting ? 'Creating…' : 'Create bot'}
+          {submitting ? 'Creating…' : models.length === 0 ? 'Create bot without AI' : 'Create bot'}
         </Button>
       </div>
     </div>

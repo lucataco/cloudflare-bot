@@ -11,6 +11,7 @@ import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { openOAuthPopup } from './openOAuthPopup'
 
 export interface VendorOption {
   id: string
@@ -408,7 +409,7 @@ export default function ResourcePicker({
     setConnectingVendor(vendorId)
     try {
       const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      openOAuthPopup(result.url)
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
@@ -425,7 +426,7 @@ export default function ResourcePicker({
     try {
       const result = await authenticatedApi.ensureAccountResources(accountId, resourceUrlPatterns)
       if (result.url) {
-        window.open(result.url, '_blank', 'noopener,noreferrer')
+        openOAuthPopup(result.url)
         toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
       }
     } catch (error) {
@@ -442,7 +443,7 @@ export default function ResourcePicker({
     setReconnectingAccount(accountId)
     try {
       const result = await authenticatedApi.reconnectAccount(accountId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      openOAuthPopup(result.url)
       // The subscription will fire add() with credentialsValid: true when reconnect completes.
       // The reconnectingAccount state is cleared at that point.
     } catch (error) {

@@ -695,6 +695,56 @@ describe("getModel direct Workers AI binding (no gateway)", () => {
         "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1/chat/completions");
     expect(request.headers.get("authorization")).toBe("Bearer user-token");
   }, 15000);
+
+  it("surfaces Cloudflare Workers AI plan errors instead of empty 403", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      ...WORKERS_AI_CONFIG,
+      accountId: "user-account-id",
+      apiToken: "user-token",
+    }, INITIATOR);
+
+    const cfFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init);
+      capturedRequests.push({
+        url: request.url, headers: request.headers, body: await request.text(),
+      });
+      return new Response(JSON.stringify({
+        errors: [{
+          message: "Model @cf/moonshotai/kimi-k2.7-code is not available on the Workers Free plan",
+          code: 5035,
+        }],
+        success: false,
+        result: {},
+        messages: [],
+      }), { status: 403, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    const stream = await handle.stream(handle.model, {
+      messages: [{ role: "user", content: "hello", timestamp: 0 }],
+    }, { fetch: cfFetch, maxRetries: 0, maxTokens: 16 });
+    const message = await stream.result();
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toMatch(/Workers Free plan/);
+  }, 15000);
+
+  it("uses REST credentials even when the Workers AI binding is present", async () => {
+    const handle = getModel(
+        env({ CF_AI_GATEWAY: undefined, WORKERS_AI: fakeBinding }),
+        {
+          ...WORKERS_AI_CONFIG,
+          accountId: "user-account-id",
+          apiToken: "user-token",
+        }, INITIATOR);
+
+    expect(handle.model.baseUrl).toBe(
+        "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1");
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe(
+        "https://api.cloudflare.com/client/v4/accounts/user-account-id/ai/v1/chat/completions");
+    expect(request.headers.get("authorization")).toBe("Bearer user-token");
+    expect(capturedRequests.length).toBe(1);
+  }, 15000);
 });
 
 describe("lastRequest diagnostics", () => {

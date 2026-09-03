@@ -1,4 +1,3 @@
-import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
@@ -7,53 +6,21 @@ import {
   AiGatewayInfo,
 } from '@gadgets/workshop-shared/api'
 import {
-  VendorDescription,
-} from '@gadgets/workshop-shared/gatekeeper'
-import {
   Camera,
   ArrowRight,
   Check,
   Plus,
-  PlugsConnected,
-  Sparkle,
-  UsersThree,
-  Key,
-  Plugs,
   Hexagon,
 } from '@phosphor-icons/react'
 import AddModelModal from './AddModelModal'
 import { persistSelectedModel } from './modelSelection'
-import { logoComponents } from './components/ConnectionLogos'
-import { getVendorIconBackground } from './components/vendorColors'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import { invalidateAvatarCache } from './useAvatar'
-import { useTheme } from './ThemeContext'
 import { useSiteName } from './ServerConfigContext'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
-import { AccountsSubscriberAdapter } from './accountsSubscriber'
 
-// ─── constants ──────────────────────────────────────────────────────────────────
-
-const TOTAL_STEPS_WITH_CONNECTIONS = 4
-
-// Maps RPC vendor IDs to logo keys in our logoComponents map
-const VENDOR_LOGO_MAP: Record<string, string> = {
-  slack: 'slack',
-  discord: 'discord',
-  jira: 'jira',
-  google: 'google',
-  github: 'github',
-  notion: 'notion',
-  linear: 'linear',
-  figma: 'figma',
-}
-
-interface VendorEntry {
-  id: string
-  description: VendorDescription
-  logoKey: string
-}
+const TOTAL_STEPS = 2
 
 // ─── component ──────────────────────────────────────────────────────────────────
 
@@ -63,13 +30,12 @@ export default function OnboardingWizard({
   onComplete: () => void
 }) {
   const { authenticatedApi, currentUser } = useAuthenticatedApi()
-  const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
   const siteName = useSiteName()
   useDocumentTitle('Setup')
 
   // Wizard state
-  const [step, setStep] = useState(0) // 0 = avatar, 1 = model, 2 = connections
+  const [step, setStep] = useState(0)
   const [mounted, setMounted] = useState(false)
   const [finishing, setFinishing] = useState(false)
 
@@ -87,12 +53,6 @@ export default function OnboardingWizard({
   const [aiConfig, setAiConfig] = useState<AiGatewayInfo | null>(null)
   const [addModelOpen, setAddModelOpen] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(true)
-
-  // Connections state
-  const [vendors, setVendors] = useState<VendorEntry[]>([])
-  const [connectedVendorIds, setConnectedVendorIds] = useState<Set<string>>(new Set())
-  const [vendorsLoading, setVendorsLoading] = useState(true)
-  const [connectingVendorId, setConnectingVendorId] = useState<string | null>(null)
 
   // Entrance animation
   useEffect(() => {
@@ -138,87 +98,6 @@ export default function OnboardingWizard({
     fetchModels()
   }, [fetchModels])
 
-  // Load vendors and subscribe to connected accounts.
-  // We use a url→vendorId lookup map (built from listGatekeeperVendors) so the
-  // subscriber can resolve vendor IDs reliably instead of guessing from display names.
-  useEffect(() => {
-    let cancelled = false
-    const connectedUrls = new Set<string>()
-    const accountIdToUrl = new Map<number, string>()
-
-    // Lookup populated by listGatekeeperVendors, used by the subscriber.
-    const urlToVendorId = new Map<string, string>()
-    // Pending accounts that arrived before the vendor list loaded.
-    const pendingUrls: string[] = []
-
-    const refreshConnectedIds = () => {
-      const ids = new Set<string>()
-      for (const url of connectedUrls) {
-        const vid = urlToVendorId.get(url)
-        if (vid) ids.add(vid)
-      }
-      if (!cancelled) setConnectedVendorIds(ids)
-    }
-
-    authenticatedApi
-      .listGatekeeperVendors()
-      .then((vendorList) => {
-        if (cancelled) return
-        for (const v of vendorList) {
-          urlToVendorId.set(v.description.url, v.id)
-        }
-        setVendors(
-          vendorList.map((v) => ({
-            id: v.id,
-            description: v.description,
-            logoKey: VENDOR_LOGO_MAP[v.id] ?? v.id.toLowerCase(),
-          })),
-        )
-        // Resolve any accounts that arrived before the vendor list.
-        if (pendingUrls.length > 0) refreshConnectedIds()
-      })
-      .catch((err) => {
-        console.error('Failed to load vendors:', err)
-      })
-      .finally(() => {
-        if (!cancelled) setVendorsLoading(false)
-      })
-
-    const subscriber = new AccountsSubscriberAdapter({
-      add({ id, vendor }) {
-        if (cancelled) return
-        const url = vendor.url
-        accountIdToUrl.set(id, url)
-        connectedUrls.add(url)
-        if (urlToVendorId.size > 0) {
-          refreshConnectedIds()
-        } else {
-          pendingUrls.push(url)
-        }
-      },
-      remove(id) {
-        const url = accountIdToUrl.get(id)
-        if (url) {
-          accountIdToUrl.delete(id)
-          const stillHas = Array.from(accountIdToUrl.values()).includes(url)
-          if (!stillHas) connectedUrls.delete(url)
-          refreshConnectedIds()
-        }
-      },
-    })
-
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
-    subscription.catch((err) => {
-      if (cancelled) return
-      logRpcFailure('Failed to subscribe to connected accounts:', err)
-    })
-
-    return () => {
-      cancelled = true
-      subscription[Symbol.dispose]()
-    }
-  }, [authenticatedApi])
-
   // ── avatar handlers ───────────────────────────────────────────────────────────
 
   const handleFileSelect = async (file: File) => {
@@ -246,35 +125,7 @@ export default function OnboardingWizard({
     if (file) handleFileSelect(file)
   }
 
-  // ── connection handlers ───────────────────────────────────────────────────────
-
-  const handleConnect = async (vendorId: string) => {
-    setConnectingVendorId(vendorId)
-    try {
-      const { url } = await authenticatedApi.connectAccount(vendorId)
-      window.open(url, '_blank', 'noopener,noreferrer')
-    } catch (err) {
-      console.error('Failed to start connection:', err)
-      toasts.add({ title: 'Failed to start connection', variant: 'error' })
-    } finally {
-      // Reset after a short delay — the subscription will update the UI when the connection completes
-      setTimeout(() => setConnectingVendorId(null), 2000)
-    }
-  }
-
-  // ── navigation ────────────────────────────────────────────────────────────────
-
-  const showConnectionsStep = vendorsLoading || vendors.length > 0
-  const totalSteps = showConnectionsStep
-    ? TOTAL_STEPS_WITH_CONNECTIONS
-    : TOTAL_STEPS_WITH_CONNECTIONS - 1
-  const showcaseStep = totalSteps - 1
-
-  useEffect(() => {
-    setStep((currentStep) => Math.min(currentStep, showcaseStep))
-  }, [showcaseStep])
-
-  const goNext = () => setStep((s) => Math.min(s + 1, totalSteps - 1))
+  const goNext = () => setStep((s) => Math.min(s + 1, TOTAL_STEPS - 1))
   const goBack = () => setStep((s) => Math.max(s - 1, 0))
 
   const handleFinish = async () => {
@@ -300,16 +151,6 @@ export default function OnboardingWizard({
       setFinishing(false)
     }
   }
-
-  // ── derived ───────────────────────────────────────────────────────────────────
-
-  const sortedVendors = [...vendors].toSorted((a, b) => {
-    // Connected ones first
-    const aConnected = connectedVendorIds.has(a.id)
-    const bConnected = connectedVendorIds.has(b.id)
-    if (aConnected !== bConnected) return aConnected ? -1 : 1
-    return a.description.displayName.localeCompare(b.description.displayName)
-  })
 
   // ── render ────────────────────────────────────────────────────────────────────
 
@@ -365,7 +206,7 @@ export default function OnboardingWizard({
 
         {/* Step indicator */}
         <div className="mb-6 flex items-center justify-center gap-2 sm:mb-8">
-          {Array.from({ length: totalSteps }).map((_, i) => (
+          {Array.from({ length: TOTAL_STEPS }).map((_, i) => (
             <div
               key={i}
               className={`h-1.5 rounded-full transition-all duration-400 ${
@@ -536,10 +377,10 @@ export default function OnboardingWizard({
                       {models.length === 0 && (
                         <div className="text-center py-8">
                           <p className="text-sm text-kumo-subtle mb-1">
-                            No models configured yet
+                            No models yet — you can skip this
                           </p>
                           <p className="text-xs text-kumo-inactive">
-                            Add a model to get started
+                            Add a model later from Providers, or continue without AI.
                           </p>
                         </div>
                       )}
@@ -556,100 +397,10 @@ export default function OnboardingWizard({
                 )}
               </div>
             </div>
-
-            {/* ── Step 2: Connections ───────────────────────────────────────── */}
-            <div className={`min-h-[320px] w-full flex-shrink-0 p-5 sm:min-h-[420px] sm:p-8 ${showConnectionsStep ? '' : 'hidden'}`}>
-              <div>
-                <h2 className="text-lg font-medium text-kumo-default mb-1">
-                  Connect your services
-                </h2>
-                <p className="text-sm text-kumo-subtle mb-6">
-                  Link your accounts so your gadgets can access them. You can always add more later.
-                </p>
-
-                {vendorsLoading ? (
-                  <div className="flex items-center justify-center py-12">
-                    <div className="w-6 h-6 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-                  </div>
-                ) : vendors.length === 0 ? (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-kumo-subtle">
-                      No services available
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid max-h-64 grid-cols-1 gap-2 overflow-y-auto pr-1 min-[360px]:grid-cols-2">
-                    {sortedVendors.map((vendor) => {
-                      const Logo = logoComponents[vendor.logoKey]
-                      const isConnected = connectedVendorIds.has(vendor.id)
-                      const isConnecting = connectingVendorId === vendor.id
-                      return (
-                        <button
-                          key={vendor.id}
-                          onClick={() => !isConnected && !isConnecting && handleConnect(vendor.id)}
-                          disabled={isConnected || isConnecting}
-                          className={`
-                            flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left
-                            transition-all duration-150
-                            ${isConnected
-                              ? 'border-kumo-brand/40 bg-kumo-brand/5 cursor-default'
-                              : isConnecting
-                                ? 'border-kumo-line bg-kumo-tint cursor-wait'
-                                : 'border-kumo-line hover:border-kumo-fill hover:bg-kumo-tint cursor-pointer'
-                            }
-                          `}
-                        >
-                          <div
-                            className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: getVendorIconBackground(vendor.id, resolvedThemeMode) }}
-                          >
-                            {Logo ? (
-                              <Logo size={16} />
-                            ) : (
-                              <span className="text-xs font-bold text-kumo-strong">
-                                {vendor.description.displayName[0]}
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-kumo-default truncate">
-                              {vendor.description.displayName}
-                            </p>
-                            <p className="text-xs text-kumo-subtle truncate">
-                              {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Not connected'}
-                            </p>
-                          </div>
-                          {isConnected && (
-                            <PlugsConnected
-                              size={14}
-                              className="text-kumo-brand flex-shrink-0"
-                              weight="bold"
-                            />
-                          )}
-                          {isConnecting && (
-                            <div className="w-3.5 h-3.5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-
-                <p className="text-xs text-kumo-inactive mt-4 text-center">
-                  Optional &middot; you can manage connections any time
-                </p>
-              </div>
-            </div>
-
-            {/* ── Final step: What you can do ────────────────────────────────── */}
-            <div className="min-h-[320px] w-full flex-shrink-0 p-5 sm:min-h-[420px] sm:p-8">
-              <ShowcaseStep active={step === showcaseStep} siteName={siteName} />
-            </div>
           </div>
 
           {/* Fixed footer — stays put across all steps */}
           <div className="flex items-center justify-between gap-3 border-t border-kumo-line bg-kumo-elevated px-5 py-4 sm:px-8 sm:py-5">
-            {/* Back button (hidden on first step) */}
             {step > 0 ? (
               <button
                 onClick={goBack}
@@ -658,12 +409,18 @@ export default function OnboardingWizard({
                 Back
               </button>
             ) : (
-              <span />
+              <button
+                onClick={() => { void handleFinish() }}
+                disabled={finishing}
+                className="text-sm text-kumo-subtle hover:text-kumo-default transition-colors disabled:opacity-50"
+              >
+                Skip
+              </button>
             )}
 
             <div className="flex items-center gap-3">
               {/* Primary action */}
-              {step < totalSteps - 1 ? (
+              {step < TOTAL_STEPS - 1 ? (
                 <button
                   onClick={goNext}
                   className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-150 text-kumo-inverse bg-kumo-brand hover:bg-kumo-brand-hover"
@@ -717,113 +474,5 @@ export default function OnboardingWizard({
       aiConfig={aiConfig}
     />
     </>
-  )
-}
-
-// ─── showcase step ──────────────────────────────────────────────────────────────
-
-interface ShowcaseFeature {
-  icon: typeof Sparkle
-  iconColor: string
-  iconBg: string
-  title: string
-  description: string
-}
-
-const SHOWCASE_FEATURES: ShowcaseFeature[] = [
-  {
-    icon: Sparkle,
-    iconColor: 'text-media-100',
-    iconBg: 'bg-media-200',
-    title: 'Build gadgets or just chat',
-    description:
-      'Create full web apps, or keep it simple with agent-only conversations. Your call.',
-  },
-  {
-    icon: UsersThree,
-    iconColor: 'text-compute-100',
-    iconBg: 'bg-compute-200',
-    title: 'Collaborate in real time',
-    description:
-      'Share a workspace with teammates and work on it together, live.',
-  },
-  {
-    icon: Key,
-    iconColor: 'text-kumo-warning',
-    iconBg: 'bg-kumo-warning-tint',
-    title: 'Bring your own models',
-    description:
-      'Plug in personal API tokens from any provider to use the models you love.',
-  },
-  {
-    icon: Plugs,
-    iconColor: 'text-storage-100',
-    iconBg: 'bg-storage-200',
-    title: 'AI meets your tools',
-    description:
-      'Have AI review a Google Doc, summarize Slack threads, triage Jira tickets, and more.',
-  },
-]
-
-function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string }) {
-  // Mount-trigger for staggered fade-in when the step becomes visible
-  const [revealed, setRevealed] = useState(false)
-
-  useEffect(() => {
-    if (active) {
-      // Small delay so the slide transition starts before the stagger
-      const t = setTimeout(() => setRevealed(true), 150)
-      return () => clearTimeout(t)
-    }
-  }, [active])
-
-  return (
-    <div>
-      <div className="text-center mb-6">
-        <h2 className="text-lg font-medium text-kumo-default mb-1">
-          You&apos;re all set
-        </h2>
-        <p className="text-sm text-kumo-subtle">
-          Here&apos;s a taste of what you can do with {siteName}
-        </p>
-      </div>
-
-      <div className="space-y-2.5">
-        {SHOWCASE_FEATURES.map((feature, i) => {
-          const Icon = feature.icon
-          return (
-            <div
-              key={feature.title}
-              className={`
-                flex items-start gap-3 p-3.5 rounded-xl border border-kumo-line bg-kumo-base
-                transition-all ease-out
-                ${revealed
-                  ? 'opacity-100 translate-x-0'
-                  : 'opacity-0 -translate-x-3'
-                }
-              `}
-              style={{
-                transitionDuration: '500ms',
-                transitionDelay: revealed ? `${i * 90}ms` : '0ms',
-              }}
-            >
-              <div
-                className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${feature.iconBg}`}
-              >
-                <Icon size={18} className={feature.iconColor} weight="fill" />
-              </div>
-              <div className="flex-1 min-w-0 pt-0.5">
-                <p className="text-sm font-medium text-kumo-default">
-                  {feature.title}
-                </p>
-                <p className="text-xs text-kumo-subtle mt-0.5 leading-relaxed">
-                  {feature.description}
-                </p>
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
   )
 }

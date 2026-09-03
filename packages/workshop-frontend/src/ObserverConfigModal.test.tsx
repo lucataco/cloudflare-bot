@@ -203,7 +203,7 @@ describe('ObserverConfigModal account selection', () => {
 
     expect(connectAccount).toHaveBeenCalledWith('google', [DOC_RESOURCE.urlPattern])
     expect(window.open).toHaveBeenCalledWith(
-      'https://accounts.google.test/oauth', '_blank', 'noopener,noreferrer',
+      'https://accounts.google.test/oauth', 'gatekeeper-oauth', 'popup,width=520,height=680',
     )
   })
 
@@ -230,7 +230,7 @@ describe('ObserverConfigModal account selection', () => {
 
     expect(ensureAccountResources).toHaveBeenCalledWith(1, [DOC_RESOURCE.urlPattern])
     expect(window.open).toHaveBeenCalledWith(
-      'https://accounts.google.test/oauth', '_blank', 'noopener,noreferrer',
+      'https://accounts.google.test/oauth', 'gatekeeper-oauth', 'popup,width=520,height=680',
     )
     expect(rendered.textContent).not.toContain('Ready')
     expect(verify?.disabled).toBe(true)
@@ -257,7 +257,7 @@ describe('ObserverConfigModal account selection', () => {
 
     expect(ensureAccountResources).toHaveBeenCalledWith(1, [DOC_RESOURCE.urlPattern])
     expect(window.open).toHaveBeenCalledWith(
-      'https://accounts.google.test/oauth', '_blank', 'noopener,noreferrer',
+      'https://accounts.google.test/oauth', 'gatekeeper-oauth', 'popup,width=520,height=680',
     )
   })
 

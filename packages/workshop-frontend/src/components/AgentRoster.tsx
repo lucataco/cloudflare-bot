@@ -8,6 +8,7 @@ import EditAgentModal from './EditAgentModal'
 import CreateGroupModal from './CreateGroupModal'
 import EditGroupModal from './EditGroupModal'
 import { persistLastThread } from '../lastThread'
+import { AGENTS_CHANGED_EVENT } from '../agentsChanged'
 
 export default function AgentRoster({
   onAgentCreated,
@@ -75,6 +76,13 @@ export default function AgentRoster({
       .catch((err: unknown) => {
         console.error('Failed to load models:', err)
       })
+
+    const onAgentsChanged = () => {
+      loadAgents()
+      loadGroups()
+    }
+    window.addEventListener(AGENTS_CHANGED_EVENT, onAgentsChanged)
+    return () => window.removeEventListener(AGENTS_CHANGED_EVENT, onAgentsChanged)
   }, [authenticatedApi])
 
   const handleCreateAgentClick = () => {
@@ -183,7 +191,11 @@ export default function AgentRoster({
       )}
 
       <div className="flex-1 overflow-y-auto">
-        {agents.length === 0 && groups.length === 0 ? (
+        {loading ? (
+          collapsed ? null : (
+            <p className="px-3 py-4 text-xs text-kumo-subtle">Loading…</p>
+          )
+        ) : agents.length === 0 && groups.length === 0 ? (
           collapsed ? (
             <button
               onClick={handleCreateAgentClick}

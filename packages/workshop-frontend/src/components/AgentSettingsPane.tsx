@@ -121,7 +121,7 @@ export default function AgentSettingsPane({
           onCheckedChange={(checked) => setNotifyOnUpdates(checked === true)}
           disabled={loading}
         />
-        <span className="text-sm text-kumo-default">Notify me about this assistant</span>
+        <span className="text-sm text-kumo-default">Notify me about this bot</span>
       </label>
       <label className="flex flex-col gap-1.5">
         <span className="text-[12px] font-medium text-kumo-default">Default model</span>

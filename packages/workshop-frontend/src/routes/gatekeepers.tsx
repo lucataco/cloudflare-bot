@@ -25,6 +25,7 @@ import { GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
 import { AccountsSubscriberAdapter } from '../accountsSubscriber'
+import { openOAuthPopup } from '../openOAuthPopup'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -551,6 +552,14 @@ function ConnectorsPage() {
   }, [authenticatedApi])
 
   const handleOpenConnect = (vendorId: string) => {
+    const vendor = vendors.find((item) => item.id === vendorId)
+    if (vendor?.description.configured === false) {
+      toasts.add({
+        title: `${vendor.description.displayName} isn't configured on this deployment yet.`,
+        variant: 'error',
+      })
+      return
+    }
     setModalTarget({ kind: 'connect', vendorId })
   }
 
@@ -577,7 +586,7 @@ function ConnectorsPage() {
         refreshGatekeeperApps(authenticatedApi)
       } else {
         const { url } = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-        window.open(url, '_blank', 'noopener,noreferrer')
+        openOAuthPopup(url)
       }
       handleCloseModal()
     } catch (err) {
@@ -597,7 +606,7 @@ function ConnectorsPage() {
         resourceUrlPatterns,
       )
       if (result.url) {
-        window.open(result.url, '_blank', 'noopener,noreferrer')
+        openOAuthPopup(result.url)
       }
       // On success the new grant arrives via subscribeConnectedAccounts(); the toggle reflects it
       // once `grantedResourceUrlPatterns` updates.
@@ -634,7 +643,7 @@ function ConnectorsPage() {
     setReconnectingAccountId(accountId)
     try {
       const { url } = await authenticatedApi.reconnectAccount(accountId)
-      window.open(url, '_blank', 'noopener,noreferrer')
+      openOAuthPopup(url)
     } catch (err) {
       console.error('Failed to reconnect account:', err)
       toasts.add({ title: 'Failed to reconnect account', variant: 'error' })

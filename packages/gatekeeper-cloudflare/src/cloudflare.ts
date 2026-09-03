@@ -97,10 +97,15 @@ function getBasePath(env: Env) {
   return path === "/" ? "" : path;
 }
 
+const CLOSE_BUTTON =
+  `<button type="button" onclick="window.close()" style="padding:0.5rem 1.5rem;background:#d97706;color:white;border:none;border-radius:4px;font-size:1rem;cursor:pointer;">Close</button>`
+
 const SELF_CLOSING_HTML = `<!DOCTYPE html>
-<html lang="en"><body>
-<script type="text/javascript">window.close();</script>
-<p>Authorization complete. You may close this tab and return to Cloudflare OS.
+<html lang="en"><head><meta charset="UTF-8"><title>Connected</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;padding:3rem;">
+<script>window.close();</script>
+<p>Connected. You can close this window.</p>
+${CLOSE_BUTTON}
 </body></html>`;
 
 const INVALID_LINK_HTML = `<!DOCTYPE html>
@@ -108,13 +113,14 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
 <body style="font-family: system-ui, sans-serif; text-align: center; padding: 3rem;">
 <h1 style="color:#d97706;">Authorization Link Expired</h1>
 <p>This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
-<button onclick="window.close()">Close</button></body></html>`;
+${CLOSE_BUTTON}</body></html>`;
 
 const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Configuration Required</title></head>
 <body style="font-family: system-ui, sans-serif; text-align: center; padding: 3rem;">
-<h1 style="color:#d97706;">Cloudflare Gatekeeper Not Configured</h1>
-<p>Please see the README.md for instructions on configuring an OAuth client ID and secret.</p>
+<h1 style="color:#d97706;">Cloudflare isn’t configured</h1>
+<p>This deployment has no Cloudflare OAuth client. You can close this window and continue setup.</p>
+${CLOSE_BUTTON}
 </body></html>`;
 
 /** Main HTTP entrypoint — used only to initiate and complete the OAuth flow. */
@@ -182,11 +188,15 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "usage beyond the free tier. You can also connect Workers Observability to inspect logs, " +
           "invocations, traces, and aggregate metrics.",
       providesAuth: true,
+      configured: Boolean(this.env.CLIENT_ID && this.env.CLIENT_SECRET),
     };
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
                        options?: GatekeeperConnectOptions): Promise<{ url: string }> {
+    if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
+      throw new Error("Cloudflare isn't configured on this deployment yet.");
+    }
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
     const authOnly = options?.scopes === "auth";

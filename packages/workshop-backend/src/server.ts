@@ -327,6 +327,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let workspaceId = this.overseers.newUniqueId().toString();
 
     await this.#user.newGadget(workspaceId, name);
+    await this.#user.setGadgetLastActive(workspaceId, new Date(), undefined);
 
     let agent = await this.#user.createAgentRecord(
       agentId,
@@ -481,6 +482,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let workspaceId = this.overseers.newUniqueId().toString();
 
     await this.#user.newGadget(workspaceId, name);
+    await this.#user.setGadgetLastActive(workspaceId, new Date(), undefined);
 
     let group = await this.#user.createGroupRecord(
       groupId,

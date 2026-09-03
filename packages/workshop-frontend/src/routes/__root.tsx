@@ -1,6 +1,6 @@
-import { logRpcFailure } from '../rpcErrors'
-import { useState, useEffect } from 'react'
-import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
+import { classifyRpcError, logRpcFailure } from '../rpcErrors'
+import { useState, useEffect, useRef } from 'react'
+import { createRootRoute, Navigate, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
@@ -81,8 +81,11 @@ function RootComponent() {
     )
   }
 
-  // Not authenticated and not a public route — show login
+  // Not authenticated and not a public route — show login at `/`, not a deep link like `/agents`.
   if (!isAuthenticated && !standalone) {
+    if (pathname !== '/') {
+      return <Navigate to="/" replace />
+    }
     return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
   }
 
@@ -115,6 +118,7 @@ function RootComponent() {
             <AuthenticatedShell
               authenticatedApi={authenticatedApi}
               isWorkspaceEditor={isWorkspaceEditor}
+              onAuthInvalid={logout}
             />
           </Toasty>
         </TooltipProvider>
@@ -131,18 +135,26 @@ function RootComponent() {
 function AuthenticatedShell({
   authenticatedApi,
   isWorkspaceEditor,
+  onAuthInvalid,
 }: {
   authenticatedApi: RpcStub<AuthenticatedApi>
   isWorkspaceEditor: boolean
+  onAuthInvalid: () => void
 }) {
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
+  const onAuthInvalidRef = useRef(onAuthInvalid)
+  onAuthInvalidRef.current = onAuthInvalid
 
   useEffect(() => {
     let cancelled = false
     authenticatedApi.isOnboardingCompleted().then((completed) => {
       if (!cancelled) setOnboardingNeeded(!completed)
     }).catch((err) => {
+      if (classifyRpcError(err) === 'auth') {
+        onAuthInvalidRef.current()
+        return
+      }
       logRpcFailure('Failed to check onboarding status:', err)
       // If the check fails, skip onboarding to avoid blocking the user
       if (!cancelled) setOnboardingNeeded(false)

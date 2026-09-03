@@ -5,6 +5,7 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { AccountsSubscriberAdapter, AccountEvent } from '../accountsSubscriber'
 import { logRpcFailure } from '../rpcErrors'
+import { openOAuthPopup } from '../openOAuthPopup'
 
 interface EditAgentModalProps {
   visible: boolean
@@ -241,7 +242,7 @@ export default function EditAgentModal({
               onCheckedChange={(checked) => setNotifyOnUpdates(checked === true)}
               disabled={loading}
             />
-            <span className="text-sm text-kumo-default">Notify me about this assistant</span>
+            <span className="text-sm text-kumo-default">Notify me about this bot</span>
           </label>
         </div>
 
@@ -331,7 +332,7 @@ export default function EditAgentModal({
                               try {
                                 setConnectingVendor(vendorId)
                                 const result = await authenticatedApi.connectAccount(vendorId)
-                                window.open(result.url, '_blank', 'noopener,noreferrer')
+                                openOAuthPopup(result.url)
                                 toasts.add({
                                   title: `Switch identity in the popup to connect a different ${vendorName} account`,
                                   variant: 'success',

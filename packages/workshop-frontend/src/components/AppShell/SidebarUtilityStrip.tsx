@@ -12,19 +12,16 @@ function nextThemeMode(mode: ThemeMode): ThemeMode {
 }
 
 function ThemeModeButton() {
-  const { themeMode, resolvedThemeMode, setThemeMode } = useTheme()
-  const label = themeMode === 'system'
-    ? `Theme: system (${resolvedThemeMode})`
-    : `Theme: ${themeMode}`
+  const { themeMode, setThemeMode } = useTheme()
   const nextMode = nextThemeMode(themeMode)
 
   return (
     <Tooltip
-      content={`${label}. Switch to ${nextMode}.`}
+      content={`Switch to ${nextMode}`}
       render={(
         <button
           type="button"
-          aria-label={`${label}. Switch to ${nextMode}.`}
+          aria-label={`Switch to ${nextMode} theme`}
           onClick={() => setThemeMode(nextMode)}
           className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-elevated"
         >

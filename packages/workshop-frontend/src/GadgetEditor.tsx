@@ -80,7 +80,6 @@ import {
   readStoredInspector,
   type MessengerInspector,
 } from './inspectorPane'
-import { useDocumentTitle } from './useDocumentTitle'
 
 const NO_GADGETS: ReadonlySet<WorkpieceId> = new Set()
 
@@ -453,7 +452,6 @@ export default function GadgetEditor({
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
   const messengerMode = messenger != null
-  useDocumentTitle(messenger?.agent?.name ?? messenger?.group?.name)
 
   const navigateWorkspace = useCallback((options: {
     search?: Record<string, unknown> | ((prev: Record<string, unknown>) => Record<string, unknown>)
@@ -517,6 +515,7 @@ export default function GadgetEditor({
     onInvalidShareKey: () => {
       toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
     },
+    skipDocumentTitle: messengerMode,
   })
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 

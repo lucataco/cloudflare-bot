@@ -13,6 +13,14 @@ vi.mock('./errorReporting', () => ({
   setReportedUserId: vi.fn<(reportedUserId: string | undefined) => void>(),
 }))
 
+const memoryStore = new Map<string, string>()
+vi.stubGlobal('localStorage', {
+  getItem: (key: string) => memoryStore.get(key) ?? null,
+  setItem: (key: string, value: string) => { memoryStore.set(key, value) },
+  removeItem: (key: string) => { memoryStore.delete(key) },
+  clear: () => { memoryStore.clear() },
+})
+
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const person: AiChatAuthorInfo = { type: 'user', id: 'person@example.com', name: 'Person' }
@@ -68,7 +76,7 @@ describe('useAuth error reporting identity', () => {
     roots.length = 0
     containers.forEach(container => container.remove())
     containers.length = 0
-    localStorage.clear()
+    memoryStore.clear()
     vi.unstubAllEnvs()
     vi.clearAllMocks()
   })
@@ -191,5 +199,25 @@ describe('useAuth error reporting identity', () => {
     await mount(stubPublicApi())
 
     expect(setReportedUserId).not.toHaveBeenCalled()
+  })
+
+  it('clears a stored invalid session token', async () => {
+    localStorage.setItem('authToken', 'stale-token')
+    const authenticated = {
+      whoami: async () => {
+        throw new Error('invalid session token')
+      },
+      [Symbol.dispose]: () => {},
+    }
+    const api = {
+      authenticate: () => authenticated,
+      authenticateFromCfAccess: () => authenticated,
+    } as unknown as RpcStub<PublicApi>
+
+    await mount(api)
+    await act(async () => {})
+
+    expect(localStorage.getItem('authToken')).toBeNull()
+    expect(setReportedUserId).not.toHaveBeenCalledWith('person@example.com')
   })
 })

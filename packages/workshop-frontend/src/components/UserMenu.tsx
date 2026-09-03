@@ -34,8 +34,29 @@ export default function UserMenu() {
         }
       />
       <DropdownMenu.Content className={MENU_CONTENT} style={MENU_POSITIONER_STYLE}>
+        <DropdownMenu.Item
+          onClick={() => navigate({ to: '/profile' })}
+          className={MENU_ITEM}
+        >
+          Profile
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onClick={() => navigate({ to: '/providers' })}
+          className={MENU_ITEM}
+        >
+          Providers
+        </DropdownMenu.Item>
+        {isAdmin && (
+          <DropdownMenu.Item
+            onClick={() => navigate({ to: '/admin' })}
+            className={MENU_ITEM}
+          >
+            Admin
+          </DropdownMenu.Item>
+        )}
         {agentShell && (
           <>
+            <DropdownMenu.Separator />
             <DropdownMenu.Item
               onClick={() => navigate({ to: '/workspaces' })}
               className={MENU_ITEM}
@@ -60,28 +81,7 @@ export default function UserMenu() {
             >
               Outputs
             </DropdownMenu.Item>
-            <DropdownMenu.Separator />
           </>
-        )}
-        <DropdownMenu.Item
-          onClick={() => navigate({ to: '/profile' })}
-          className={MENU_ITEM}
-        >
-          Profile
-        </DropdownMenu.Item>
-        <DropdownMenu.Item
-          onClick={() => navigate({ to: '/providers' })}
-          className={MENU_ITEM}
-        >
-          Providers
-        </DropdownMenu.Item>
-        {isAdmin && (
-          <DropdownMenu.Item
-            onClick={() => navigate({ to: '/admin' })}
-            className={MENU_ITEM}
-          >
-            Admin
-          </DropdownMenu.Item>
         )}
         <DropdownMenu.Separator />
         <DropdownMenu.Item
