@@ -1,0 +1,13 @@
+{
+  "name": "workshop-computer-runtime",
+  "main": ".wrangler/validate/src/index.ts",
+  "build": { "command": "pnpm exec capnweb-validate build --out .wrangler/validate", "watch_dir": "src" },
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "SANDBOX_TRANSPORT": "rpc" },
+  "containers": [{ "class_name": "BotSandbox", "image": "./Dockerfile", "instance_type": "lite", "max_instances": 10 }],
+  "durable_objects": { "bindings": [{ "class_name": "BotSandbox", "name": "Sandbox" }, { "class_name": "ComputerWorkspace", "name": "Workspaces" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BotSandbox", "ComputerWorkspace"] }],
+  "r2_buckets": [{ "binding": "WORKSPACES", "bucket_name": "workshop-computer-workspaces" }],
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } }
+}

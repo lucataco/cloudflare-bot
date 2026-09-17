@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "lib": ["esnext"], "types": ["./worker-configuration.d.ts"], "module": "ESNext", "moduleResolution": "bundler" },
+  "include": ["src", "smoke-worker.ts"]
+}

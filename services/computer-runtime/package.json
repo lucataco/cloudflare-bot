@@ -1,0 +1,19 @@
+{
+  "name": "@gadgets/computer-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "deploy": "wrangler deploy",
+    "test:run": "python3 -m unittest test_run.py && vitest run",
+    "test:smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.12.9",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb-validate": "catalog:",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": { "typescript": "catalog:", "vitest": "catalog:", "wrangler": "catalog:", "@cloudflare/vitest-pool-workers": "catalog:" }
+}
