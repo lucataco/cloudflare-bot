@@ -1,0 +1,7 @@
+body { font: 14px system-ui, sans-serif; margin: 0; color: #202124; background: #fafafa; }
+main { max-width: 460px; margin: 32px auto; padding: 0 24px; }
+h1 { font-size: 24px; }
+form { display: grid; gap: 8px; }
+input, button { border: 1px solid #ccc; border-radius: 8px; padding: 12px; font: inherit; }
+button { background: #ff4801; color: white; border: 0; cursor: pointer; }
+p { line-height: 1.5; } #error { color: #b91c1c; }

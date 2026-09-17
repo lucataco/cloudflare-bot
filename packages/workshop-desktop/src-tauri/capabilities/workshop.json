@@ -1,0 +1,6 @@
+{
+  "identifier": "workshop-notifications",
+  "windows": ["workshop"],
+  "remote": { "urls": ["https://*", "http://localhost:*", "http://127.0.0.1:*"] },
+  "permissions": ["allow-notify-attention"]
+}

@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-open-workshop"
+description = "Choose the Workshop origin from the local setup window."
+commands.allow = ["open_workshop"]
+
+[[permission]]
+identifier = "allow-notify-attention"
+description = "Display a fixed, rate-limited attention notification for the configured Workshop."
+commands.allow = ["notify_attention"]

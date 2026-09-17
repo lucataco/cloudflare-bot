@@ -1,0 +1,13 @@
+{
+  "name": "@gadgets/workshop-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "test:run": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "bundle": "tauri build"
+  },
+  "devDependencies": { "@tauri-apps/cli": "^2.10.1" }
+}
