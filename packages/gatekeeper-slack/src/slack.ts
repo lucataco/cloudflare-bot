@@ -1166,7 +1166,7 @@ export class SlackEventHookDriver extends DurableObject<Env> {
       let initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RpcTarget>>>(`hook:${hookId}:initiator`);
       if (!initiator) continue;
       
-      let { callback, approvalQueue } = await initiator.startHook();
+      let { callback } = await initiator.startHook();
       await (callback as any).onMessage({
         channelId: message.channelId,
         message: message,

@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { exports } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
-import type { AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
+import type { PublicApi } from "@gadgets/workshop-shared/api";
 
 const PASSWORD_HASH = new Uint8Array([1, 2, 3]);
 

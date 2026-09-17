@@ -10,8 +10,8 @@ vi.mock('@tanstack/react-router', () => ({
     const state = { location: { pathname: '/agents/bot-1' } }
     return opts?.select ? opts.select(state) : state
   },
-  Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
-  useNavigate: () => vi.fn(),
+  Link: ({ href, children }: { href?: string; children: React.ReactNode }) => <a href={href}>{children}</a>,
+  useNavigate: () => vi.fn<() => void>(),
 }))
 
 vi.mock('../../RpcContext', () => ({ useConnectionLost: () => false }))
