@@ -20,6 +20,7 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import { remoteAgentHandle } from "./remote-agent";
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -150,9 +151,7 @@ const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
 
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-// Consult pi's builtin catalog for cost/compat metadata of a known model id. Unknown models are
-// fine (synthesized with zero cost). Import per-provider, not providers/all. Exported for use by
-// agent-compaction.ts.
+/** Consult pi's per-provider catalog for cost/compatibility metadata; unknown models are synthesized. */
 export function catalogModel(provider: AiModelConfig["provider"], modelId: string): Model<Api> | undefined {
   switch (provider) {
     case "anthropic": return (ANTHROPIC_MODELS as Record<string, Model<Api>>)[modelId];
@@ -174,6 +173,7 @@ export function computeTokenLimits(
     config: AiModelConfig, catalog: Model<Api> | undefined)
     : { contextWindow: number, maxTokens: number, maxOutputTokens?: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
+  if (config.provider === "capnweb") return {contextWindow: 32000, maxTokens: 4096, maxOutputTokens: 4096};
   const contextWindow = suggested?.contextWindow ?? catalog?.contextWindow ??
       (config.provider === "cloudflare" ? 24000 : 128_000);
   const requestedMaxTokens = suggested?.outputLimit ??
@@ -383,6 +383,10 @@ function makeHandle(args: HandleArgs): ModelHandle {
               args.model.api, await options.onPayload?.(payload, payloadModel) ?? payload
           ) ?? payload;
 
+          if (!finalPayload || typeof finalPayload !== "object" || Array.isArray(finalPayload)) {
+            return finalPayload;
+          }
+          const payloadFields = finalPayload as Record<string, unknown>;
           const promptChars = JSON.stringify(finalPayload).length;
           const promptTokens = Math.ceil(promptChars / 4);
           const remainingWindow = args.model.contextWindow - promptTokens;
@@ -406,17 +410,17 @@ function makeHandle(args: HandleArgs): ModelHandle {
                   (args.model.baseUrl.includes("workers-binding.ai") ||
                    args.model.baseUrl.includes("api.cloudflare.com"))) ||
               (args.model as { workersAiCompat?: boolean }).workersAiCompat;
-          if (isWorkersAi && Array.isArray(finalPayload.messages)) {
-            for (const msg of finalPayload.messages) {
+          if (isWorkersAi && Array.isArray(payloadFields.messages)) {
+            for (const msg of payloadFields.messages) {
               if (msg.content === null || msg.content === undefined) {
                 msg.content = "";
               }
             }
           }
 
-          const payloadKeys = Object.keys(finalPayload).sort().join(",");
-          const toolsCount = Array.isArray(finalPayload.tools) ? finalPayload.tools.length : 0;
-          const messages = Array.isArray(finalPayload.messages) ? finalPayload.messages : [];
+          const payloadKeys = Object.keys(finalPayload).toSorted().join(",");
+          const toolsCount = Array.isArray(payloadFields.tools) ? payloadFields.tools.length : 0;
+          const messages = Array.isArray(payloadFields.messages) ? payloadFields.messages : [];
           
           const requestMessages = messages.map((msg: any) => {
             const role = msg.role ?? "unknown";
@@ -515,6 +519,8 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Remote execution uses only its explicitly configured endpoint and credentials.
+  if (config.provider === "capnweb") return remoteAgentHandle(config);
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -861,6 +867,8 @@ function getModelDirect(config: AiModelConfig, env: Cloudflare.Env, sessionAffin
         apiKey: config.apiToken,
         sessionAffinity,
       });
+    case "capnweb":
+      return remoteAgentHandle(config);
     default:
       config.provider satisfies never;
       throw new Error(`Unknown provider "${config.provider}".`);

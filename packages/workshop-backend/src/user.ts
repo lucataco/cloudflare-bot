@@ -1,4 +1,13 @@
-import { RpcStub } from "capnweb";
+import type { BotBlueprintProfile, AgentRosterState } from "@gadgets/workshop-shared/api";
+import { parseAgentSeeds } from "./agent-seeds";
+import { remoteAgentUrl } from "./remote-agent";
+import { RpcStub, RpcTarget } from "capnweb";
+import { createHash } from "node:crypto";
+import type { AgentProposal, AgentProposalReceipt } from "@gadgets/workshop-shared/api";
+import type { AttentionItem, AttentionPage, AttentionSubscriber, PushSettings, PushSubscriptionData } from "@gadgets/workshop-shared/api";
+import { OWNER_ATTENTION_LIMIT, WORKSPACE_ATTENTION_LIMIT, type AttentionProjection, type WorkspaceAttentionSnapshot } from "./attention.js";
+import { readPushConfig, validatePushSubscription, createPushRequest } from "./web-push.js";
+import { createExportDeadline } from "./export-limits.js";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule, AgentSkill } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -104,21 +113,10 @@ type LibraryBlueprintRecord = {
   uploaded: boolean;
 };
 
-type AgentRecord = {
-  id: string;
-  name: string;
-  title: string;
-  description: string;
-  avatar?: { url: string };
-  defaultModelId: string | null;
-  workspaceId: string;
-  defaultBindings?: number[];
-  notifyOnUpdates?: boolean;
-  created: Date;
-  updated: Date;
-};
+type AgentRecord = Omit<AgentProfile, "roster"> & { lastReadReplyAt?: number };
 
 type GroupRecord = {
+  multiAuthor?: boolean;
   id: string;
   name: string;
   memberAgentIds: string[];
@@ -135,9 +133,16 @@ type RoutineRecord = {
   schedule: AgentRoutineSchedule;
   paused: boolean;
   hookId?: number;
+  // Desired-state revision, not a timestamp. Absent on records written before registration CAS.
+  revision?: number;
   created: Date;
   updated: Date;
 };
+
+function routineForClient(record: RoutineRecord): AgentRoutine {
+  let {agentId: _agentId, revision: _revision, ...routine} = record;
+  return routine;
+}
 
 type SkillRecord = {
   id: string;
@@ -148,6 +153,13 @@ type SkillRecord = {
   body: string;
   created: Date;
   updated: Date;
+};
+
+// Retained after artifact deletion: recovering a lost create response must never resurrect it.
+type ProposalCreationRecord = Pick<AgentProposal, "agentId" | "artifactId"> & {
+  source: { workspaceId: string; proposalId: AgentProposal["proposalId"] };
+  draftHash: string;
+  createdAt: AgentProposalReceipt["createdAt"];
 };
 
 type MemoryNoteRecord = {
@@ -188,6 +200,53 @@ type OutputRecord = WorkspaceOutputEntry & {
   workspaceId: string;
 };
 
+type AttentionRecord = AttentionProjection & {
+  id: string;
+  workspaceId: string;
+  agentId?: string;
+  order: number;
+  seenVersion?: number;
+};
+
+type AttentionReceipt = {
+  roster?: WorkspaceAttentionSnapshot["roster"];
+  workspaceId: string;
+  revision: number;
+  complete: boolean;
+  prohibitPush: boolean;
+  // Fences the gap between deleting a dedicated bot and the caller deleting its workspace.
+  deletedAgent?: true;
+};
+
+type AttentionBootstrapJob = { workspaceId: string; attempt: number; due: number };
+type PushDevice = PushSettings["devices"][number] & {
+  subscription: PushSubscriptionData;
+  generation: number;
+};
+type PushCandidate = { itemId: string; version: number };
+type PushJob = {
+  id: string;
+  generation: number;
+  revision: number;
+  candidates: PushCandidate[];
+  attempt: number;
+  due: number;
+};
+
+function attentionRetryDelay(attempt: number): number {
+  return Math.min(300_000, 5_000 * 2 ** Math.min(attempt - 1, 6));
+}
+
+async function attentionRpc<T>(work: Promise<T>): Promise<T> {
+  const deadline = createExportDeadline("Attention RPC timed out.", 10_000);
+  try {
+    // Only the winning race may continue; late RPC completion cannot claim the job.
+    return await deadline.race(work);
+  } finally {
+    deadline.clear();
+  }
+}
+
 // AI Gateway billing state for the optional top-up flow: which Cloudflare account to bill and a
 // cached credit balance. The OAuth tokens themselves live in the connected Cloudflare *gatekeeper*
 // account (vendorId "cloudflare"); billing reads a usable token from there via getUsableAccessToken.
@@ -222,6 +281,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       agents: collection<AgentRecord>()({
         primaryKey: "id"
       }),
+      agentSeedReceipts: collection<{key: string; agentId: string}>()({primaryKey: "key"}),
       groups: collection<GroupRecord>()({
         primaryKey: "id"
       }),
@@ -230,6 +290,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       }),
       skills: collection<SkillRecord>()({
         primaryKey: "id"
+      }),
+      proposalReceipts: collection<ProposalCreationRecord>()({
+        primaryKey: record => `${record.source.workspaceId}:${record.source.proposalId}`,
       }),
       memory: collection<MemoryNoteRecord>()({
         primaryKey: "id"
@@ -259,6 +322,20 @@ function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
+      attention: collection<AttentionRecord>()({
+        primaryKey: "id",
+        uniqueIndexes: { byOrder: (record: AttentionRecord) => record.order },
+        nonUniqueIndexes: { byWorkspace: (record: AttentionRecord) => record.workspaceId },
+      }),
+      attentionReceipts: collection<AttentionReceipt>()({ primaryKey: "workspaceId" }),
+      attentionBootstrapJobs: collection<AttentionBootstrapJob>()({
+        primaryKey: "workspaceId",
+        nonUniqueIndexes: { byDue: (record: AttentionBootstrapJob) => record.due },
+      }),
+      pushDevices: collection<PushDevice>()({ primaryKey: "id" }),
+      // Private consent boundary, never included in the public agent profile.
+      pushBotConsent: collection<{agentId: string; enableSince: number}>()({ primaryKey: "agentId" }),
+      pushJobs: collection<PushJob>()({ primaryKey: "id" }),
     },
     singletons: {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
@@ -282,6 +359,14 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // How far that catch-up has got: the last workspace id examined. The sweep runs a page at a
       // time and resumes here on the next visit.
       outputsBackfillCursor: "",
+
+      attentionActivated: false,
+      attentionScanComplete: false,
+      attentionScanCursor: "",
+      attentionTruncated: false,
+      attentionOrder: 0,
+      attentionRevision: 0,
+      pushRevision: 0,
 
       nextAccountId: 0,
       pinnedBlueprints: <string[]>[],
@@ -309,7 +394,7 @@ function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
       displayName: id,
       url: "",
       tagline: "Temporarily unavailable",
-      description: "This gatekeeper could not be loaded.",
+      description: "This connection could not be loaded.",
     },
     supportedResources: [],
   };
@@ -623,7 +708,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+    if (config.provider === "capnweb") {
+      remoteAgentUrl(config.apiUrl);
+      if (!config.model.trim() || config.model.length > 200 || config.apiToken.length > 8192) {
+        throw new Error("Remote-agent IDs must be 1–200 characters and tokens at most 8192 characters.");
+      }
+      if (gwConfig?.resolveModel(profile.id)) throw new Error("Choose a remote-agent ID distinct from built-in models.");
+    } else if (gwConfig && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
 
@@ -790,6 +881,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       let group = await this.getGroupByWorkspaceId(workspaceId);
       if (group) {
         result.group = group;
+        if (group.multiAuthor) delete result.agentProfile;
       }
     }
 
@@ -854,7 +946,89 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let agents = Array.from(this.storage.agents.list());
     // Sort by created date, newest first
     agents.sort((a, b) => b.created.getTime() - a.created.getTime());
-    return agents;
+    return agents.map(({lastReadReplyAt, ...agent}) => {
+      const receipt = this.storage.attentionReceipts.get(agent.workspaceId);
+      const entries = [...this.storage.attention.byWorkspace.get(agent.workspaceId)];
+      const latest = entries.toSorted((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+      const lastReply = receipt?.roster?.lastReply;
+      const presence: AgentRosterState["presence"] = entries.some(e => e.state === "pending" || e.state === "accepting")
+        ? "waiting" : receipt?.roster?.working ? "working"
+        : latest?.state === "failed" || latest?.state === "incomplete" ? "blocked"
+        : latest?.state === "finished" || lastReply ? "done" : "idle";
+      return {...agent, roster: {presence, lastReply,
+        unreadCount: entries.filter(e => e.seenVersion !== e.version).length +
+          (lastReply && lastReply.timestamp > (lastReadReplyAt ?? 0) ? 1 : 0)}};
+    });
+  }
+
+  /** Acknowledge only a displayed reply; attention cards have their own versioned acknowledgment. */
+  async markAgentRead(id: string, replyTimestamp: number): Promise<void> {
+    const agent = this.storage.agents.get(id);
+    if (!agent) throw new Error("Agent not found");
+    const latest = this.storage.attentionReceipts.get(agent.workspaceId)?.roster?.lastReply?.timestamp ?? 0;
+    const lastReadReplyAt = Math.max(agent.lastReadReplyAt ?? 0, Math.min(replyTimestamp, latest));
+    if (lastReadReplyAt === agent.lastReadReplyAt) return;
+    this.storage.agents.put({...agent, lastReadReplyAt});
+    this.#attentionChanged();
+  }
+
+  /** Explicit portable allowlist: no history, memory, credentials, hooks or resource grants. */
+  async getBotBlueprint(id: string): Promise<BotBlueprintProfile> {
+    const agent = this.storage.agents.get(id);
+    if (!agent) throw new Error("Agent not found");
+    const pluginIds = new Set(agent.pluginIds ?? []);
+    for (const accountId of agent.defaultBindings ?? []) {
+      const account = this.storage.connectedAccounts.get(accountId);
+      if (account) pluginIds.add(account.vendorId);
+    }
+    return {name: agent.name, title: agent.title, description: agent.description, avatar: agent.avatar,
+      pluginIds: [...pluginIds],
+      skills: [...this.storage.skills.list()].filter(s => s.agentId === id)
+        .map(({name, description, body}) => ({name, description, body})),
+      routines: [...this.storage.routines.list()].filter(r => r.agentId === id)
+        .map(({name, prompt, schedule}) => ({name, prompt, schedule}))};
+  }
+
+  /** Install the whole definition atomically in the owner registry, with no authority inherited. */
+  async installBotBlueprint(workspaceId: string, bot: BotBlueprintProfile,
+      defaultModelId: string | null, notifyOnUpdates = true): Promise<AgentProfile> {
+    return this.storage.transaction(() => this.#installBotBlueprint(workspaceId, bot, defaultModelId, notifyOnUpdates));
+  }
+
+  /** Create each stable seed key once; receipts survive edits and deletion. All seeds commit together. */
+  async seedAgents(yaml: string): Promise<{created: AgentProfile[]; skipped: string[]}> {
+    const seeds = parseAgentSeeds(yaml);
+    const gateway = getAiGatewayConfig(this.env);
+    return this.storage.transaction(() => {
+      const created: AgentProfile[] = [];
+      const skipped: string[] = [];
+      for (const {key, modelId, bot} of seeds) {
+        if (this.storage.agentSeedReceipts.get(key)) { skipped.push(key); continue; }
+        if (modelId && !this.storage.aiModels.get(modelId) && !gateway?.resolveModel(modelId)) {
+          throw new Error("A seed references an unavailable model. Add it in Providers first.");
+        }
+        const agent = this.#installBotBlueprint(this.ctx.exports.OverseerDurableObject.newUniqueId().toString(), bot, modelId);
+        this.storage.agentSeedReceipts.put({key, agentId: agent.id});
+        created.push(agent);
+      }
+      return {created, skipped};
+    });
+  }
+
+  #installBotBlueprint(workspaceId: string, bot: BotBlueprintProfile,
+      defaultModelId: string | null, notifyOnUpdates = true): AgentProfile {
+    const now = new Date();
+    const agent: AgentRecord = {id: crypto.randomUUID(), workspaceId, name: bot.name,
+      title: bot.title, description: bot.description, avatar: bot.avatar, pluginIds: bot.pluginIds,
+      defaultModelId, defaultBindings: [], notifyOnUpdates, created: now, updated: now};
+    this.storage.gadgets.put({id: workspaceId, title: bot.name, created: now, lastActive: now});
+    this.storage.agents.put(agent);
+    for (const skill of bot.skills) this.#createSkillWithId(crypto.randomUUID(), agent.id,
+      skill.name, skill.description, skill.body);
+    for (const routine of bot.routines) this.#createRoutineWithId(crypto.randomUUID(), agent.id,
+      routine.name, routine.prompt, routine.schedule, true);
+    this.#attentionChanged();
+    return agent;
   }
 
   /** Create a new agent profile and register its workspace. Called from server.ts after creating the workspace. */
@@ -885,6 +1059,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
     
     this.storage.agents.put(agent);
+    this.#attentionChanged();
     return agent;
   }
 
@@ -899,6 +1074,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       avatar?: AvatarImage | null;
       defaultBindings?: number[];
       notifyOnUpdates?: boolean;
+      hidden?: boolean;
     }
   ): Promise<AgentProfile> {
     let agent = this.storage.agents.get(id);
@@ -907,7 +1083,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     let updatedAgent: AgentRecord = {
+      ...agent,
       id: agent.id,
+      hidden: updates.hidden ?? agent.hidden,
       name: updates.name !== undefined ? updates.name : agent.name,
       title: updates.title !== undefined ? updates.title : agent.title,
       description: updates.description !== undefined ? updates.description : agent.description,
@@ -922,12 +1100,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (updates.avatar !== undefined) {
       if (updates.avatar !== null) {
         updatedAgent.avatar = updates.avatar;
+      } else {
+        delete updatedAgent.avatar;
       }
     } else if (agent.avatar !== undefined) {
       updatedAgent.avatar = agent.avatar;
     }
 
     this.storage.agents.put(updatedAgent);
+    if (agent.notifyOnUpdates === false && updatedAgent.notifyOnUpdates !== false) {
+      this.storage.pushBotConsent.put({agentId: id, enableSince: Date.now()});
+    }
+    // Muting drops queued work; unmuting never replays historical versions.
+    this.#prunePushCandidates();
+    this.#attentionChanged();
+    await this.#scheduleAttentionAlarm();
 
     return updatedAgent;
   }
@@ -955,8 +1142,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     let workspaceId = agent.workspaceId;
+    const attentionRevision = this.storage.attentionReceipts.get(workspaceId)?.revision ?? 0;
     
     this.storage.agents.delete(id);
+    this.storage.pushBotConsent.delete(id);
+    this.#purgeWorkspaceAttention(workspaceId);
+    if (this.storage.gadgets.get(workspaceId)) {
+      this.storage.attentionReceipts.put({workspaceId, revision: attentionRevision, complete: true,
+        prohibitPush: true, deletedAgent: true});
+    }
+    await this.#scheduleAttentionAlarm();
     
     return workspaceId;
   }
@@ -968,10 +1163,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let routines = Array.from(this.storage.routines.list()).filter(r => r.agentId === agentId);
     routines.sort((a, b) => b.created.getTime() - a.created.getTime());
-    return routines;
+    return routines.map(routineForClient);
   }
 
   async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused: boolean = true): Promise<AgentRoutine> {
+    return this.#createRoutineWithId(crypto.randomUUID(), agentId, name, prompt, schedule, paused);
+  }
+
+  #createRoutineWithId(id: string, agentId: string, name: string, prompt: string,
+      schedule: AgentRoutineSchedule, paused: boolean): AgentRoutine {
     let agent = this.storage.agents.get(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -981,57 +1181,73 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let now = new Date();
     let routine: RoutineRecord = {
-      id: crypto.randomUUID(),
+      id,
       agentId,
       name,
       prompt,
       schedule,
       paused,
+      revision: 0,
       created: now,
       updated: now,
     };
     this.storage.routines.put(routine);
-    return routine;
+    return routineForClient(routine);
   }
 
-  async updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine> {
+  /** Apply a desired-state update only to the revision the server inspected; invalidate older registrations. */
+  async updateRoutine(agentId: string, routineId: string,
+      updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean },
+      expectedRevision: number): Promise<{routine: AgentRoutine, revision: number}> {
     let routine = this.storage.routines.get(routineId);
     if (!routine || routine.agentId !== agentId) {
       throw new Error(`Routine not found: ${routineId}`);
     }
+    if ((routine.revision ?? 0) !== expectedRevision) {
+      throw new Error("Routine changed during update. Reload and retry.");
+    }
+    let revision = expectedRevision + 1;
     let updated: RoutineRecord = {
       ...routine,
       name: updates.name ?? routine.name,
       prompt: updates.prompt ?? routine.prompt,
       schedule: updates.schedule ?? routine.schedule,
       paused: updates.paused ?? routine.paused,
+      revision,
       updated: new Date(),
     };
     this.storage.routines.put(updated);
-    return updated;
+    return {routine: routineForClient(updated), revision};
   }
 
-  async deleteRoutine(agentId: string, routineId: string): Promise<void> {
+  /** Delete desired state before hook teardown; optional CAS is used only to clean up a failed create. */
+  async deleteRoutine(agentId: string, routineId: string, expectedRevision?: number): Promise<RoutineRecord | undefined> {
     let routine = this.storage.routines.get(routineId);
-    if (!routine || routine.agentId !== agentId) {
+    if (!routine) return;
+    if (routine.agentId !== agentId) {
       throw new Error(`Routine not found: ${routineId}`);
     }
+    if (expectedRevision !== undefined && (routine.revision ?? 0) !== expectedRevision) return;
     this.storage.routines.delete(routineId);
+    return routine;
   }
 
-  async setRoutineHookId(routineId: string, hookId: number | undefined): Promise<void> {
+  /** Publish or roll back a registration only if no newer desired-state update has superseded it. */
+  async finishRoutineRegistration(routineId: string, revision: number,
+      hookId: number | undefined): Promise<AgentRoutine | undefined> {
     let routine = this.storage.routines.get(routineId);
-    if (!routine) {
-      throw new Error(`Routine not found: ${routineId}`);
-    }
+    if (!routine || (routine.revision ?? 0) !== revision) return;
     let updated: RoutineRecord = {
       ...routine,
       hookId,
+      paused: hookId === undefined,
       updated: new Date(),
     };
     this.storage.routines.put(updated);
+    return routineForClient(updated);
   }
 
+  /** Read the private routine record, including its desired-state revision for registration/admission checks. */
   async getRoutineById(routineId: string): Promise<RoutineRecord | undefined> {
     return this.storage.routines.get(routineId);
   }
@@ -1055,13 +1271,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async createSkill(agentId: string, name: string, description: string, body: string): Promise<AgentSkill> {
+    return this.#createSkillWithId(crypto.randomUUID(), agentId, name, description, body);
+  }
+
+  #createSkillWithId(id: string, agentId: string, name: string, description: string,
+      body: string): AgentSkill {
     let agent = this.storage.agents.get(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
     let now = new Date();
     let skill: SkillRecord = {
-      id: crypto.randomUUID(),
+      id,
       agentId,
       name,
       slug: this.#generateSkillSlug(name),
@@ -1072,6 +1293,49 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
     this.storage.skills.put(skill);
     return skill;
+  }
+
+  /**
+   * Backend-only creation after a durable owner acceptance. Insert the ordinary record and its
+   * tombstone atomically; retries verify the original request, not the possibly edited artifact.
+   */
+  async ensureProposalArtifact(source: { workspaceId: string; proposalId: AgentProposal["proposalId"] },
+      agentId: AgentProposal["agentId"], artifactId: AgentProposal["artifactId"],
+      draft: AgentProposal["draft"]): Promise<AgentProposalReceipt> {
+    // Canonical key order makes equivalent RPC objects hash identically without retaining prose
+    // in the tombstone. Arrays retain their order, and omitted optional fields stay omitted.
+    const draftHash = createHash("sha256").update(JSON.stringify(draft, (_key, value) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).toSorted(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+        : value)).digest("hex");
+    return this.storage.transaction(() => {
+      const receipt = this.storage.proposalReceipts.get(`${source.workspaceId}:${source.proposalId}`);
+      if (receipt) {
+        if (receipt.source.workspaceId !== source.workspaceId || receipt.source.proposalId !== source.proposalId ||
+            receipt.agentId !== agentId || receipt.artifactId !== artifactId || receipt.draftHash !== draftHash) {
+          throw new Error("Proposal creation request does not match its receipt.");
+        }
+        const artifact = draft.kind === "routine"
+          ? this.storage.routines.get(artifactId) : this.storage.skills.get(artifactId);
+        return {createdAt: receipt.createdAt, missing: artifact === undefined};
+      }
+      const agent = this.storage.agents.get(agentId);
+      const workspace = this.storage.gadgets.get(source.workspaceId);
+      if (!agent || agent.workspaceId !== source.workspaceId || !workspace || workspace.owner ||
+          [...this.storage.groups.list()].some(group => group.workspaceId === source.workspaceId)) {
+        throw new Error("Proposal requires the bot's owned dedicated workspace.");
+      }
+      if (this.storage.routines.get(artifactId) || this.storage.skills.get(artifactId)) {
+        throw new Error("Proposal artifact ID is already in use.");
+      }
+      const artifact = draft.kind === "routine"
+        ? this.#createRoutineWithId(artifactId, agentId, draft.value.name,
+            draft.value.prompt, draft.value.schedule, true)
+        : this.#createSkillWithId(artifactId, agentId, draft.value.name,
+            draft.value.description, draft.value.body);
+      this.storage.proposalReceipts.put({source, agentId, artifactId, draftHash, createdAt: artifact.created});
+      return {createdAt: artifact.created, missing: false};
+    });
   }
 
   async updateSkill(agentId: string, skillId: string, updates: { name?: string; description?: string; body?: string }): Promise<AgentSkill> {
@@ -1155,11 +1419,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     name: string,
     memberAgentIds: string[]
   ): Promise<Group> {
+    this.validateGroupMembers(memberAgentIds);
     let now = new Date();
     let group: GroupRecord = {
       id: groupId,
       name,
       memberAgentIds,
+      multiAuthor: true,
       workspaceId,
       created: now,
       updated: now,
@@ -1174,6 +1440,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     updates: {
       name?: string;
       memberAgentIds?: string[];
+      multiAuthor?: boolean;
     }
   ): Promise<Group> {
     let group = this.storage.groups.get(id);
@@ -1187,6 +1454,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       updated: new Date(),
     };
 
+    this.validateGroupMembers(updated.memberAgentIds);
     this.storage.groups.put(updated);
     return updated;
   }
@@ -1198,6 +1466,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return null;
+  }
+
+  /** A group contains one through six distinct bots owned by this account. */
+  validateGroupMembers(ids: string[]): void {
+    if (ids.length < 1 || ids.length > 6 || new Set(ids).size !== ids.length || ids.some(id => !this.storage.agents.get(id))) {
+      throw new Error('Choose one through six distinct bots that you own.');
+    }
   }
 
   async deleteGroupRecord(id: string): Promise<string | null> {
@@ -1220,6 +1495,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     record.title = title;
     this.storage.gadgets.put(record);
+    this.#attentionChanged();
   }
 
   async updatePinned(gadgetId: string, pinned: boolean) {
@@ -1238,6 +1514,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async newGadget(id: string, title: string): Promise<void> {
     let created = new Date();
     this.storage.gadgets.put({id, title, created});
+    if (this.storage.attentionActivated.get()) {
+      this.#queueAttentionBootstrap(id);
+      this.#attentionChanged();
+      await this.#scheduleAttentionAlarm();
+    }
   }
 
   async ensureGadgetRegistered(id: string, title: string): Promise<void> {
@@ -1259,6 +1540,356 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async deleteGadget(id: string): Promise<void> {
     this.storage.gadgets.delete(id);
     this.storage.outputs.byWorkspace.delete(id);
+    this.#purgeWorkspaceAttention(id);
+    await this.#scheduleAttentionAlarm();
+  }
+
+  #attentionChanged(): void {
+    this.storage.attentionRevision.put(this.storage.attentionRevision.get() + 1);
+  }
+
+  #attentionAgent(workspaceId: string): AgentRecord | undefined {
+    for (const agent of this.storage.agents.list()) {
+      if (agent.workspaceId === workspaceId) return agent;
+    }
+  }
+
+  #purgeWorkspaceAttention(workspaceId: string): void {
+    this.storage.attention.byWorkspace.delete(workspaceId);
+    this.storage.attentionReceipts.delete(workspaceId);
+    this.storage.attentionBootstrapJobs.delete(workspaceId);
+    this.#prunePushCandidates();
+    this.#attentionChanged();
+  }
+
+  /** Backend-only full replacement from an owned workspace, never from browser-supplied ownership. */
+  async syncWorkspaceAttention(workspaceId: string, snapshot: WorkspaceAttentionSnapshot): Promise<void> {
+    const workspace = this.storage.gadgets.get(workspaceId);
+    const previous = this.storage.attentionReceipts.get(workspaceId);
+    if (!workspace || workspace.owner || previous?.deletedAgent ||
+        snapshot.revision <= (previous?.revision ?? -1)) return;
+    if (snapshot.entries.length > WORKSPACE_ATTENTION_LIMIT) {
+      throw new Error("Attention snapshot exceeds the workspace limit.");
+    }
+    this.storage.transaction(() => {
+      const agentId = this.#attentionAgent(workspaceId)?.id;
+      const present = new Set(snapshot.entries.map(entry => JSON.stringify([workspaceId, entry.sourceId])));
+      // Materialize before mutating indexes; deletes invalidate typed-storage's KV cursors.
+      for (const record of Array.from(this.storage.attention.byWorkspace.get(workspaceId))) {
+        if (!present.has(record.id)) this.storage.attention.delete(record.id);
+      }
+      this.storage.attentionReceipts.put({workspaceId, revision: snapshot.revision,
+        complete: snapshot.complete, prohibitPush: snapshot.prohibitPush, roster: snapshot.roster});
+      if (snapshot.complete) this.storage.attentionBootstrapJobs.delete(workspaceId);
+      else if (this.storage.attentionActivated.get()) this.#queueAttentionBootstrap(workspaceId);
+      if (snapshot.truncated) this.storage.attentionTruncated.put(true);
+      const fresh: PushCandidate[] = [];
+      for (const entry of snapshot.entries.toSorted((a, b) => a.version - b.version)) {
+        const id = JSON.stringify([workspaceId, entry.sourceId]);
+        const old = this.storage.attention.get(id);
+        // The workspace watermark also fences globally pruned records, without unbounded tombstones.
+        if (entry.version <= (old?.version ?? previous?.revision ?? -1)) continue;
+        const order = this.storage.attentionOrder.get() + 1;
+        this.storage.attentionOrder.put(order);
+        // Explicit projection: never persist source prose or source-asserted owner/bot identities.
+        const {sourceId, kind, state, version, updatedAt, chatId, sequence, runId, actionId, reason, notify} = entry;
+        this.storage.attention.put({id, workspaceId, agentId, order, seenVersion: old?.seenVersion,
+          sourceId, kind, state, version, updatedAt, chatId, sequence, runId, actionId, reason, notify});
+        if (notify) fresh.push({itemId: id, version});
+      }
+      let retained = 0;
+      for (const record of Array.from(this.storage.attention.byOrder.list({reverse: true}))) {
+        if (++retained > OWNER_ATTENTION_LIMIT) {
+          this.storage.attention.delete(record.id);
+          this.storage.attentionTruncated.put(true);
+        }
+      }
+      if (fresh.length) {
+        for (const device of Array.from(this.storage.pushDevices.list())) {
+          const candidates = fresh.filter(candidate => this.#eligibleAttention(candidate, device));
+          if (!candidates.length) continue;
+          const old = this.storage.pushJobs.get(device.id);
+          const merged = new Map(old?.candidates.filter(candidate => this.#eligibleAttention(candidate, device))
+            .map(candidate => [candidate.itemId, candidate]));
+          for (const candidate of candidates) {
+            merged.delete(candidate.itemId);
+            merged.set(candidate.itemId, candidate);
+          }
+          this.storage.pushJobs.put({id: device.id, generation: device.generation,
+            revision: this.#nextPushRevision(), candidates: [...merged.values()].slice(-20),
+            attempt: old?.attempt ?? 0, due: old?.due ?? Date.now() + 1_000});
+          this.storage.pushDevices.put({...device, delivery: "pending"});
+        }
+      }
+      // Merge before pruning: replacing the last old version must not reset its retry budget.
+      this.#prunePushCandidates();
+      this.#attentionChanged();
+    });
+    await this.#scheduleAttentionAlarm();
+  }
+
+  /** Return at most thirty retained versions; reading and delivery never acknowledge them. */
+  async listAttention(beforeOrder?: number): Promise<AttentionPage> {
+    if (!this.storage.attentionActivated.get()) {
+      this.storage.attentionActivated.put(true);
+      this.#attentionChanged();
+      await this.#scheduleAttentionAlarm();
+    }
+    const agents = new Map([...this.storage.agents.list()].map(agent => [agent.workspaceId, agent.id]));
+    const entries: AttentionItem[] = [];
+    for (const record of this.storage.attention.byOrder.list({end: beforeOrder, reverse: true, limit: 31})) {
+      const workspace = this.storage.gadgets.get(record.workspaceId);
+      if (!workspace || workspace.owner) continue;
+      const {notify: _notify, seenVersion, agentId: _agentId, ...item} = record;
+      entries.push({...item, agentId: agents.get(record.workspaceId), workspaceTitle: workspace.title,
+        seen: seenVersion === record.version});
+    }
+    const hasMore = entries.length > 30;
+    if (hasMore) entries.pop();
+    let unseen = 0;
+    for (const record of this.storage.attention.list()) {
+      if (record.seenVersion !== record.version) ++unseen;
+    }
+    return {entries, nextBeforeOrder: hasMore ? entries.at(-1)!.order : undefined, unseen,
+      catchingUp: !this.storage.attentionScanComplete.get() ||
+        [...this.storage.attentionBootstrapJobs.list({limit: 1})].length > 0,
+      truncated: this.storage.attentionTruncated.get()};
+  }
+
+  /** Acknowledge only the version actually displayed, not a newer concurrent transition. */
+  async markAttentionSeen(id: string, version: number): Promise<void> {
+    const record = this.storage.attention.get(id);
+    if (!record || record.version !== version || record.seenVersion === version) return;
+    this.storage.attention.put({...record, seenVersion: version});
+    this.#prunePushCandidates();
+    this.#attentionChanged();
+    await this.#scheduleAttentionAlarm();
+  }
+
+  /** Disposable invalidation subscription, including an initial revision on every connection. */
+  async subscribeAttention(subscriber: RpcStub<AttentionSubscriber>): Promise<RpcStub<{}>> {
+    await this.listAttention();
+    subscriber = subscriber.dup();
+    const revision = this.storage.attentionRevision;
+    let disposed = false;
+    let pending = false;
+    const unsubscribe = () => {
+      if (disposed) return;
+      disposed = true;
+      revision.unsubscribe(listener);
+      subscriber[Symbol.dispose]();
+    };
+    const listener = {update: () => {
+      if (disposed || pending) return;
+      pending = true;
+      // Storage notifies before writing, including in transactions that may roll back.
+      // Coalesce the synchronous stack and read only its committed revision afterward.
+      Promise.resolve().then(() => {
+        pending = false;
+        if (!disposed) return subscriber.changed(revision.get());
+      }).catch(unsubscribe);
+    }};
+    revision.subscribe(listener);
+    listener.update();
+    return new RpcStub<{}>(new class extends RpcTarget {
+      [Symbol.dispose]() { unsubscribe(); }
+    }());
+  }
+
+  /** Public VAPID configuration and transport receipts, never subscription endpoints or secrets. */
+  async getPushSettings(): Promise<PushSettings> {
+    const config = readPushConfig(this.env);
+    return {available: !!config, applicationServerKey: config?.publicKey,
+      devices: [...this.storage.pushDevices.list()].map(({id, createdAt, delivery}) => ({id, createdAt, delivery}))};
+  }
+
+  /** Enroll or rotate one browser device without scheduling historical notifications. */
+  async registerPushSubscription(subscription: PushSubscriptionData): Promise<{id: string}> {
+    validatePushSubscription(subscription);
+    if (!readPushConfig(this.env)) throw new Error("Push notifications are unavailable.");
+    const devices = [...this.storage.pushDevices.list()];
+    const old = devices.find(device => device.subscription.endpoint === subscription.endpoint);
+    if (old && old.subscription.keys.auth === subscription.keys.auth &&
+        old.subscription.keys.p256dh === subscription.keys.p256dh) return {id: old.id};
+    if (!old && devices.length >= 5) throw new Error("At most five push devices may be registered.");
+    const id = old?.id ?? crypto.randomUUID();
+    const {endpoint, keys: {p256dh, auth}} = subscription;
+    this.storage.pushDevices.put({id, generation: (old?.generation ?? 0) + 1,
+      subscription: {endpoint, keys: {p256dh, auth}}, createdAt: new Date(Date.now()), delivery: "idle"});
+    this.storage.pushJobs.delete(id);
+    this.storage.attentionActivated.put(true);
+    this.#attentionChanged();
+    await this.#scheduleAttentionAlarm();
+    return {id};
+  }
+
+  /** Revoke this owner's opaque device ID, fencing both pending encryption and late responses. */
+  async removePushSubscription(id: string): Promise<void> {
+    if (!this.storage.pushDevices.delete(id)) return;
+    this.storage.pushJobs.delete(id);
+    this.#attentionChanged();
+    await this.#scheduleAttentionAlarm();
+  }
+
+  #nextPushRevision(): number {
+    const revision = this.storage.pushRevision.get() + 1;
+    this.storage.pushRevision.put(revision);
+    return revision;
+  }
+
+  #eligibleAttention(candidate: PushCandidate, device: PushDevice): AttentionRecord | undefined {
+    const item = this.storage.attention.get(candidate.itemId);
+    if (!item || item.version !== candidate.version || item.seenVersion === item.version ||
+        !item.notify || item.state === "resolved" || item.state === "accepting") return;
+    const workspace = this.storage.gadgets.get(item.workspaceId);
+    const receipt = this.storage.attentionReceipts.get(item.workspaceId);
+    if (!workspace || workspace.owner || !receipt || receipt.prohibitPush || receipt.deletedAgent) return;
+    const agent = this.#attentionAgent(item.workspaceId);
+    if ((item.agentId && agent?.id !== item.agentId) || agent?.notifyOnUpdates === false) return;
+    const enableSince = agent ? this.storage.pushBotConsent.get(agent.id)?.enableSince ?? 0 : 0;
+    // Compare canonical event time, not snapshot arrival: retries can cross consent boundaries.
+    if (!(item.updatedAt.getTime() >= Math.max(device.createdAt.getTime(), enableSince))) return;
+    return item;
+  }
+
+  #prunePushCandidates(): void {
+    for (const job of Array.from(this.storage.pushJobs.list())) {
+      const device = this.storage.pushDevices.get(job.id);
+      const candidates = device ? job.candidates.filter(candidate => this.#eligibleAttention(candidate, device)) : [];
+      if (candidates.length === job.candidates.length) continue;
+      if (candidates.length) {
+        this.storage.pushJobs.put({...job, candidates, revision: this.#nextPushRevision()});
+      } else {
+        this.storage.pushJobs.delete(job.id);
+        if (device) this.storage.pushDevices.put({...device, delivery: "idle"});
+      }
+    }
+  }
+
+  #queueAttentionBootstrap(workspaceId: string): void {
+    const receipt = this.storage.attentionReceipts.get(workspaceId);
+    if (receipt?.complete || receipt?.deletedAgent || this.storage.attentionBootstrapJobs.get(workspaceId)) return;
+    this.storage.attentionBootstrapJobs.put({workspaceId, attempt: 0, due: Date.now() + 1_000});
+  }
+
+  // One alarm owns both queues. Compute synchronously, so another RPC cannot insert an earlier job
+  // between reading the queues and writing the alarm.
+  #scheduleAttentionAlarm(): Promise<void> {
+    let due = this.storage.attentionActivated.get() && !this.storage.attentionScanComplete.get()
+      ? Date.now() + 1_000 : Infinity;
+    for (const job of this.storage.attentionBootstrapJobs.byDue.list({limit: 1})) {
+      due = Math.min(due, job.due);
+      break;
+    }
+    for (const job of this.storage.pushJobs.list()) due = Math.min(due, job.due);
+    return Number.isFinite(due)
+      ? this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, due))
+      : this.ctx.storage.deleteAlarm();
+  }
+
+  /** Drain bounded owner bootstrap work and at most one generic push job per enrolled device. */
+  async alarm(): Promise<void> {
+    if (this.storage.attentionActivated.get() && !this.storage.attentionScanComplete.get()) {
+      const page = [...this.storage.gadgets.list({startAfter: this.storage.attentionScanCursor.get() || undefined, limit: 16})];
+      for (const workspace of page) {
+        if (!workspace.owner) this.#queueAttentionBootstrap(workspace.id);
+      }
+      if (page.length) this.storage.attentionScanCursor.put(page.at(-1)!.id);
+      this.storage.attentionScanComplete.put(page.length < 16);
+      this.#attentionChanged();
+    }
+    // Persist a future wake-up before external I/O; retries do not depend on an open browser.
+    await this.#scheduleAttentionAlarm();
+    try {
+      const now = Date.now();
+      const bootstrap: AttentionBootstrapJob[] = [];
+      for (const job of this.storage.attentionBootstrapJobs.byDue.list({end: now + 1, limit: 16})) {
+        bootstrap.push(job);
+        if (bootstrap.length === 16) break;
+      }
+      await Promise.all(bootstrap.map(async job => {
+        const workspace = this.storage.gadgets.get(job.workspaceId);
+        if (!workspace || workspace.owner) {
+          this.#purgeWorkspaceAttention(job.workspaceId);
+          return;
+        }
+        this.storage.attentionBootstrapJobs.put({...job, attempt: job.attempt + 1,
+          due: Date.now() + attentionRetryDelay(job.attempt + 1)});
+        try {
+          const overseers = this.ctx.exports.OverseerDurableObject;
+          await attentionRpc(overseers.get(overseers.idFromString(job.workspaceId))
+            .initializeAttention(this.ctx.id.toString()));
+          // Only a complete snapshot is a receipt; a successful start is not completed backfill.
+        } catch {
+          logger.warn("attention bootstrap will retry", {event: "attention.bootstrap.failed"});
+        }
+      }));
+      await Promise.all([...this.storage.pushJobs.list()].filter(job => job.due <= Date.now())
+        .map(job => this.#drainPush(job)));
+    } finally {
+      await this.#scheduleAttentionAlarm();
+    }
+  }
+
+  async #drainPush(job: PushJob): Promise<void> {
+    const device = this.storage.pushDevices.get(job.id);
+    if (!device || device.generation !== job.generation) return;
+    const current = () => this.storage.pushDevices.get(job.id)?.generation === job.generation &&
+      this.storage.pushJobs.get(job.id)?.revision === job.revision;
+    const finish = (delivery: PushDevice["delivery"]) => {
+      if (!current()) return;
+      this.storage.pushJobs.delete(job.id);
+      this.storage.pushDevices.put({...device, delivery});
+      this.#attentionChanged();
+    };
+    const config = readPushConfig(this.env);
+    if (!config || job.attempt >= 6) { finish("failed"); return; }
+    job = {...job, attempt: job.attempt + 1, due: Date.now() + attentionRetryDelay(job.attempt + 1)};
+    this.storage.pushJobs.put(job);
+    let status: number | undefined;
+    try {
+      const request = await createPushRequest(device.subscription, config);
+      let sourceFailed = false;
+      // Crypto and source RPC yield: recheck device generation, job revision, local ownership,
+      // exact source version, seen state and bot preference immediately before the fetch.
+      for (const candidate of job.candidates) {
+        if (!current()) return;
+        const item = this.#eligibleAttention(candidate, device);
+        if (!item) continue;
+        try {
+          const overseers = this.ctx.exports.OverseerDurableObject;
+          if (!await attentionRpc(overseers.get(overseers.idFromString(item.workspaceId))
+              .canNotifyAttention(this.ctx.id.toString(), item.sourceId, item.version))) continue;
+        } catch {
+          sourceFailed = true;
+          continue;
+        }
+        if (!current()) return;
+        if (!this.#eligibleAttention(candidate, device)) continue;
+        const response = await fetch(request, {redirect: "manual", signal: AbortSignal.timeout(10_000)});
+        status = response.status;
+        // Body disposal must not change a transport receipt, and its errors may contain secrets.
+        if (response.body) await response.body.cancel().catch(() => {});
+        if (status === 404 || status === 410) {
+          if (this.storage.pushDevices.get(job.id)?.generation === job.generation) {
+            await this.removePushSubscription(job.id);
+          }
+          return;
+        }
+        if (response.ok) { finish("accepted"); return; }
+        if ((status >= 300 && status < 400) || status === 401 || status === 403) { finish("failed"); return; }
+        throw new Error("Push service rejected delivery.");
+      }
+      if (sourceFailed) throw new Error("Attention source check failed.");
+      finish("idle");
+      return;
+    } catch {
+      // Never log caught errors: fetch/crypto errors can contain the secret endpoint or keys.
+      logger.warn("attention push attempt failed", {event: "attention.push.failed", status});
+      if (job.attempt >= 6) finish("failed");
+    }
+    // A lost network response may retry an accepted push. The encrypted generic payload's stable
+    // tag coalesces duplicates; acceptance is neither exactly-once delivery nor a seen receipt.
   }
 
   /**

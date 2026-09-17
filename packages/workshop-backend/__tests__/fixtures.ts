@@ -101,5 +101,7 @@ export async function openFakeOverseer(
       }),
     },
   } satisfies Pick<OverseerDurableObject, "open"> & { impl: object };
-  return overseer.open(userId, `${userId}-profile`, new NativeRpcStub<() => void>(() => {}));
+  // This is a direct call, not RPC: open() retains a dup, but no RPC boundary owns the original.
+  using notifyClosed = new NativeRpcStub<() => void>(() => {});
+  return await overseer.open(userId, `${userId}-profile`, notifyClosed);
 }

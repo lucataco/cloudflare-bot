@@ -194,18 +194,20 @@ export function legacyChatBaseVersion(
 }
 
 /**
- * Earliest turn a checkpoint cannot absorb, or undefined if none. A pending connection request
- * carries live accept/deny state that only its own message can answer, so the boundary stays behind
- * it. Provisional gadget creations and binding additions need no such protection: the checkpoint
- * records them, and the registry rows they name are untouched by compaction.
+ * Earliest turn a checkpoint cannot absorb, or undefined if none. A pending connection request or
+ * pending/accepting agent proposal carries live decision state that only its own message can answer,
+ * so the boundary stays behind it. Provisional gadget creations and binding additions need no such
+ * protection: the checkpoint records them, and the registry rows they name are untouched by compaction.
  */
 export function findProtectedFromSequence(messages: AiChatMessage[]): number | undefined {
   let protectedIndex = messages.findIndex(
-      message => message.type === "connectionRequest" && message.state === "pending");
+      message => (message.type === "connectionRequest" && message.state === "pending") ||
+          (message.type === "agentProposal" &&
+           (message.state === "pending" || message.state === "accepting")));
   if (protectedIndex < 0) return undefined;
 
   // Protect from the start of the turn that raised it, so the tail keeps the exchange explaining
-  // what the user is being asked to connect.
+  // what the user is being asked to connect or save.
   for (let i = protectedIndex; i >= 0; --i) {
     if (startsAgentTurn(messages[i])) return messages[i].sequence;
   }

@@ -36,7 +36,7 @@ describe("assertChatAttachmentSupportedByProvider", () => {
   });
 
   it("enforces the per-file byte limit", () => {
-    expect(() => assertChatAttachmentSupportedByProvider(undefined, "text/plain", 1024 * 1024 + 1))
+    expect(() => assertChatAttachmentSupportedByProvider(undefined, "text/plain", 4 * 1024 * 1024 + 1))
       .toThrow("Chat attachment is too large.");
   });
 });

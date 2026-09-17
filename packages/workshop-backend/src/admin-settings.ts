@@ -13,6 +13,7 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import type { AutoReviewBoundary } from '@gadgets/workshop-shared/auto-review';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -40,6 +41,8 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // exactly once per blueprint: an admin who then removes a format keeps it removed, while a
       // deployment that installed before curation existed still gets promoted.
       promotedFormatBlueprints: <string[]>[],
+      // Security decisions use a strongly consistent read, never the eventual KV mirror.
+      autoReviewBoundaries: <AutoReviewBoundary[]>[],
     },
   });
 }
@@ -159,6 +162,21 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   async #writeFeaturedSnapshot(): Promise<void> {
     let featured = [...this.storage.featuredBlueprints.list()];
     await this.env.BLUEPRINTS.put(FEATURED_BLUEPRINTS_KEY, serializeFeaturedBlueprints(featured));
+  }
+
+  /** Authoritative deployment floor for automatic action application. */
+  async getAutoReviewBoundaries(): Promise<AutoReviewBoundary[]> {
+    return this.storage.autoReviewBoundaries.get();
+  }
+
+  /** Replace the bounded exact-match policy; null is the only wildcard. */
+  async setAutoReviewBoundaries(boundaries: AutoReviewBoundary[]): Promise<void> {
+    if (boundaries.length > 100 || boundaries.some(rule =>
+      (rule.vendorId !== null && !/^[a-z0-9_-]{1,100}$/.test(rule.vendorId)) ||
+      (rule.tag !== null && (!rule.tag.trim() || rule.tag.length > 200)))) {
+      throw new Error('Invalid auto-review boundary scope.');
+    }
+    this.storage.autoReviewBoundaries.put(boundaries);
   }
 
   // Reconcile the mirrored featured list to match the authoritative bit stored in the owner
@@ -562,6 +580,13 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 // connector/resource availability; authentication config stays env-var driven.
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
+  getAutoReviewBoundaries(): Promise<AutoReviewBoundary[]> {
+    return this.admin.getAutoReviewBoundaries();
+  }
+
+  setAutoReviewBoundaries(boundaries: AutoReviewBoundary[]): Promise<void> {
+    return this.admin.setAutoReviewBoundaries(boundaries);
+  }
   /**
    * `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
    * resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.

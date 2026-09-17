@@ -1,8 +1,13 @@
+import { previewGrokBot } from "./grok-import.js";
+import * as Y from "yjs";
+import { parseBotBlueprint } from "./bot-blueprint.js";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
+import { isDeepStrictEqual } from "node:util";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, AgentProfile, Group, AgentRoutine, AgentRoutineSchedule, AgentSkill, AgentMemoryNote, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
+import type { AttentionPage, AttentionSubscriber, PushSettings, PushSubscriptionData } from "@gadgets/workshop-shared/api";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
@@ -85,13 +90,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     this.overseers = this.ctx.exports.OverseerDurableObject;
     this.adminSettings = this.ctx.exports.AdminSettings;
     this.users = this.ctx.exports.UserDurableObject;
-    this.computerSessions = this.ctx.exports.ComputerSessionImpl;
   }
 
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   private users: DurableObjectNamespace<UserDurableObject>;
-  private computerSessions: DurableObjectNamespace<import("./computer-session").ComputerSessionImpl>;
 
   #userId: DurableObjectId;
 
@@ -123,6 +126,24 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   whoami(): Promise<AiChatAuthorInfo> {
     // Pure-read delegations retry once across a user-DO reset (see retryOnDoReset); writes never do.
     return retryOnDoReset(() => this.#user.whoami());
+  }
+  listAttention(beforeOrder?: number): Promise<AttentionPage> {
+    return this.#user.listAttention(beforeOrder);
+  }
+  markAttentionSeen(id: string, version: number): Promise<void> {
+    return this.#user.markAttentionSeen(id, version);
+  }
+  subscribeAttention(subscriber: RpcStub<AttentionSubscriber>): Promise<RpcStub<{}>> {
+    return this.#user.subscribeAttention(subscriber);
+  }
+  getPushSettings(): Promise<PushSettings> {
+    return this.#user.getPushSettings();
+  }
+  registerPushSubscription(subscription: PushSubscriptionData): Promise<{id: string}> {
+    return this.#user.registerPushSubscription(subscription);
+  }
+  removePushSubscription(id: string): Promise<void> {
+    return this.#user.removePushSubscription(id);
   }
   setOwnDisplayName(name: string): Promise<void> {
     return this.#user.setOwnDisplayName(name);
@@ -314,6 +335,53 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return retryOnDoReset(() => this.#user.listAgents());
   }
 
+  seedAgents(yaml: string) {
+    return this.#user.seedAgents(yaml);
+  }
+
+  getAutoReviewBoundaries() {
+    return this.ctx.exports.AdminSettings.getByName('').getAutoReviewBoundaries();
+  }
+
+  previewGrokBot(url: string) {
+    return previewGrokBot(url);
+  }
+
+  async markAgentRead(id: string, replyTimestamp: number): Promise<void> {
+    return this.#user.markAgentRead(id, replyTimestamp);
+  }
+
+  async duplicateAgent(id: string): Promise<AgentProfile> {
+    const [source, bot] = await Promise.all([this.#user.getAgent(id), this.#user.getBotBlueprint(id)]);
+    if (!source) throw new Error("Agent not found");
+    return this.#user.installBotBlueprint(this.overseers.newUniqueId().toString(),
+      {...bot, name: `${bot.name} (copy)`}, source.defaultModelId, source.notifyOnUpdates);
+  }
+
+  async publishAgentBlueprint(id: string): Promise<string> {
+    const bot = parseBotBlueprint(await this.#user.getBotBlueprint(id));
+    const now = new Date();
+    const metadata: BlueprintPublicInfo["metadata"] = {title: bot.name, description: bot.title,
+      bot, author: await this.#user.whoami(), created: now, lastUpdated: now, version: 1, bindings: {}};
+    // Use the existing archive/import path, including ownership, download and deletion support.
+    // The empty code snapshot deliberately contains none of the bot's private workspace files.
+    const doc = new Y.Doc();
+    const content = await new Response(new Response(Y.encodeStateAsUpdateV2(doc)).body!
+      .pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+    doc.destroy();
+    return this.importBlueprint(buildBlueprintArchiveStream(metadata, new Response(content).body!, content.byteLength));
+  }
+
+  async newAgentFromBlueprint(blueprintId: string, defaultModelId: string | null): Promise<AgentProfile> {
+    const record = await readBlueprintKvRecord(this.env, blueprintId);
+    if (!record?.metadata.bot) throw new Error("Bot template not found.");
+    const bot = parseBotBlueprint(record.metadata.bot);
+    if (defaultModelId !== null && !(await this.#user.listModels()).some(model => model.id === defaultModelId)) {
+      throw new Error("Choose an available model.");
+    }
+    return this.#user.installBotBlueprint(this.overseers.newUniqueId().toString(), bot, defaultModelId);
+  }
+
   async createAgent(
     name: string,
     title: string,
@@ -361,6 +429,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       avatar?: AvatarImage | null;
       defaultBindings?: number[];
       notifyOnUpdates?: boolean;
+      hidden?: boolean;
     }
   ): Promise<AgentProfile> {
     let agent = await this.#user.updateAgentRecord(id, updates);
@@ -391,19 +460,18 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async createRoutine(agentId: string, name: string, prompt: string, schedule: AgentRoutineSchedule, paused: boolean = true): Promise<AgentRoutine> {
-    let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
-    if (!agent) throw new Error("Agent not found");
-    let routine = await retryOnDoReset(() => this.#user.createRoutine(agentId, name, prompt, schedule, paused));
-    if (!paused) {
-      let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
-      let hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
-      await this.#user.setRoutineHookId(routine.id, hookId);
-      routine.hookId = hookId;
-    }
-    return routine;
+    // Creation allocates an ID, so a lost response must not automatically retry the write.
+    let routine = await this.#user.createRoutine(agentId, name, prompt, schedule, true);
+    if (paused) return routine;
+    return this.#updateRoutine(agentId, routine.id, { paused: false }, true);
   }
 
   async updateRoutine(agentId: string, routineId: string, updates: { name?: string; prompt?: string; schedule?: AgentRoutineSchedule; paused?: boolean }): Promise<AgentRoutine> {
+    return this.#updateRoutine(agentId, routineId, updates);
+  }
+
+  async #updateRoutine(agentId: string, routineId: string,
+      updates: Parameters<AuthenticatedApi["updateRoutine"]>[2], deleteOnFailure = false): Promise<AgentRoutine> {
     let oldRoutine = await this.#user.getRoutineById(routineId);
     if (!oldRoutine || oldRoutine.agentId !== agentId) {
       throw new Error(`Routine not found: ${routineId}`);
@@ -411,34 +479,63 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (updates.schedule?.kind === "interval" && updates.schedule.everyMs < 60000) {
       throw new Error("Interval must be at least 60 seconds");
     }
-    let routine = await retryOnDoReset(() => this.#user.updateRoutine(agentId, routineId, updates));
-    let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
-    if (!agent) return routine;
-    let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
-    if (updates.paused !== undefined && oldRoutine.paused !== routine.paused) {
-      if (routine.paused && routine.hookId !== undefined) {
-        await overseer.unregisterRoutine(routine.hookId);
-        await this.#user.setRoutineHookId(routine.id, undefined);
-        routine.hookId = undefined;
-      } else if (!routine.paused) {
-        let hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
-        await this.#user.setRoutineHookId(routine.id, hookId);
-        routine.hookId = hookId;
-      }
+    let paused = updates.paused ?? oldRoutine.paused;
+    // Firings reread routine metadata; metadata edits and unchanged saves must preserve cadence.
+    let register = !paused && (oldRoutine.paused || oldRoutine.hookId === undefined ||
+        (updates.schedule !== undefined && !isDeepStrictEqual(updates.schedule, oldRoutine.schedule)));
+    // Persist the decision before any registration I/O. Keep the old hook ID until teardown so a
+    // concurrent pause can also fence it locally before acknowledging the caller.
+    let {routine, revision} = await this.#user.updateRoutine(agentId, routineId,
+        register ? {...updates, paused: true} : updates, oldRoutine.revision ?? 0);
+    // Publication can add a hook without changing the inspected revision. Tear down only the
+    // hook captured by this atomic update, not the pre-read or a later replacement's hook.
+    if (!register && !(routine.paused && routine.hookId !== undefined)) {
+      return routine;
     }
-    return routine;
+    let overseer: DurableObjectStub<OverseerDurableObject> | undefined;
+    let hookId: number | undefined;
+    let oldHookRemoved = routine.hookId === undefined;
+    try {
+      let agent = await retryOnDoReset(() => this.#user.getAgent(agentId));
+      if (!agent) throw new Error("Agent not found");
+      // Repeat can be configured before the bot's workspace has ever been opened.
+      using _workspace = await this.#openGadgetInternal(agent.workspaceId);
+      overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
+      if (routine.hookId !== undefined) {
+        await overseer.unregisterRoutine(routine.hookId);
+        oldHookRemoved = true;
+      }
+      let cleared = await this.#user.finishRoutineRegistration(routineId, revision, undefined);
+      if (!cleared) throw new Error("Routine changed during update. Reload and retry.");
+      if (!register) return cleared;
+      hookId = await overseer.registerRoutine(routine.id, routine.name, routine.prompt, routine.schedule);
+      let finished = await this.#user.finishRoutineRegistration(routineId, revision, hookId);
+      if (!finished) throw new Error("Routine changed during update. Reload and retry.");
+      return finished;
+    } catch (error) {
+      if (hookId !== undefined) await overseer!.unregisterRoutine(hookId);
+      // CAS also covers a lost completion response: clean up only our registration, never a newer
+      // pause, replacement or deletion. An interrupted/failed update remains paused for user retry.
+      if (oldHookRemoved) {
+        await this.#user.finishRoutineRegistration(routineId, revision, undefined);
+        if (deleteOnFailure) await this.#user.deleteRoutine(agentId, routineId, revision);
+      }
+      throw error;
+    }
   }
 
   async deleteRoutine(agentId: string, routineId: string): Promise<void> {
-    let routine = await this.#user.getRoutineById(routineId);
-    if (routine && routine.hookId !== undefined) {
-      let agent = await retryOnDoReset(() => this.#user.listAgents()).then(agents => agents.find(a => a.id === agentId));
+    let routine = await this.#user.deleteRoutine(agentId, routineId);
+    if (!routine) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    if (routine.hookId !== undefined) {
+      let agent = await retryOnDoReset(() => this.#user.getAgent(agentId));
       if (agent) {
         let overseer = this.overseers.get(this.overseers.idFromString(agent.workspaceId));
         await overseer.unregisterRoutine(routine.hookId);
       }
     }
-    return retryOnDoReset(() => this.#user.deleteRoutine(agentId, routineId));
   }
 
   async listSkills(agentId: string): Promise<AgentSkill[]> {
@@ -478,6 +575,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async createGroup(name: string, memberAgentIds: string[]): Promise<Group> {
+    await this.#user.validateGroupMembers(memberAgentIds);
     let groupId = crypto.randomUUID();
     let workspaceId = this.overseers.newUniqueId().toString();
 
@@ -506,6 +604,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     updates: {
       name?: string;
       memberAgentIds?: string[];
+      multiAuthor?: boolean;
     }
   ): Promise<Group> {
     let group = await this.#user.updateGroupRecord(id, updates);
@@ -618,6 +717,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async importBlueprint(archive: ReadableStream<Uint8Array>): Promise<string> {
     let { metadata, contentLength, content } = await parseBlueprintArchive(archive);
     delete metadata.screenshot;
+    if (metadata.bot !== undefined) metadata.bot = parseBotBlueprint(metadata.bot);
     let blueprintId = randomBlueprintId();
     let r2Key = `${blueprintId}/${metadata.version}`;
 
@@ -661,6 +761,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // 1. Read blueprint from KV.
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) throw new Error("Blueprint not found.");
+    if (kvRecord.metadata.bot) throw new Error("Use Add to my bots to install this template.");
 
     // 2. Read gzip-compressed Yjs doc from R2 and decompress.
     let codeBytes = await readBlueprintContent(this.env, blueprintId, kvRecord.metadata.version);

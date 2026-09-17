@@ -1,43 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
-import { resolveComputerSession } from "../src/overseer.js";
+import { describe, expect, it } from "vitest";
+import { computerUrlLabel } from "../src/computer-session";
 
-vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
-
-describe("resolveComputerSession", () => {
-  it("throws binding message when ComputerSessionImpl is missing", () => {
-    const ctx = { exports: {} };
-    expect(() => resolveComputerSession(ctx as any, "owner-id", "agent-id")).toThrow(
-      "Computer sessions require the BROWSER binding to be configured."
-    );
+describe("computer URL privacy", () => {
+  it("keeps a useful path without credentials, query, or capability fragments", () => {
+    expect(computerUrlLabel("https://user:password@example.com/account/login?token=secret#capability"))
+      .toBe("https://example.com/account/login");
   });
 
-  it("returns ComputerSessionWrapper when export is present", () => {
-    const mockStub = { navigate: vi.fn() };
-    const ctx = {
-      exports: {
-        ComputerSessionImpl: {
-          idFromName: () => "mock-id",
-          get: () => mockStub,
-        },
-      },
-    };
+  it.each([null, "not a URL", "javascript:alert(1)", "data:text/plain,secret", "file:///secret"])(
+    "does not expose an unsupported URL: %s", value => {
+      expect(computerUrlLabel(value)).toBeNull();
+    });
 
-    const result = resolveComputerSession(ctx as any, "owner-id", "agent-id");
-    expect(result).toBeDefined();
-  });
-
-  it("propagates idFromName errors without rewriting", () => {
-    const ctx = {
-      exports: {
-        ComputerSessionImpl: {
-          idFromName: () => {
-            throw new Error("Proxy could not be serialized");
-          },
-        },
-      },
-    };
-
-    expect(() => resolveComputerSession(ctx as any, "owner-id", "agent-id")).toThrow("Proxy could not be serialized");
-    expect(() => resolveComputerSession(ctx as any, "owner-id", "agent-id")).not.toThrow(/BROWSER binding/);
+  it("preserves the blank page label", () => {
+    expect(computerUrlLabel("about:blank")).toBe("about:blank");
   });
 });

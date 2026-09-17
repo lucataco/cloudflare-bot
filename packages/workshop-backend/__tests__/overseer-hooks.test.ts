@@ -15,6 +15,7 @@ function makeOverseer(
   Object.assign(overseer, {
     env: { BLUEPRINTS: { get: getConfig } },
     impl: {
+      assertAutomationAllowed: () => {},
       storage: {
         boundHooks: { get: () => hook && ({ ...hook, gatekeeperId: 1 }) },
         gatekeepers: {
@@ -93,6 +94,31 @@ describe("OverseerDurableObject.startHook", () => {
         async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG), null);
 
     await expect(overseer.startHook(1)).rejects.toThrow("Hook has been deleted or disabled.");
+  });
+
+  it("rechecks workspace admission after the admin-config await", async () => {
+    let config = Promise.withResolvers<string | null>();
+    let overseer = makeOverseer(() => config.promise);
+    let paused = false;
+    Object.assign(overseer["impl"], {
+      assertAutomationAllowed() {
+        if (paused) throw new Error("Workspace automation is paused.");
+      },
+    });
+    let delivery = overseer.startHook(1);
+    paused = true;
+    config.resolve(serializeAdminConfig(DEFAULT_ADMIN_CONFIG));
+    await expect(delivery).rejects.toThrow("automation is paused");
+  });
+
+  it("rechecks hook enablement after the admin-config await", async () => {
+    let config = Promise.withResolvers<string | null>();
+    let hook = { enabled: true, vendorId: "email" };
+    let overseer = makeOverseer(() => config.promise, hook);
+    let delivery = overseer.startHook(1);
+    hook.enabled = false;
+    config.resolve(serializeAdminConfig(DEFAULT_ADMIN_CONFIG));
+    await expect(delivery).rejects.toThrow("Hook has been deleted or disabled.");
   });
 });
 

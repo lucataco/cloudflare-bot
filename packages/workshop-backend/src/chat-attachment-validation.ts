@@ -1,9 +1,9 @@
 import { isTextLikeAttachmentMimeType } from "@gadgets/workshop-shared/api";
 import type { AiModelConfig, AiModelProvider, ChatAttachmentUpload } from "@gadgets/workshop-shared/api";
 import { PDF_MIME_TYPE } from "./chat-attachment-pdf";
+import { MAX_CHAT_ATTACHMENT_BYTES, isOfficeAttachment, isMediaAttachment, attachmentMimeType } from '@gadgets/workshop-shared/attachments';
 
 // Bounds attachment storage and the bytes replayed into model requests.
-const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
 
 const IMAGE_SIGNATURES = new Map<string, readonly (number | null)[]>([
   ["image/jpeg", [0xFF, 0xD8, 0xFF]],
@@ -23,7 +23,7 @@ const CONTENT_SIGNATURES = new Map<string, readonly (number | null)[]>([
 ]);
 
 const isTextOrImageMime = (mimeType: string) =>
-  isTextLikeAttachmentMimeType(mimeType) || IMAGE_SIGNATURES.has(mimeType);
+  isTextLikeAttachmentMimeType(mimeType) || IMAGE_SIGNATURES.has(mimeType) || isOfficeAttachment(mimeType);
 
 const isTextImageOrPdfMime = (mimeType: string) =>
   isTextOrImageMime(mimeType) || mimeType === PDF_MIME_TYPE;
@@ -35,9 +35,10 @@ const isTextImageOrPdfMime = (mimeType: string) =>
 const ATTACHMENT_SUPPORT_BY_PROVIDER = {
   anthropic: isTextImageOrPdfMime,
   openai: isTextImageOrPdfMime,
-  google: isTextImageOrPdfMime,
+  google: (mimeType: string) => isTextImageOrPdfMime(mimeType) || isMediaAttachment(mimeType),
   cloudflare: isTextOrImageMime,
   ollama: isTextOrImageMime,
+  capnweb: (mimeType: string) => isTextLikeAttachmentMimeType(mimeType) || isOfficeAttachment(mimeType),
 } satisfies Record<AiModelProvider, (mimeType: string) => boolean>;
 
 function sanitizeChatAttachmentMimeType(mimeType: string | undefined): string {
@@ -60,6 +61,7 @@ export function assertChatAttachmentSupportedByProvider(
   if (byteLength > MAX_CHAT_ATTACHMENT_BYTES) {
     throw new Error("Chat attachment is too large.");
   }
+  if (IMAGE_SIGNATURES.has(mimeType) && byteLength > 1024 * 1024) throw new Error('Chat image is too large; resize it before uploading.');
 
   if (!provider) {
     if (isTextOrImageMime(mimeType)) return;
@@ -77,8 +79,19 @@ export function validateChatAttachmentUpload(
   provider?: AiModelConfig["provider"],
 ): ChatAttachmentUpload {
   attachment.name = sanitizeChatAttachmentName(attachment.name);
-  attachment.mimeType = sanitizeChatAttachmentMimeType(attachment.mimeType);
+  attachment.mimeType = sanitizeChatAttachmentMimeType(attachmentMimeType(attachment.name ?? '', attachment.mimeType));
   assertChatAttachmentSupportedByProvider(provider, attachment.mimeType, attachment.content.byteLength);
+  if (isOfficeAttachment(attachment.mimeType) && !(attachment.content[0] === 0x50 && attachment.content[1] === 0x4b)) throw new Error('Invalid Office archive');
+  if (isMediaAttachment(attachment.mimeType)) {
+    const header = new TextDecoder().decode(attachment.content.subarray(0, 12));
+    const bytes = attachment.content;
+    const valid = attachment.mimeType.endsWith('/mp4') ? header.slice(4, 8) === 'ftyp'
+      : attachment.mimeType.endsWith('/webm') ? bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3
+      : attachment.mimeType === 'audio/wav' ? header.startsWith('RIFF') && header.endsWith('WAVE')
+      : attachment.mimeType === 'audio/ogg' ? header.startsWith('OggS')
+      : header.startsWith('ID3') || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+    if (!valid) throw new Error('Media content does not match its MIME type');
+  }
 
   let signature = CONTENT_SIGNATURES.get(attachment.mimeType);
   if (signature) {

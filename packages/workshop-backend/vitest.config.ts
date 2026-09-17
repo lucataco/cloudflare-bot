@@ -16,8 +16,10 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: '2026-02-02',
         compatibilityFlags: ['experimental', 'nodejs_compat'],
+        workerLoaders: { LOADER: {} },
         durableObjects: {
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
+          TEST_ADMIN: { className: 'AdminSettings', useSQLite: true },
         },
       },
     }),

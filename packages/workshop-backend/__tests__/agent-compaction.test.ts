@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {type AiChatAuthorInfo, type AiChatMessage, type AiChatMessageBody}
+import {type AgentProposal, type AiChatAuthorInfo, type AiChatMessage, type AiChatMessageBody}
   from "@gadgets/workshop-shared/api";
 import {
   buildCompactionState, buildSummaryPrompt, findCompactionBoundary, findProtectedFromSequence,
@@ -275,6 +275,61 @@ describe("compaction boundary", () => {
     ];
 
     expect(findCompactionBoundary(projected, 100_000, 120_000, 5)).toBe(7);
+  });
+});
+
+describe("proposal compaction boundaries", () => {
+  const proposal: AgentProposal = {
+    type: "agentProposal", proposalId: "proposal", artifactId: "artifact",
+    agentId: "bot", agentName: "Bot", reason: "Requested reuse", state: "pending",
+    draft: {kind: "skill", value: {name: "Recipe", description: "For reports", body: "List blockers"}},
+  };
+  const states: AgentProposal[] = [
+    proposal,
+    {...proposal, state: "accepting", decidedAt: new Date(100)},
+    {...proposal, state: "accepted", decidedAt: new Date(100), receipt: {createdAt: new Date(110), missing: false}},
+    {...proposal, state: "accepted", decidedAt: new Date(100), receipt: {createdAt: new Date(110), missing: true}},
+    {...proposal, state: "denied", decidedAt: new Date(100)},
+  ];
+
+  it.each(states)("protects the raising turn only while undecided or accepting: $state", state => {
+    const messages = [
+      message(0, user, "Earlier request"), message(1, agent, "Earlier answer"),
+      message(2, user, "Save this recipe"), message(3, agent, "Drafting"), record(4, agent, state),
+      message(5, user, "a".repeat(240_000)), message(6, agent, "b".repeat(240_000)),
+      message(7, user, "next"), message(8, agent, "done"),
+    ];
+    const protectedFrom = findProtectedFromSequence(messages);
+    const boundary = findCompactionBoundary(projection(messages), 100_000, 120_000, 0, protectedFrom);
+    if (state.state === "pending" || state.state === "accepting") {
+      expect(protectedFrom).toBe(2);
+      expect(boundary).toBe(2);
+      // Already at the raising turn: no checkpoint can advance over a live proposal.
+      expect(findCompactionBoundary(projection(messages), 100_000, 120_000, 2, protectedFrom)).toBeUndefined();
+    } else {
+      expect(protectedFrom).toBeUndefined();
+      expect(boundary).toBeGreaterThan(4);
+    }
+    // Updating a decision in place is never a prompt/resumption boundary.
+    expect(startsAgentTurn(record(4, agent, state))).toBe(false);
+    expect(buildState(messages, 5)).toMatchObject({chatBindings: initialBindings, nextChangeId: 0});
+  });
+
+  it.each(states.slice(0, 2))("retains the whole available prefix without a raising prompt: $state", state => {
+    expect(findProtectedFromSequence([message(10, agent, "Drafting"), record(11, agent, state)])).toBe(10);
+  });
+
+  it("chooses the earliest live decision across connection requests and proposals", () => {
+    const connection = record(2, agent, {type: "connectionRequest", requestId: "1:1",
+      vendorId: "v", vendorName: "V", reason: "Needed", state: "pending"});
+    expect(findProtectedFromSequence([
+      message(0, agent, "Earlier"), message(1, user, "Connect"), connection,
+      message(3, user, "Save"), record(4, agent, states[1]),
+    ])).toBe(1);
+    expect(findProtectedFromSequence([
+      message(0, user, "Save"), record(1, agent, states[1]), message(2, user, "Connect"),
+      {...connection, sequence: 3},
+    ])).toBe(0);
   });
 });
 

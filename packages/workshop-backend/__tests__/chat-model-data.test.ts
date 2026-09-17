@@ -3,6 +3,7 @@ import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
 import type { AiToolCall } from "@gadgets/workshop-shared/api";
 import { makeStoredAssistantMessage, rehydrateStoredAssistantMessage } from "../src/agent.js";
+import { buildSummaryPrompt } from "../src/agent-compaction.js";
 
 // A representative completed step: signed thinking, redacted thinking, signed text, and two tool
 // calls (one with a Google-style thought signature). Extra fields unknown to the Workshop stand in
@@ -62,6 +63,24 @@ describe("makeStoredAssistantMessage", () => {
 });
 
 describe("rehydrateStoredAssistantMessage", () => {
+  it("preserves browser and memory identities through replay and compaction projection", () => {
+    const calls: AiToolCall[] = [
+      { toolCallId: "browser", toolName: "computerClick", input: { x: 12, y: 34 } },
+      { toolCallId: "memory", toolName: "memoryForget", input: { fact: "Synthetic fact" } },
+    ];
+    const message = makeAssistantMessage();
+    message.content = calls.map(call => ({ type: "toolCall", id: call.toolCallId,
+      name: call.toolName, arguments: call.input }));
+    const replay = rehydrateStoredAssistantMessage(
+      structuredClone(makeStoredAssistantMessage(message)), structuredClone(calls), 1, 2);
+    expect(replay).toEqual(message);
+    const summary = buildSummaryPrompt([{ message: replay!, sequence: 2, canCut: true }], 3, makeModel({}));
+    const first = summary[0];
+    if (first.role !== "assistant") throw new Error("Expected assistant summary");
+    expect(first.content).toEqual([{ type: "text",
+      text: '[computerClick {"x":12,"y":34}]\n[memoryForget {"fact":"Synthetic fact"}]' }]);
+  });
+
   it("reproduces the original message exactly", () => {
     let message = makeAssistantMessage();
     let stored = makeStoredAssistantMessage(message);

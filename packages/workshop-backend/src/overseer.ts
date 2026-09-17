@@ -1,5 +1,14 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
+import type { ToolCallAuditRecord } from "./tool-call-audit";
 import { validateRpc } from "capnweb-validate";
+import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
+import type { NamedDelegationConfig, NamedDelegationTargetConfig, NamedDelegationInput,
+  NamedDelegationReceipt, NamedDelegationResult } from "@gadgets/workshop-shared/api";
+import { type PreparedNamedDelegation, MAX_NAMED_CHILDREN, MAX_NAMED_TARGETS,
+  MAX_NAMED_BINDINGS, MAX_DELEGATION_PROMPT_BYTES, MAX_DELEGATION_INSTRUCTIONS_BYTES,
+  MAX_DELEGATION_RESULT_BYTES } from "./named-delegation";
+import type { AgentProposal, AgentProposalDraft } from "@gadgets/workshop-shared/api";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime,   AgentProfile, AgentRoutineSchedule, AgentSkill, ChatQueueItem } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
@@ -44,27 +53,34 @@ import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-cat
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
+import { requiresManualReview } from '@gadgets/workshop-shared/auto-review';
+import type { ComputerOperation, ComputerResult } from '@gadgets/workshop-shared/computer';
+import { groupPrompt, groupRecipients, MAX_GROUP_EXECUTIONS } from './group-conversation';
+import { MAX_CHAT_ATTACHMENTS, MAX_CHAT_ATTACHMENT_TOTAL_BYTES, isOfficeAttachment } from '@gadgets/workshop-shared/attachments';
+import { extractOfficeText } from './chat-attachment-office';
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { GadgetExportFormat, TaskRun, TaskRunSource, TaskRunDisposition, TaskRunPage, TaskRunEvidencePage } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
   validateChatAttachmentUpload,
 } from "./chat-attachment-validation";
 import { renderGadgetInBrowser } from "./browser-export";
+import { computerUrlLabel, type ComputerSessionImpl } from "./computer-session";
+import { WORKSPACE_ATTENTION_LIMIT, type AttentionProjection, type WorkspaceAttentionSnapshot } from "./attention";
+import type { ComputerControlMode, ComputerSession, ComputerSessionState } from "@gadgets/workshop-shared/api";
 import {
   cancelChatQueueItem,
   chatQueueKey,
   deleteChatQueue,
   enqueueChatQueueItem,
+  listChatQueue,
   moveChatQueueItemToHead,
   publicChatQueue,
   reorderChatQueue,
-  restoreChatQueueHead,
-  takeChatQueueHead,
   toPublicQueueItem,
   updateChatQueueItem,
   type ChatQueueRecord,
@@ -79,6 +95,86 @@ import {
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
+
+type AttentionSource = Omit<AttentionProjection, "version" | "notify">;
+type AttentionProgress = {
+  revision: number;
+  dirtyRevision?: number;
+  complete: boolean;
+  truncated: boolean;
+  bootstrap: { phase: "tasks"; cursor?: string } | { phase: "actions"; cursor?: number } |
+    { phase: "chats"; cursor?: string; change?: { source: AttentionSource; decisionCursor?: string } };
+  bootstrapAt?: number;
+  deliveryAt?: number;
+  failures: number;
+};
+
+function attentionRun(run: TaskRun): AttentionSource | undefined {
+  // Waiting is represented by the canonical request cards, never a second phantom approval.
+  if (run.status === "admitted" || run.status === "running" || run.status === "waiting") return;
+  return { sourceId: `run:${run.id}`, kind: "run", state: run.status, reason: run.reason,
+    runId: run.id, chatId: run.chatId, sequence: run.sourceSequence, updatedAt: run.updatedAt };
+}
+
+function attentionMessage(msg: AiChatMessage): AttentionSource | undefined {
+  let kind: AttentionProjection["kind"];
+  let state: AttentionProjection["state"];
+  switch (msg.type) {
+    case "agentProposal":
+      kind = "proposal";
+      state = msg.state === "pending" || msg.state === "accepting" ? msg.state : "resolved";
+      break;
+    case "connectionRequest":
+      kind = "connection";
+      state = msg.state === "pending" ? "pending" : "resolved";
+      break;
+    case "computerHumanTakeover":
+      kind = "human";
+      state = msg.state === "pending" ? "pending" : "resolved";
+      break;
+    case "changes":
+      if (msg.conversionBoundary ||
+          (!msg.change && !msg.createdGadgets?.length && !msg.addedBindings?.length)) return;
+      kind = "changes";
+      state = "pending";
+      break;
+    default: return;
+  }
+  return { sourceId: `message:${msg.chatId}:${msg.sequence}`, kind, state,
+    chatId: msg.chatId, sequence: msg.sequence, runId: msg.runId,
+    updatedAt: msg.type === "agentProposal" && msg.state !== "pending" ? msg.decidedAt : msg.timestamp };
+}
+
+function sameAttentionSource(a: AttentionSource | undefined, b: AttentionSource | undefined): boolean {
+  // Evidence appends and timestamp-only writes do not create a new unseen source version.
+  return a === undefined || b === undefined ? a === b :
+    a.sourceId === b.sourceId && a.kind === b.kind && a.state === b.state &&
+    a.reason === b.reason && a.chatId === b.chatId && a.sequence === b.sequence &&
+    a.runId === b.runId && a.actionId === b.actionId;
+}
+
+function attentionOrder(a: AttentionProjection, b: AttentionProjection): number {
+  return b.updatedAt.valueOf() - a.updatedAt.valueOf() ||
+    (a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0);
+}
+
+function attentionDecisionCovers(decision: Extract<AiChatMessage, { type: "merge" | "revert" }>,
+    sequence: number): boolean {
+  return sequence < decision.sequence && (decision.type === "merge" ?
+    sequence <= decision.mergeThrough : sequence >= decision.revertFrom);
+}
+
+class AutomationPausedError extends Error {
+  constructor() {
+    super("Workspace automation is paused. Resume automation before starting new work.");
+  }
+}
+
+class RoutineInactiveError extends Error {
+  constructor() {
+    super("Routine is no longer enabled.");
+  }
+}
 
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore } from "cloudflare:workers";
@@ -117,6 +213,21 @@ export default class extends WorkerEntrypoint {
     await agent(self, env, this.ctx);
   }
 }
+`;
+
+// Freeze the privileged entrypoint before evaluating untrusted imports. A shared module graph
+// otherwise lets agent.js replace run() or an inherited env accessor and recover this.ctx.
+const NAMED_CHILD_CODE_MODE_HARNESS = `import { WorkerEntrypoint } from "cloudflare:workers";
+export default class NamedChildHarness extends WorkerEntrypoint {
+  async verify() { await import("agent.js"); }
+  async run() {
+    const { default: agent } = await import("agent.js");
+    await agent(undefined, this.env, undefined);
+  }
+}
+for (let prototype = NamedChildHarness.prototype; prototype && prototype !== Object.prototype;
+     prototype = Object.getPrototypeOf(prototype)) Object.freeze(prototype);
+Object.freeze(NamedChildHarness);
 `;
 
 // A one-off dynamic worker whose only purpose is to call ctx.restore() while pretending to be a
@@ -225,64 +336,91 @@ class RestoreForgerImpl extends NativeRpcTarget {
 }
 
 @validateRpc()
-class ComputerSessionWrapper extends RpcTarget {
-  #nativeStub: any;
+class ComputerSessionWrapper extends RpcTarget implements ComputerSession {
+  #nativeStub: DurableObjectStub<ComputerSessionImpl>;
+  #impl: OverseerImpl;
+  #ownerId: string;
+  #agentId: string;
+  #actor: "owner" | "agent";
 
-  constructor(nativeStub: any) {
+  constructor(impl: OverseerImpl, ownerId: string, agentId: string, actor: "owner" | "agent") {
     super();
-    this.#nativeStub = nativeStub;
+    this.#impl = impl;
+    this.#ownerId = ownerId;
+    this.#agentId = agentId;
+    this.#actor = actor;
+    const sessions = impl.ctx.exports.ComputerSessionImpl;
+    this.#nativeStub = sessions.get(sessions.idFromName(`${ownerId}:${agentId}`));
+  }
+
+  async #call<T>(action: boolean, invoke: (check: NativeRpcStub<() => Promise<void>>) => Promise<T>, workspace = false): Promise<T> {
+    const revision = this.#impl.storage.computerControl.get()?.revision ?? 0;
+    const automationGeneration = this.#impl.automationGeneration;
+    const check = async () => {
+      if (workspace && !this.#impl.storage.computerWorkspaceEnabled.get()) throw new Error('Computer shell and files are disabled');
+      if (this.#actor === "agent") this.#impl.assertAutomationAllowed(automationGeneration);
+      this.#impl.assertComputerAccess(this.#ownerId, this.#agentId, this.#actor, action, revision);
+      await this.#impl.assertComputerWorkspace(this.#ownerId, this.#agentId);
+      if (this.#actor === "agent") this.#impl.assertAutomationAllowed(automationGeneration);
+      this.#impl.assertComputerAccess(this.#ownerId, this.#agentId, this.#actor, action, revision);
+    };
+    await check();
+    using guard = new NativeRpcStub(check);
+    const result = await invoke(guard);
+    await check();
+    return result;
   }
 
   async navigate(url: string): Promise<void> {
-    return await this.#nativeStub.navigate(url);
+    return this.#call(true, check => this.#nativeStub.navigate(check, url));
+  }
+
+  async workspace(operation: ComputerOperation): Promise<ComputerResult> {
+    return this.#call(operation.kind !== 'read' && operation.kind !== 'list', check => this.#nativeStub.workspace(check, operation), true);
   }
 
   async screenshot(): Promise<Uint8Array> {
-    return await this.#nativeStub.screenshot();
+    return this.#call(false, check => this.#nativeStub.screenshot(check));
   }
 
   async click(x: number, y: number): Promise<void> {
-    return await this.#nativeStub.click(x, y);
+    return this.#call(true, check => this.#nativeStub.click(check, x, y));
   }
 
   async type(text: string): Promise<void> {
-    return await this.#nativeStub.type(text);
+    return this.#call(true, check => this.#nativeStub.type(check, text));
   }
 
   async scroll(deltaX: number, deltaY: number): Promise<void> {
-    return await this.#nativeStub.scroll(deltaX, deltaY);
+    return this.#call(true, check => this.#nativeStub.scroll(check, deltaX, deltaY));
   }
 
   async key(key: string): Promise<void> {
-    return await this.#nativeStub.key(key);
+    return this.#call(true, check => this.#nativeStub.key(check, key));
   }
 
   async wait(ms: number): Promise<void> {
-    return await this.#nativeStub.wait(ms);
+    return this.#call(false, check => this.#nativeStub.wait(check, ms));
   }
 
-  async getState(): Promise<{ agentId: string; currentUrl: string | null; lastActivityAt: Date }> {
-    return await this.#nativeStub.getState();
+  async getState(): Promise<ComputerSessionState> {
+    const state = await this.#call(false, check => this.#nativeStub.getState(check));
+    return { ...state, agentId: this.#agentId };
   }
 
   async close(): Promise<void> {
-    return await this.#nativeStub.close();
+    return this.#call(true, check => this.#nativeStub.close(check));
   }
 }
 
+/** Mint a wrapper, never a raw native capability. Every operation rechecks workspace authority. */
 export function resolveComputerSession(
-  ctx: { exports: any },
+  impl: OverseerImpl,
   ownerId: string,
-  agentId: string
-): RpcStub<import("@gadgets/workshop-shared/api").ComputerSession> {
-  if (!ctx.exports.ComputerSessionImpl) {
-    throw new Error("Computer sessions require the BROWSER binding to be configured.");
-  }
-  const computerSessions = ctx.exports.ComputerSessionImpl;
-  const sessionKey = `${ownerId}:${agentId}`;
-  const id = computerSessions.idFromName(sessionKey);
-  const nativeStub = computerSessions.get(id);
-  return new ComputerSessionWrapper(nativeStub) as any;
+  agentId: string,
+  actor: "owner" | "agent",
+): RpcStub<ComputerSession> {
+  return new RpcStub(new ComputerSessionWrapper(impl, ownerId, agentId, actor));
 }
 
 // =======================================================================================
@@ -291,6 +429,9 @@ export function resolveComputerSession(
 type LiveChatContext = {
   // Abort controller for the running agent (if any).
   cancelController: AbortController;
+
+  // Identifies the turn owning active metadata/restart intent when the context is reused.
+  turn?: object;
 
   // Callbacks queued while the agent is running, to be delivered once it finishes.
   pendingAgentCallbacks: QueuedAgentCallback[];
@@ -581,8 +722,7 @@ function validateBlueprintScreenshotUpload(screenshot: BlueprintScreenshotUpload
   return screenshot;
 }
 
-const MAX_CHAT_ATTACHMENTS_PER_MESSAGE = 5;
-const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS_PER_MESSAGE = MAX_CHAT_ATTACHMENTS;
 // Staged attachments (not associated with chat) older than this may be deleted when the gadget next stages an attachment.
 const MAX_STAGED_CHAT_ATTACHMENT_AGE_MS = 24 * 60 * 60 * 1000;
 const CHAT_ATTACHMENT_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -595,6 +735,8 @@ function validateChatAttachmentId(id: string): string {
 type ChatAttachmentContentRecord = {
   fileId: string;
   data: Uint8Array;
+  blob?: { key: string; size: number };
+  modelText?: string;
   state:
     | {
         type: "staged";
@@ -681,7 +823,30 @@ type BoundHookRecord = {
   callback: NativeRpcStub<RpcTarget>;
   description: HookDescription;
   enabled: boolean;
+
+  // Registration authority is sealed into the callback; scheduleId comes from the Scheduler.
+  routine?: { id: string; registrationId: string; scheduleId?: string };
 };
+
+type ScheduledFiring = import("../../gatekeeper-scheduler/src/types.js").ScheduledFiring;
+
+type RoutineAdmission = {
+  id: string;
+  revision: number;
+  hookId: number;
+  registrationId: string;
+  firing?: ScheduledFiring;
+};
+
+type RoutineOccurrenceRecord = {
+  routineId: string;
+  registrationId: string;
+  firing: ScheduledFiring;
+} & ({ status: "admitted"; chatId: number } | { status: "skipped" });
+
+function routineOccurrenceKey(routineId: string, registrationId: string, firing: ScheduledFiring): string {
+  return JSON.stringify([routineId, registrationId, firing.scheduleId, firing.runId]);
+}
 
 // READ-ONLY LEGACY: one pre-git-storage live draft edit (a Yjs V2 update). Nothing writes or
 // reads these anymore -- uncommitted changes are `chatChanges` rows -- but pre-conversion chats
@@ -802,9 +967,9 @@ export type AutoApproveTagRecord = {
 };
 
 // Server-only record describing an in-progress agent turn, enabling resumption after a server
-// restart. Keyed by chatId. A record is present (mirroring `chatMeta.activeAgent`) for exactly as
-// long as an agent turn is, or should be, running. On startup, the set of these records identifies
-// which agents were interrupted by a restart and need to be resumed.
+// restart. Keyed by chatId. Normally mirrors `chatMeta.activeAgent`; workspace pause removes this
+// restart intent before aborting, while the live turn retains its metadata until cleanup finishes.
+// On startup, these records identify interrupted turns that may resume unless automation is paused.
 //
 // Note we deliberately do NOT store the resolved `AiModelConfig` here, because it contains a secret
 // API token. Instead we store enough to re-fetch it from the initiator's user DO on resume.
@@ -867,6 +1032,8 @@ type ExternalChatRecord = {
 
 type ActiveAgentRecord = {
   chatId: number;
+  // Optional only for restart intent persisted before task tracking existed.
+  run?: {id: string; attempt: number};
   // Hex durable object ID of the initiator's user DO, used to re-resolve the model config and for
   // billing.
   initiatorUserId: string;
@@ -877,6 +1044,42 @@ type ActiveAgentRecord = {
   // Whether this turn was initiated by a gadget callback (vs. a chat message).
   callbackInitiated: boolean;
 };
+
+type NamedDelegationRecord = {
+  id: string;
+  receipt: NamedDelegationReceipt;
+  input?: NamedDelegationInput; // Removed on child deletion; the digest retains exact dedupe.
+  inputDigest: string;
+  canceled: boolean;
+};
+
+function delegationInputDigest(input: NamedDelegationInput): string {
+  // Tool evidence may contain malformed provider data. Hash only bounded primitives, never
+  // arbitrary objects (or their toJSON/iterator implementations), and let the barrier reject it.
+  if (!input || typeof input !== "object") throw new Error("Invalid delegation input.");
+  const {requestId, targetAgentId, title, prompt, bindingNames} = input;
+  if (typeof requestId !== "string" || !CHAT_CHANGE_CLIENT_ID_PATTERN.test(requestId) ||
+      typeof targetAgentId !== "string" || !targetAgentId || targetAgentId.length > MAX_DELEGATION_PROMPT_BYTES ||
+      typeof title !== "string" || title.length > 120 || !title.trim() ||
+      typeof prompt !== "string" || prompt.length > MAX_DELEGATION_PROMPT_BYTES ||
+      !prompt.trim() || new TextEncoder().encode(prompt).length > MAX_DELEGATION_PROMPT_BYTES ||
+      (bindingNames !== undefined && (!Array.isArray(bindingNames) || bindingNames.length > MAX_DELEGATION_PROMPT_BYTES))) {
+    throw new Error("Invalid delegation input.");
+  }
+  let nameSize = 0;
+  const names: string[] = [];
+  const count = bindingNames?.length ?? 0;
+  for (let i = 0; i < count; ++i) {
+    const name = bindingNames![i];
+    if (typeof name !== "string" || (nameSize += name.length + 1) > MAX_DELEGATION_PROMPT_BYTES) {
+      throw new Error("Invalid delegation binding names.");
+    }
+    names.push(name);
+  }
+  return createHash("sha256").update(JSON.stringify([
+    requestId, targetAgentId, title, prompt, [...new Set(names)].toSorted(),
+  ])).digest("hex");
+}
 
 // One agent step's model-facing snapshot (see StoredAssistantMessage in agent.ts), keyed by the
 // chatId.sequence of the step's "message" record.
@@ -942,11 +1145,13 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // ActionLogEntry omits the gatekeeperId for records that didn't come from a real gatekeeper
   // (built-in agent tools use the BUILTIN_TOOL_GATEKEEPER_ID sentinel).
   let gatekeeperId = record.gatekeeperId >= 0 ? record.gatekeeperId : undefined;
+  let runId = record.caller.from === "agent" ? record.caller.runId : undefined;
 
   switch (record.type) {
     case "observation":
       return {
         id: record.id,
+        runId,
         gatekeeperId,
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
@@ -958,6 +1163,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
     case "action":
       return {
         id: record.id,
+        runId,
         gatekeeperId,
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
@@ -972,6 +1178,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
     case "bindHook":
       return {
         id: record.id,
+        runId,
         gatekeeperId,
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
@@ -1063,6 +1270,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
       title: "Untitled Workspace",
 
+      // Durable admission fence, independent of each chat's user-controlled queuePaused flag.
+      automationPaused: false,
+
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
       // should be treated as referring to this gadget ID.
@@ -1103,9 +1313,23 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
       prohibitAllSharing: false,
+
+      // Absent until the owner requests backfill or a real attention source first changes.
+      attentionProgress: <AttentionProgress | undefined>undefined,
+      rosterLastReply: <{text: string; timestamp: number; chatId: number} | undefined>undefined,
+
+      // Grants are explicit and workspace-local. No migration opts existing browsers in.
+      computerControl: <{ agentId: string; mode: ComputerControlMode; revision: number } | undefined>undefined,
+      computerWorkspaceEnabled: false,
+
+      namedDelegationConfig: <{revision: number; sourceAgentId?: string;
+        targets: NamedDelegationTargetConfig[]}>{revision: 0, targets: []},
     },
 
     collections: {
+      attentionSources: collection<AttentionProjection>()({ primaryKey: "sourceId" }),
+      toolCallAudits: collection<ToolCallAuditRecord>()({primaryKey: "id"}),
+
       // READ-ONLY LEGACY: the pre-git-storage incremental code log, tightly-packed from version 1
       // (there's no entry for version 0, the starting empty state). Nothing writes it anymore --
       // mainline code lives in `gitObjects` as commits -- and it is read only by the git-storage
@@ -1177,6 +1401,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         },
 
         nonUniqueIndexes: {
+          // Sparse: only new task-attributed calls participate, so legacy indexes need no backfill.
+          byRun(record: ActionRecord) {
+            return record.caller.from === "agent" ? record.caller.runId ?? null : null;
+          },
           // Sparse index over just the pending records, keyed by gatekeeper, so the auto-approval
           // drain is O(pending on that gatekeeper) rather than a full-log scan.
           pendingByGatekeeper(record: ActionRecord) {
@@ -1194,6 +1422,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       boundHooks: collection<BoundHookRecord>()({
         primaryKey: "id",
+      }),
+
+      // Terminal delivery receipts outlive chats and hooks: a late retry must never recreate work.
+      routineOccurrences: collection<RoutineOccurrenceRecord>()({
+        primaryKey: r => routineOccurrenceKey(r.routineId, r.registrationId, r.firing),
       }),
 
       // User-enabled rules to auto-approve actions carrying a given action kind on a given
@@ -1230,6 +1463,21 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: "chatId"
       }),
 
+      namedDelegations: collection<NamedDelegationRecord>()({
+        primaryKey: "id",
+        uniqueIndexes: { byChildChat: (record: NamedDelegationRecord) => record.receipt.childChatId },
+        nonUniqueIndexes: { byParentRun: (record: NamedDelegationRecord) => record.receipt.parentRunId },
+      }),
+
+      taskRuns: collection<TaskRun>()({
+        primaryKey: "id",
+        uniqueIndexes: {
+          byChatSource(run: TaskRun) {
+            return `${keyString(run.chatId)}.${keyString(run.sourceSequence)}`;
+          },
+        },
+      }),
+
       gadgetResponseDeliveries: collection<ExternalMessageRecord>()({
         primaryKey: "idempotencyKey",
         uniqueIndexes: {
@@ -1258,8 +1506,17 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           return `${keyString(msg.chatId)}.${keyString(msg.sequence)}`;
         },
         uniqueIndexes: {
-          byTimestamp(msg: AiChatMessage) { return msg.timestamp.valueOf(); }
+          byTimestamp(msg: AiChatMessage) { return msg.timestamp.valueOf(); },
+          // Older messages have no runId, so this sparse index needs no historical backfill.
+          byRunSequence(msg: AiChatMessage) {
+            return msg.runId ? `${msg.runId}.${keyString(msg.sequence)}` : null;
+          },
         }
+      }),
+
+      // Only decisions recorded since task tracking began are relevant to tracked output batches.
+      taskChangeDecisions: collection<Extract<AiChatMessage, {type: "merge" | "revert"}>>()({
+        primaryKey: msg => `${keyString(msg.chatId)}.${keyString(msg.sequence)}`,
       }),
 
       // User prompts waiting to run after the current turn. Drained one-per-turn; not transcript.
@@ -1480,6 +1737,253 @@ class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
 
+  #attentionSending = false;
+
+  initializeAttention(): void {
+    if (!this.ownerId || this.storage.attentionProgress.get()) return;
+    this.storage.attentionProgress.put({ revision: 1, dirtyRevision: 1, complete: false,
+      truncated: false, bootstrap: { phase: "tasks" }, bootstrapAt: Date.now() + 1_000,
+      deliveryAt: Date.now() + 1_000, failures: 0 });
+    this.updateAlarm();
+  }
+
+  attentionSnapshot(): WorkspaceAttentionSnapshot | undefined {
+    const progress = this.storage.attentionProgress.get();
+    if (!progress) return;
+    const reply = this.storage.rosterLastReply.get();
+    return { revision: progress.revision,
+      roster: {working: this.#runningAgents.size > 0,
+        lastReply: reply ? {text: reply.text, timestamp: reply.timestamp} : undefined},
+      entries: [...this.storage.attentionSources.list()].toSorted(attentionOrder),
+      complete: progress.complete, truncated: progress.truncated,
+      prohibitPush: this.storage.prohibitAllSharing.get() };
+  }
+
+  clearRosterReply(chatId: number): void {
+    if (this.storage.rosterLastReply.get()?.chatId !== chatId) return;
+    this.storage.rosterLastReply.put(undefined);
+    this.initializeAttention();
+    if (this.storage.attentionProgress.get()) this.#dirtyAttention();
+  }
+
+  #dirtyAttention(): number {
+    const progress = this.storage.attentionProgress.get()!;
+    const revision = progress.revision + 1;
+    this.storage.attentionProgress.put({ ...progress, revision, dirtyRevision: revision,
+      deliveryAt: progress.deliveryAt ?? Date.now() + 1_000 });
+    this.updateAlarm();
+    return revision;
+  }
+
+  #projectAttention(sourceId: string, source?: AttentionSource, bootstrap = false, notify = true): void {
+    if (!this.ownerId) return;
+    const previous = this.storage.attentionSources.get(sourceId);
+    if (!source && !previous) return;
+    // Bootstrap must not overwrite a live transition (or its notification eligibility).
+    if ((bootstrap && previous) || sameAttentionSource(previous, source)) return;
+    this.initializeAttention();
+    const version = this.#dirtyAttention();
+    if (!source) {
+      this.storage.attentionSources.delete(sourceId);
+      return;
+    }
+    this.storage.attentionSources.put({ ...source, version,
+      notify: notify && !bootstrap && source.state !== "resolved" && source.state !== "accepting" });
+    if (previous) return; // Updating a retained source cannot overflow the window.
+    const entries = [...this.storage.attentionSources.list()].toSorted(attentionOrder);
+    if (entries.length > WORKSPACE_ATTENTION_LIMIT) {
+      for (const entry of entries.slice(WORKSPACE_ATTENTION_LIMIT)) {
+        this.storage.attentionSources.delete(entry.sourceId);
+      }
+      this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!, truncated: true });
+    }
+  }
+
+  #attentionAction(action: ActionRecord): AttentionSource | undefined {
+    if (action.type !== "action") return;
+    const caller = action.caller;
+    return { sourceId: `action:${action.id}`, kind: "action",
+      state: action.state === "pending" ? "pending" : "resolved", actionId: action.id,
+      ...(caller.from === "agent" ? {
+        chatId: this.storage.chatMeta.get(caller.chatId) ? caller.chatId : undefined,
+        runId: caller.runId,
+      } : {}),
+      updatedAt: action.appliedAt ?? action.createdAt };
+  }
+
+  #attentionMessageChanged(msg: AiChatMessage, old?: AiChatMessage): void {
+    const source = attentionMessage(msg);
+    if (sameAttentionSource(old && attentionMessage(old), source)) return;
+    if (source && old && source.state !== "pending") {
+      // Connection/human cards keep their original transcript timestamp on resolution.
+      source.updatedAt = msg.type === "agentProposal" && msg.state !== "pending" ?
+        msg.decidedAt : new Date();
+    }
+    this.#projectAttention(`message:${msg.chatId}:${msg.sequence}`, source);
+  }
+
+  #attentionDecision(decision: Extract<AiChatMessage, { type: "merge" | "revert" }>): void {
+    this.initializeAttention();
+    if (!this.storage.attentionProgress.get()) return;
+    // Projection updates may evict rows, invalidating an open storage cursor.
+    for (const entry of Array.from(this.storage.attentionSources.list())) {
+      if (entry.kind === "changes" && entry.chatId === decision.chatId && entry.state === "pending" &&
+          attentionDecisionCovers(decision, entry.sequence!)) {
+        this.#projectAttention(entry.sourceId, { ...entry, state: "resolved", updatedAt: decision.timestamp });
+      }
+    }
+  }
+
+  // At most 50 canonical records examined per alarm, including irrelevant historical messages.
+  bootstrapAttention(now = Date.now()): void {
+    const initial = this.storage.attentionProgress.get();
+    if (!this.ownerId || !initial || initial.bootstrapAt === undefined || initial.bootstrapAt > now) return;
+    this.storage.transaction(() => {
+      let remaining = 50;
+      while (remaining > 0) {
+        const progress = this.storage.attentionProgress.get()!;
+        const cursor = progress.bootstrap;
+        if (cursor.phase === "tasks") {
+          const rows = [...this.storage.taskRuns.list({ startAfter: cursor.cursor, limit: remaining })];
+          for (const run of rows) this.#projectAttention(`run:${run.id}`, attentionRun(run), true);
+          this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!,
+            bootstrap: rows.length < remaining ? { phase: "actions" } :
+              { phase: "tasks", cursor: rows.at(-1)!.id } });
+          remaining -= rows.length;
+        } else if (cursor.phase === "actions") {
+          const rows = [...this.storage.actions.list({ startAfter: cursor.cursor, limit: remaining })];
+          for (const action of rows) this.#projectAttention(`action:${action.id}`, this.#attentionAction(action), true);
+          this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!,
+            bootstrap: rows.length < remaining ? { phase: "chats" } :
+              { phase: "actions", cursor: rows.at(-1)!.id } });
+          remaining -= rows.length;
+        } else if (cursor.change) {
+          // The first covering decision wins, including across alarms. A deleted source must not
+          // reappear from this saved cursor; a live projection always wins over bootstrap below.
+          const { source, decisionCursor } = cursor.change;
+          const key = `${keyString(source.chatId!)}.${keyString(source.sequence!)}`;
+          const exists = this.storage.chats.get(key);
+          --remaining;
+          if (!sameAttentionSource(source, exists && attentionMessage(exists)) ||
+              this.storage.attentionSources.get(source.sourceId)) {
+            this.storage.attentionProgress.put({ ...progress, bootstrap: { ...cursor, change: undefined } });
+            continue;
+          }
+          if (!remaining) break;
+          const decisions = [...this.storage.taskChangeDecisions.list({
+            prefix: `${keyString(source.chatId!)}.`, startAfter: decisionCursor ?? key, limit: remaining,
+          })];
+          const decision = decisions.find(row => attentionDecisionCovers(row, source.sequence!));
+          if (decision || decisions.length < remaining) {
+            this.#projectAttention(source.sourceId, decision ?
+              { ...source, state: "resolved", updatedAt: decision.timestamp } : source, true);
+            this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!,
+              bootstrap: { ...cursor, change: undefined } });
+          } else {
+            const last = decisions.at(-1)!;
+            this.storage.attentionProgress.put({ ...progress, bootstrap: { ...cursor,
+              change: { source, decisionCursor: `${keyString(last.chatId)}.${keyString(last.sequence)}` } } });
+          }
+          remaining -= decisions.length;
+        } else {
+          const [msg] = this.storage.chats.list({ end: cursor.cursor, reverse: true, limit: 1 });
+          if (!msg) {
+            this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!,
+              complete: true, bootstrapAt: undefined });
+            this.#dirtyAttention();
+            return;
+          }
+          --remaining;
+          const source = attentionMessage(msg);
+          if (msg.type === "merge" || msg.type === "revert") {
+            // Reverse traversal indexes legacy decisions before any batch they can cover.
+            this.storage.taskChangeDecisions.put(msg);
+          } else if (source?.kind !== "changes") {
+            this.#projectAttention(`message:${msg.chatId}:${msg.sequence}`, source, true);
+          }
+          this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!, bootstrap: {
+            phase: "chats", cursor: `${keyString(msg.chatId)}.${keyString(msg.sequence)}`,
+            ...(source?.kind === "changes" ? { change: { source } } : {}),
+          } });
+        }
+      }
+      this.storage.attentionProgress.put({ ...this.storage.attentionProgress.get()!, bootstrapAt: now + 1_000 });
+      this.updateAlarm();
+    });
+  }
+
+  async deliverAttention(now = Date.now()): Promise<void> {
+    let progress = this.storage.attentionProgress.get();
+    if (!this.ownerId || !progress?.dirtyRevision || progress.deliveryAt! > now || this.#attentionSending) return;
+    this.#attentionSending = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Persist retry intent before any external I/O, independently of the runtime's six retries.
+      const failures = Math.min(progress.failures + 1, 7);
+      this.storage.attentionProgress.put({ ...progress, failures,
+        deliveryAt: now + Math.min(60_000 * 2 ** (failures - 1), 3_600_000) });
+      this.updateAlarm();
+      await this.ctx.storage.sync();
+      const snapshot = this.attentionSnapshot()!;
+      // Only the winning race can acknowledge below. Timeout does not cancel the remote call;
+      // a late application is fenced by the receiver's snapshot revision, and its ack is ignored.
+      await Promise.race([
+        this.users.get(this.users.idFromString(this.ownerId))
+          .syncWorkspaceAttention(this.ctx.id.toString(), snapshot),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Workspace attention delivery timed out.")), 10_000);
+        }),
+      ]);
+      progress = this.storage.attentionProgress.get()!;
+      const matched = progress.revision === snapshot.revision;
+      this.storage.attentionProgress.put({ ...progress, failures: 0,
+        dirtyRevision: matched ? undefined : progress.dirtyRevision,
+        deliveryAt: matched ? undefined : Date.now() + 1_000 });
+    } catch (error) {
+      this.logger.warn("workspace attention delivery failed", { event: "attention.delivery.failed", error });
+    } finally {
+      clearTimeout(timer);
+      this.#attentionSending = false;
+      this.updateAlarm();
+    }
+  }
+
+  canNotifyAttention(ownerId: string, sourceId: string, version: number): boolean {
+    if (!this.ownerId || this.ownerId !== ownerId || this.storage.prohibitAllSharing.get()) return false;
+    const entry = this.storage.attentionSources.get(sourceId);
+    if (!entry?.notify || entry.version !== version || entry.state === "resolved" || entry.state === "accepting") return false;
+    let source: AttentionSource | undefined;
+    if (entry.kind === "run") {
+      const run = this.storage.taskRuns.get(entry.runId!);
+      source = run && attentionRun(run);
+    } else if (entry.kind === "action") {
+      const action = this.storage.actions.get(entry.actionId!);
+      source = action && this.#attentionAction(action);
+    } else {
+      const msg = this.storage.chats.get(`${keyString(entry.chatId!)}.${keyString(entry.sequence!)}`);
+      source = msg && attentionMessage(msg);
+      // Live changes and their projections commit together; every merge/revert synchronously
+      // resolves retained batches. Bootstrap validates decisions and never enables notify, so
+      // this version/state fence needs only the canonical point read, not another history scan.
+    }
+    return sameAttentionSource(entry, source);
+  }
+
+  // All alarm owners use this synchronous minimum; no getAlarm()/setAlarm() await race.
+  updateAlarm(): void {
+    const progress = this.storage.attentionProgress.get();
+    const idle = this.#runningAgents.size === 0;
+    const ready = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })][0];
+    const delivered = [...this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 })][0];
+    const deadline = Math.min(
+      idle ? Infinity : Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS,
+      idle && ready ? Date.now() : Infinity,
+      idle && delivered?.status === "delivered" ? delivered.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS : Infinity,
+      progress?.bootstrapAt ?? Infinity, progress?.deliveryAt ?? Infinity);
+    if (Number.isFinite(deadline)) this.ctx.storage.setAlarm(deadline);
+    else this.ctx.storage.deleteAlarm();
+  }
+
   // Identifies this DO instance. Sent to chat subscribers so they can detect a full server
   // restart (see AiChatSubscriber.streamGeneration). A timestamp suffices since a DO won't
   // restart and begin serving requests twice within the same millisecond.
@@ -1509,14 +2013,75 @@ class OverseerImpl implements AgentHooks {
 
   #autoApprovalDrainer: AutoApprovalDrainer;
 
+  // Invalidates admissions parked across an await, even if the owner pauses then resumes before
+  // they return. In-flight continuations cannot survive a DO restart; the durable bit handles that.
+  automationGeneration = 0;
+
+  assertAutomationAllowed(generation = this.automationGeneration): void {
+    if (this.storage.automationPaused.get() || generation !== this.automationGeneration) {
+      throw new AutomationPausedError();
+    }
+  }
+
+  async setAutomationPaused(paused: boolean): Promise<void> {
+    // Serialize only this storage transition, never model or gatekeeper I/O. In particular a
+    // concurrent resume must not pass the pause's flush and then escape its cancellation.
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if (this.storage.automationPaused.get() === paused) return;
+      this.storage.automationPaused.put(paused);
+      if (paused) {
+        ++this.automationGeneration;
+        this.cancelNamedDelegations(undefined, "workspace_paused");
+        // Canceled turns must not resurrect on restart, even after an immediate explicit resume.
+        for (let record of Array.from(this.storage.activeAgents.list())) {
+          this.flushCapturedActions(record.chatId, record.run);
+          this.finishTaskExecution(record.run, {status: "canceled", reason: "workspace_paused"});
+          this.storage.activeAgents.delete(record.chatId);
+        }
+        await this.ctx.storage.sync();
+        let error = new AutomationPausedError();
+        for (let [chatId, liveChat] of this.#liveChats) {
+          liveChat.cancelController.abort(error);
+          for (let cb of liveChat.pendingAgentCallbacks) cb.reject(error);
+          liveChat.pendingAgentCallbacks = [];
+          for (let cb of liveChat.activeAgentCallbacks.values()) cb.reject(error);
+          liveChat.activeAgentCallbacks.clear();
+          if (!this.#runningAgents.has(chatId)) this.#liveChats.delete(chatId);
+        }
+      }
+      // Reuse the existing chat feed to report effective queue pauses, without changing the
+      // stored per-chat choice (a user-paused queue must stay paused after workspace resume).
+      for (let meta of Array.from(this.storage.chatMeta.list())) {
+        if (paused && meta.currentRunId) {
+          const run = this.storage.taskRuns.get(meta.currentRunId);
+          if (run) this.finishTaskExecution(run, {status: "canceled", reason: "workspace_paused"});
+        }
+        // Group fanout can be between members, with metadata set but no running turn to clean it.
+        if (paused && !this.#runningAgents.has(meta.id)) delete meta.activeAgent;
+        meta.lastActive = this.getChatTimestamp();
+        this.storage.chatMeta.put(meta);
+      }
+      this.logger.info(paused ? "workspace automation paused" : "workspace automation resumed", {
+        event: paused ? "automation.paused" : "automation.resumed",
+      });
+    });
+    if (!paused && !this.storage.automationPaused.get()) {
+      for (let meta of Array.from(this.storage.chatMeta.list())) {
+        this.ctx.waitUntil(this.drainChatQueue(meta.id));
+      }
+      for (let id of new Set(Array.from(this.storage.autoApproveTags.list(), r => r.gatekeeperId))) {
+        this.ctx.waitUntil(this.drainAutoApprovals(id));
+      }
+    }
+  }
+
   #preparingChatMessages = new Map<number, Promise<void>>();
 
-  // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
-  // while any agent runs) and to let `alarm()` wait for all agents to finish.
+  // Set of chatIds that currently have a running agent turn. Keeps the shared alarm scheduled
+  // for crash recovery, without blocking its other work on agent completion.
   #runningAgents = new Set<number>();
 
-  // If `alarm()` is currently waiting for all agents to finish, this resolves its wait. Invoked
-  // when the running-agent count drops to zero.
+  // Local callers waiting for all agents to finish, resolved when the count drops to zero.
   #allAgentsIdleWaiters: (() => void)[] = [];
 
   // How long to set the keep-alive alarm into the future. Whenever the agent count goes from zero
@@ -1641,6 +2206,8 @@ class OverseerImpl implements AgentHooks {
   // Cancels any running agent, rejects all pending callbacks and returns.
   destroyLiveChat(chatId: number) {
     let ctx = this.#liveChats.get(chatId);
+    // Its detached finalizer must not touch replacement state, so deletion owns this teardown.
+    this.#unregisterRunningAgent(chatId);
     if (!ctx) return;
 
     let error = new Error("Chat deleted.");
@@ -1669,11 +2236,13 @@ class OverseerImpl implements AgentHooks {
   // `activeAgents` record, so that the three representations of "an agent is running for this chat"
   // stay consistent. `#unregisterRunningAgent` performs the matching teardown.
   #registerRunningAgent(chatId: number) {
+    this.assertAutomationAllowed();
     let wasEmpty = this.#runningAgents.size === 0;
     this.#runningAgents.add(chatId);
+    if (wasEmpty && this.ownerId) { this.initializeAttention(); this.#dirtyAttention(); }
     if (wasEmpty) {
       // Zero -> one running agents: schedule the keep-alive alarm.
-      this.ctx.storage.setAlarm(Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS);
+      this.updateAlarm();
     }
   }
 
@@ -1683,11 +2252,11 @@ class OverseerImpl implements AgentHooks {
   // the chat is observably idle, no stale records of the previous agent remain (which would
   // otherwise interfere if the user immediately starts a new agent).
   #unregisterRunningAgent(chatId: number) {
-    this.#runningAgents.delete(chatId);
+    const wasRunning = this.#runningAgents.delete(chatId);
     this.storage.activeAgents.delete(chatId);
+    if (wasRunning && this.#runningAgents.size === 0 && this.ownerId) { this.initializeAttention(); this.#dirtyAttention(); }
     if (this.#runningAgents.size === 0) {
-      // One -> zero running agents: replace the keep-alive alarm with any response-target retry/sweep
-      // alarm that is now due, and wake any `alarm()` waiter.
+      // One -> zero running agents: retain other alarm deadlines and wake local idle waiters.
       this.#updateExternalMessageResponseDeliveryAlarm();
       for (let waiter of this.#allAgentsIdleWaiters) {
         waiter();
@@ -1697,26 +2266,8 @@ class OverseerImpl implements AgentHooks {
   }
 
   #updateExternalMessageResponseDeliveryAlarm(): void {
-    if (this.#runningAgents.size > 0) return;
-
-    // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
-    // Recompute from storage whenever the alarm may have been overwritten by another concern.
     this.#sweepDeliveredExternalMessageResponses();
-
-    let hasReadyExternalMessageResponse = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })]
-      .length > 0;
-    if (hasReadyExternalMessageResponse) {
-      this.ctx.storage.setAlarm(Date.now());
-      return;
-    }
-
-    let nextDeliveredRecord = [...this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 })][0];
-    if (nextDeliveredRecord?.status === "delivered") {
-      this.ctx.storage.setAlarm(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
-      return;
-    }
-
-    this.ctx.storage.deleteAlarm();
+    this.updateAlarm();
   }
 
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
@@ -1735,12 +2286,28 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  // Resolves once no agents are running. Used by `alarm()` to keep the DO alive until all running
-  // agents complete.
+  // Resolves once no agents are running. The alarm deliberately does not wait on this.
   async waitForAllAgentsToComplete(): Promise<void> {
     if (this.#runningAgents.size === 0) return;
 
     await new Promise<void>(resolve => { this.#allAgentsIdleWaiters.push(resolve); });
+  }
+
+  // An approval may arrive after its barrier but before live-turn cleanup. Wait for that turn,
+  // not every other chat in the workspace; the caller rechecks task identity after the wait.
+  waitForChatAgent(chatId: number): Promise<void> | undefined {
+    if (!this.storage.chatMeta.get(chatId)?.activeAgent) return;
+    return new Promise(resolve => {
+      const subscriber = {
+        add() {},
+        update: (_old: AiChatMetadata, meta: AiChatMetadata) => {
+          if (meta.id === chatId && !meta.activeAgent) done();
+        },
+        remove: (meta: AiChatMetadata) => { if (meta.id === chatId) done(); },
+      };
+      const done = () => { this.storage.chatMeta.unsubscribe(subscriber); resolve(); };
+      this.storage.chatMeta.subscribe(subscriber);
+    });
   }
 
   // Resume a single interrupted agent turn. Re-resolves the model config from the initiator's user
@@ -1759,13 +2326,28 @@ class OverseerImpl implements AgentHooks {
       });
     }
 
+    if (this.#liveChats.get(record.chatId) !== liveChat) return;
+    if (this.storage.automationPaused.get() || liveChat.cancelController.signal.aborted ||
+        this.isNamedDelegationCanceled(record.chatId)) {
+      let meta = this.storage.chatMeta.get(record.chatId);
+      if (meta) {
+        delete meta.activeAgent;
+        this.storage.chatMeta.put(meta);
+      }
+      this.#unregisterRunningAgent(record.chatId);
+      this.#liveChats.delete(record.chatId);
+      this.ctx.waitUntil(this.drainChatQueue(record.chatId));
+      return;
+    }
+
     if (!aiModel) {
+      this.finishTaskExecution(record.run, {status: "incomplete", reason: "model_unavailable"});
       // The model is no longer available; we can't resume. Post an error and clear state. Clear
       // `activeAgent` and tear down the registry/record atomically (matching `#runAgentTurn`'s
       // finally).
       this.postAgentErrorMessage(record.chatId, record.initiator,
           "Agent interrupted due to server restart and could not be resumed because its AI " +
-          "model is no longer available.");
+          "model is no longer available.", undefined, record.run?.id);
       let meta = this.storage.chatMeta.get(record.chatId);
       if (meta) {
         delete meta.activeAgent;
@@ -1810,6 +2392,69 @@ class OverseerImpl implements AgentHooks {
       update: () => this.markOutputsDirty(),
       remove: () => this.markOutputsDirty(),
     });
+    this.storage.chats.subscribe({
+      add: msg => {
+        if (msg.type === "merge" || msg.type === "revert") {
+          this.storage.taskChangeDecisions.put(msg);
+          this.#attentionDecision(msg);
+        } else {
+          this.#attentionMessageChanged(msg);
+        }
+      },
+      update: (old, msg) => this.#attentionMessageChanged(msg, old),
+      remove: msg => {
+        this.#projectAttention(`message:${msg.chatId}:${msg.sequence}`);
+        if (msg.type === "merge" || msg.type === "revert") {
+          this.storage.taskChangeDecisions.delete(`${keyString(msg.chatId)}.${keyString(msg.sequence)}`);
+        }
+      },
+    });
+    this.storage.taskRuns.subscribe({
+      add: run => {
+        this.#projectAttention(`run:${run.id}`, attentionRun(run));
+        this.#refreshNamedDelegation(run.id, undefined);
+      },
+      update: (old, run) => {
+        if (old.status !== run.status || old.reason !== run.reason || old.attempt !== run.attempt) {
+          this.#refreshNamedDelegation(run.id, old);
+        }
+        if (!sameAttentionSource(attentionRun(old), attentionRun(run))) {
+          this.#projectAttention(`run:${run.id}`, attentionRun(run));
+        }
+      },
+      remove: run => {
+        this.#projectAttention(`run:${run.id}`);
+        this.#refreshNamedDelegation(run.id, run);
+      },
+    });
+    this.storage.actions.subscribe({
+      add: action => this.#projectAttention(`action:${action.id}`, this.#attentionAction(action)),
+      update: (old, action) => {
+        if (!sameAttentionSource(this.#attentionAction(old), this.#attentionAction(action))) {
+          this.#projectAttention(`action:${action.id}`, this.#attentionAction(action));
+        }
+      },
+      remove: action => this.#projectAttention(`action:${action.id}`),
+    });
+    this.storage.chatMeta.subscribe({
+      add() {},
+      update() {},
+      remove: meta => {
+        if (!this.storage.attentionProgress.get()) return;
+        for (const entry of Array.from(this.storage.attentionSources.list({ limit: WORKSPACE_ATTENTION_LIMIT }))) {
+          if (entry.kind === "action" && entry.chatId === meta.id) {
+            // The chat row still exists during this callback. Explicitly remove only navigation;
+            // the canonical request survives, and this is not a new approval notification.
+            this.#projectAttention(entry.sourceId, { ...entry, chatId: undefined }, false, false);
+          }
+        }
+      },
+    });
+    this.storage.prohibitAllSharing.subscribe({ update: value => {
+      if (value !== this.storage.prohibitAllSharing.get() && this.storage.attentionProgress.get()) {
+        this.#dirtyAttention();
+      }
+    } });
 
     if (this.storage.version.get() === 1) {
       // The workspace predates git-backed code storage (version 2, see the `version` singleton):
@@ -1837,10 +2482,35 @@ class OverseerImpl implements AgentHooks {
   // Resume any agent turns that were left running by a previous instance of this DO (i.e. were
   // interrupted by a server restart). Called synchronously from the constructor (or, when a
   // storage migration must run first, as soon as its blockConcurrencyWhile completes -- before
-  // any blocked event is delivered) so that if we were called at the start of the alarm handler,
-  // it'll recognize that agents are running and wait for them.
+  // any blocked event is delivered), so the alarm planner retains their crash-recovery deadline.
   #resumeInterruptedAgents(): void {
     for (let record of Array.from(this.storage.activeAgents.list())) {
+      if (!this.storage.chatMeta.get(record.chatId)) {
+        this.storage.activeAgents.delete(record.chatId);
+        continue;
+      }
+      this.flushCapturedActions(record.chatId, record.run);
+      const run = record.run && this.storage.taskRuns.get(record.run.id);
+      // Callback return promises and transient argument capabilities do not survive eviction.
+      if (record.callbackInitiated && record.run) {
+        this.finishTaskExecution(record.run, {status: "incomplete", reason: "interrupted"});
+      }
+      if (run && (run.status !== "running" || record.callbackInitiated)) {
+        // The final barrier committed before eviction. Never replay a finished/waiting task.
+        this.storage.activeAgents.delete(record.chatId);
+        const meta = this.storage.chatMeta.get(record.chatId);
+        if (meta) {
+          delete meta.activeAgent;
+          this.storage.chatMeta.put(meta);
+        }
+        this.#deliverWaitingExternalMessageResponse(record.chatId);
+        continue;
+      }
+      if (this.storage.automationPaused.get() || this.isNamedDelegationCanceled(record.chatId)) {
+        this.finishTaskExecution(record.run, {status: "canceled", reason: this.storage.automationPaused.get() ? "workspace_paused" : "user_stop"});
+        this.storage.activeAgents.delete(record.chatId);
+        continue;
+      }
       // Register the running agent immediately (see above), and create the LiveChatContext
       // synchronously, so that cancellations are immediately respected.
       this.#registerRunningAgent(record.chatId);
@@ -1849,28 +2519,27 @@ class OverseerImpl implements AgentHooks {
       this.#resumeAgent(record, liveChat);
     }
 
+    // Clear orphan metadata before scanning queues. Besides legacy turns, a pause removes restart
+    // intent before live cleanup; a resume followed by a crash can leave exactly this state.
+    for (let thread of Array.from(this.storage.chatMeta.list())) {
+      if (thread.currentRunId && !this.#runningAgents.has(thread.id)) {
+        const run = this.storage.taskRuns.get(thread.currentRunId);
+        if (run) this.finishTaskExecution(run, {status: "incomplete", reason: "interrupted"});
+      }
+      if (thread.activeAgent && !this.#runningAgents.has(thread.id)) {
+        this.postAgentErrorMessage(thread.id, thread.activeAgent,
+            this.storage.automationPaused.get() ? new AutomationPausedError().message :
+                "Agent interrupted due to server restart.", undefined, thread.currentRunId);
+        delete thread.activeAgent;
+        this.storage.chatMeta.put(thread);
+        this.#deliverWaitingExternalMessageResponse(thread.id);
+      }
+    }
+
     for (let meta of Array.from(this.storage.chatMeta.list())) {
       if (!meta.activeAgent && !meta.queuePaused &&
           publicChatQueue(this.storage.chatQueue, meta.id).length > 0) {
         void this.drainChatQueue(meta.id);
-      }
-    }
-
-    // Backwards compatibility: Prior to the introduction of the `activeAgents` table, we could
-    // only detect abandoned agents by the presence of `activeAgent` in the `AiChatMetadata` for
-    // the chat thread. On the first app update after `activeAgents` is introduced, we could still
-    // have such threads with no record in `activeAgents`. We can't resume these threads, but at
-    // the very least, we should properly cancel them.
-    //
-    // After this change has been deployed, we could plausibly remove this block, though it might
-    // be nice to keep for consistency purposes.
-    for (let thread of Array.from(this.storage.chatMeta.list())) {
-      if (thread.activeAgent && !this.#runningAgents.has(thread.id)) {
-        this.postAgentErrorMessage(thread.id, thread.activeAgent,
-            "Agent interrupted due to server restart.");
-        delete thread.activeAgent;
-        this.storage.chatMeta.put(thread);
-        this.#deliverWaitingExternalMessageResponse(thread.id);
       }
     }
   }
@@ -2835,7 +3504,9 @@ class OverseerImpl implements AgentHooks {
   // Entries whose targets no longer exist are silently skipped, mirroring the deleted-gadget
   // behavior elsewhere.
   getEnvForAgent(chatId: number, bindings: Record<string, ChatBindingEntry>): object {
-    let caller: GatekeeperCaller = {from: "agent", chatId};
+    const child = this.#namedChildContext(chatId);
+    if (child && this.isNamedDelegationCanceled(chatId)) throw new Error("Named delegation canceled.");
+    let caller = this.#getAgentActionCaller(chatId);
     // This must be a *plain* object: it becomes the loaded worker's `env`, and the loader's
     // serializer rejects anything else (including a null-prototype object) with DataCloneError.
     // So prototype-pollution safety comes from validation instead: names from before name
@@ -2844,6 +3515,9 @@ class OverseerImpl implements AgentHooks {
     let env: Record<string, any> = {};
 
     for (let [name, entry] of Object.entries(bindings)) {
+      if (child && (entry.type !== "workpiece" || !Object.hasOwn(child.bindings!, name) ||
+          child.bindings![name] !== entry.id ||
+          this.storage.gatekeepers.get(entry.id)?.creationSpec?.type !== "gatekeeper")) continue;
       try {
         validateBindingName(name);
       } catch (err) {
@@ -2957,6 +3631,7 @@ class OverseerImpl implements AgentHooks {
   // `sequence` is the first written message's.
   materializeChatChanges(chatId: number, meta?: AiChatMetadata, options?: {
     author?: AiChatAuthorInfo,
+    runId?: string,
     allowDuringTurn?: boolean,
     createdGadgets?: {gadgetId: WorkpieceId, title: string, bindingName: string}[],
     addedBindings?: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
@@ -3014,11 +3689,26 @@ class OverseerImpl implements AgentHooks {
           ? {addedBindings: options.addedBindings} : {}),
       ...(options?.mainlineMerge !== undefined
           ? {mainlineMerge: options.mainlineMerge} : {}),
-    }]);
+    }], undefined, undefined, undefined, undefined, options?.runId);
 
     this.#retireChatChanges(rows);
     this.#pruneRetiredChatChanges(chatId);
     return {sequence, meta: this.getChatMetaOrThrow(chatId)};
+  }
+
+  /** The awaited pre-dispatch barrier, independent of the later transcript/change transaction. */
+  async auditToolCalls(chatId: number, author: AiChatAuthorInfo,
+      calls: ToolCallAuditRecord["calls"], execution?: ToolCallAuditRecord["execution"]): Promise<void> {
+    this.assertAutomationAllowed();
+    if (calls.length > 128 || calls.some(call => !call.toolCallId || call.toolCallId.length > 256 ||
+        !/^[A-Za-z][A-Za-z0-9_]{0,99}$/.test(call.toolName))) {
+      throw new AgentTurnError("Tool batch exceeds audit limits; no tools were executed.");
+    }
+    this.storage.toolCallAudits.put({id: crypto.randomUUID(), chatId, modelId: author.id,
+      agentProfileId: author.agentProfileId, execution, recordedAt: new Date(),
+      calls: calls.map(({toolCallId, toolName}) => ({toolCallId, toolName}))});
+    // SQL writes are synchronous but durable flushing isn't. Never dispatch on an unconfirmed row.
+    await this.ctx.storage.sync();
   }
 
   // AgentHooks implementation: the agent step's persistence barrier (see the interface doc for
@@ -3042,6 +3732,8 @@ class OverseerImpl implements AgentHooks {
         changes: AgentStepChange[],
         createdGadgets: {gadgetId: WorkpieceId, title: string, bindingName: string}[],
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
+        run?: {id: string; attempt: number; disposition?: TaskRunDisposition},
+        delegations?: PreparedNamedDelegation[],
       },
       totalTokens?: number, aiGatewayLogId?: string, aiGatewayLogRoute?: AiGatewayLogRoute,
       estimatedCost?: number): Promise<boolean> {
@@ -3065,10 +3757,80 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
+    const launches: Array<{prepared: PreparedNamedDelegation & {model: UserAiModelRecord}; record: ActiveAgentRecord}> = [];
     try {
-      return this.storage.transaction(() => {
+      const result = this.storage.transaction(() => {
         let fresh = this.storage.chatMeta.get(chatId);
         if (!fresh) return false;  // chat deleted during the prefetches
+
+        const admissions = new Map<string, PreparedNamedDelegation>();
+        const delegateCalls = msgs.flatMap(msg => msg.type === "message" ? msg.toolCalls ?? [] : [])
+          .filter(call => call.toolName === "delegateToBot");
+        const drafts = step.delegations ?? [];
+        let childCount = step.run ? [...this.storage.namedDelegations.byParentRun.get(step.run.id)].length : 0;
+        // Validate complete identity groups before allocation. A later conflicting draft/mark
+        // invalidates the whole admission, not just its evidence after a child has been staged.
+        for (const id of new Set([...delegateCalls.map(call => call.delegationId), ...drafts.map(p => p?.id)])) {
+          const calls = delegateCalls.filter(call => call.delegationId === id && !call.error);
+          const group = drafts.filter(p => p?.id === id);
+          try {
+            if (typeof id !== "string" || !calls.length || !group.length) {
+              throw new Error("Delegation has no matching parent tool evidence.");
+            }
+            const prepared = group[0];
+            const digest = delegationInputDigest(prepared.input);
+            for (const call of calls) {
+              if (delegationInputDigest(call.input) !== digest) {
+                throw new Error("Delegation requestId reused with different input.");
+              }
+            }
+            const existing = this.storage.namedDelegations.get(id);
+            for (const draft of group) {
+              if (delegationInputDigest(draft.input) !== digest) {
+                throw new Error("Delegation requestId reused with different input.");
+              }
+              if (draft.parentChatId !== chatId || step.run?.id !== draft.execution.id ||
+                  step.run.attempt !== draft.execution.attempt || id !== createHash("sha256").update(
+                    JSON.stringify([this.ctx.id.toString(), draft.execution.id, draft.input.requestId])).digest("hex")) {
+                throw new Error("Delegation has no matching parent execution.");
+              }
+              if (existing) {
+                if (existing.inputDigest !== digest) throw new Error("Delegation requestId reused with different input.");
+                continue;
+              }
+              if (draft.group) {
+                this.#assertGroupAuthor(chatId, draft.execution, draft.generation);
+                if ('existing' in draft || !isDeepStrictEqual(draft.group, fresh.groupParent) ||
+                    !draft.group.members.some(member => member.id === draft.input.targetAgentId)) throw new Error('Group scope changed');
+                this.#validateNamedBindings(draft.bindings);
+                const available = this.storage.chatContext.get(chatId)?.bindings ?? {};
+                if (Object.entries(draft.bindings).some(([name, target]) => available[name] !== target)) throw new Error('Group resource grant changed');
+                continue;
+              }
+              this.#assertNamedParent(chatId, draft.execution, draft.generation);
+              const config = this.storage.namedDelegationConfig.get();
+              const target = config.targets.find(t => t.targetAgentId === draft.input.targetAgentId);
+              if (config.revision !== draft.configRevision || !target || "existing" in draft ||
+                  this.storage.chatContext.get(chatId)?.agentId !== config.sourceAgentId) {
+                throw new Error("Delegation configuration changed before admission.");
+              }
+              const bindings = Object.fromEntries((draft.input.bindingNames ?? []).map(name => [name, target.bindings[name]]));
+              if (!isDeepStrictEqual(Object.entries(draft.bindings).toSorted(), Object.entries(bindings).toSorted())) {
+                throw new Error("Delegation binding grant changed.");
+              }
+              this.#validateNamedBindings(draft.bindings);
+            }
+            if (existing) continue;
+            if (prepared.group) {
+              const count = this.storage.chatMeta.get(prepared.group.chatId)?.groupRound?.childChatIds.length ?? MAX_GROUP_EXECUTIONS;
+              if (count + [...admissions.values()].filter(item => item.group).length >= MAX_GROUP_EXECUTIONS) throw new Error('Group round reached its handoff limit');
+            } else if (childCount >= MAX_NAMED_CHILDREN) throw new Error("Parent task has reached its lifetime delegation limit.");
+            ++childCount;
+            admissions.set(id, prepared);
+          } catch (error) {
+            for (const call of calls) call.error = stringifyError(error);
+          }
+        }
 
         if (step.changes.length > 0) {
           let codeBase = this.chatCodeBase(fresh);
@@ -3107,15 +3869,86 @@ class OverseerImpl implements AgentHooks {
           }
         }
 
-        this.addChatMessages(chatId, author, msgs, totalTokens, aiGatewayLogId,
-                             aiGatewayLogRoute, estimatedCost);
-        return this.materializeChatChanges(chatId, undefined, {
+        // Stop/pause can reconcile durable actions while the step's content prefetch yields.
+        // Keep the tool message but do not append an action card that reconciliation already wrote.
+        const actionIds = new Set(msgs.flatMap(msg => msg.type === "action" ? [msg.actionId] : []));
+        const postedActions = new Set<number>();
+        if (actionIds.size) {
+          const history = step.run
+            ? this.storage.chats.byRunSequence.list({prefix: `${step.run.id}.`})
+            : this.storage.chats.list({prefix: `${keyString(chatId)}.`});
+          for (const msg of history) {
+            if (msg.type === "action" && actionIds.has(msg.actionId)) postedActions.add(msg.actionId);
+          }
+        }
+        this.addChatMessages(chatId, author,
+            msgs.filter(msg => msg.type !== "action" || !postedActions.has(msg.actionId)), totalTokens, aiGatewayLogId,
+                             aiGatewayLogRoute, estimatedCost, step.run?.id);
+        for (const prepared of admissions.values()) {
+          if ("existing" in prepared) continue;
+          const childChatId = this.nextChatId();
+          const timestamp = this.getChatTimestamp();
+          const parentChatId = prepared.group?.chatId ?? chatId;
+          const parentRunId = prepared.group?.roundId ?? prepared.execution.id;
+          const receipt: NamedDelegationReceipt = {
+            id: prepared.id, parentRunId, parentChatId,
+            parentAttempt: prepared.execution.attempt, parentSequence: this.nextChatSequencePeek(parentChatId),
+            childChatId, targetAgentId: prepared.input.targetAgentId, targetName: prepared.targetName,
+          };
+          const initiator = this.storage.activeAgents.get(chatId)!.initiator;
+          const childAuthor = {...prepared.model.profile, name: prepared.targetName};
+          this.storage.namedDelegations.put({id: receipt.id, receipt, input: prepared.input,
+            inputDigest: delegationInputDigest(prepared.input), canceled: false});
+          this.storage.chatMeta.put({id: childChatId, title: prepared.input.title, started: timestamp,
+            lastActive: timestamp, activeAgent: childAuthor, namedDelegation: receipt, groupParent: prepared.group});
+          this.storage.chatContext.put({chatId: childChatId,
+            spawnerConfig: {displayName: prepared.targetName, modelId: prepared.model.profile.id, env: prepared.bindings},
+            bindings: prepared.bindings, agentInstructions: prepared.targetInstructions,
+            namedDelegation: receipt, groupPeers: prepared.group?.members, alwaysAvailableCapsuleIds: [], alwaysAvailableCatalogs: []});
+          const sharedHistory = prepared.group ? [...this.storage.chats.list({prefix: `${keyString(parentChatId)}.`, reverse: true, limit: 60})].toReversed() : [];
+          const sourceRun = prepared.group && this.storage.taskRuns.get(prepared.group.roundId);
+          const groupSource = sourceRun && this.storage.chats.get(`${keyString(parentChatId)}.${keyString(sourceRun.sourceSequence)}`);
+          const attachments = groupSource && groupSource.type === 'message' ? groupSource.attachments?.filter(attachment => prepared.group!.attachmentIds.includes(attachment.id)) : undefined;
+          this.addChatMessages(childChatId, initiator, [{type: "message", attachments,
+            message: prepared.group ? `${groupPrompt(sharedHistory)}\n\nHandoff task:\n${prepared.input.prompt}` : prepared.input.prompt}]);
+          const run = this.admitTaskRun(childChatId, 0, {type: "delegation", parent: {
+            runId: receipt.parentRunId, chatId, attempt: receipt.parentAttempt,
+            targetAgentId: receipt.targetAgentId, targetName: receipt.targetName,
+          }}, receipt.id);
+          this.storage.taskRuns.put({...run, status: "running", reason: undefined, attempt: 1});
+          const record: ActiveAgentRecord = {chatId: childChatId, run: {id: receipt.id, attempt: 1},
+            initiatorUserId: this.ownerId!, initiator, modelId: prepared.model.profile.id, callbackInitiated: false};
+          this.storage.activeAgents.put(record);
+          this.addChatMessages(parentChatId, author, [{type: "namedDelegation", delegation: receipt}],
+              undefined, undefined, undefined, undefined, receipt.parentRunId);
+          if (prepared.group) {
+            const parent = this.getChatMetaOrThrow(parentChatId);
+            this.storage.chatMeta.put({...parent, groupRound: {id: parentRunId, childChatIds: [...parent.groupRound!.childChatIds, childChatId]}});
+          }
+          launches.push({prepared, record});
+        }
+        const materialized = this.materializeChatChanges(chatId, undefined, {
           author,
+          runId: step.run?.id,
           allowDuringTurn: true,
           createdGadgets: step.createdGadgets,
           addedBindings: step.addedBindings,
         }) !== undefined;
+        if (step.run?.disposition && !(step.run.disposition.reason === "model_stop" &&
+            this.activeAgentCallbackCount(chatId) > 0)) {
+          this.finishTaskExecution(step.run, step.run.disposition);
+        }
+        return materialized;
       });
+      // No inference or in-memory registration until the entire parent barrier has committed.
+      // The durable intent above is sufficient for constructor recovery if this instance dies here.
+      for (const {prepared, record} of launches) {
+        if (!this.storage.activeAgents.get(record.chatId) || this.isNamedDelegationCanceled(record.chatId)) continue;
+        this.#registerRunningAgent(record.chatId);
+        this.ctx.waitUntil(this.#runAgentTurn(record.chatId, prepared.model, record.initiator,
+          false, this.#getLiveChat(record.chatId)));
+      }
+      return result;
     } catch (err) {
       // The transaction rolled the rows back, but the append path already advanced the
       // in-memory caches to reflect them; drop both so later reads rebuild from storage.
@@ -4367,7 +5200,20 @@ class OverseerImpl implements AgentHooks {
   // requiring them here guarantees the audit log always records the resolving user and whether it
   // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
   async applyPendingAction(record: ActionRecord & {type: "action"},
-                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<boolean> {
+    // An existing drain may be parked in the preceding apply. Recheck at every external call.
+    if (autoApproved) {
+      if (this.storage.automationPaused.get()) return false;
+      const tag = record.description.actionKind?.tag;
+      if (!await this.canAutoApprove(record.gatekeeperId, tag)) return false;
+      const rule = this.storage.autoApproveTags.get(`${record.gatekeeperId}:${tag}`);
+      if (this.storage.automationPaused.get() || !rule) return false;
+      const fresh = this.storage.actions.get(record.id);
+      if (!fresh || fresh.type !== 'action' || fresh.state !== 'pending' ||
+          fresh.description.autoApprovable !== true || fresh.description.actionKind?.tag !== tag) return false;
+      record = fresh;
+      resolvedBy = rule.enabledBy;
+    }
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     await gatekeeper.applyAction(record.action);
     record.state = "approved";
@@ -4375,6 +5221,15 @@ class OverseerImpl implements AgentHooks {
     record.resolvedBy = resolvedBy;
     record.autoApproved = autoApproved;
     this.storage.actions.put(record);
+    return true;
+  }
+
+  /** Read the authoritative admin boundary immediately before automatic application. */
+  async canAutoApprove(gatekeeperId: number, tag: string | undefined): Promise<boolean> {
+    const spec = this.storage.gatekeepers.get(gatekeeperId)?.creationSpec;
+    const vendorId = spec?.type === 'gatekeeper' || spec?.type === 'ambient' ? spec.vendorId : undefined;
+    const boundaries = await this.ctx.exports.AdminSettings.getByName('').getAutoReviewBoundaries();
+    return !requiresManualReview(boundaries, vendorId, tag);
   }
 
   // Apply all currently-eligible pending actions of the given gatekeeper, in ascending id order.
@@ -4385,11 +5240,13 @@ class OverseerImpl implements AgentHooks {
   // Delegates to the single-flight drainer, which guards against concurrent drains for the same
   // gatekeeper double-applying an action (the DO's input gate is open across the apply await).
   drainAutoApprovals(gatekeeperId: number): Promise<void> {
+    if (this.storage.automationPaused.get()) return Promise.resolve();
     return this.#autoApprovalDrainer.drain(gatekeeperId);
   }
 
   // Blocks other messages and agent turns for this chat until the returned object is disposed.
   reserveChatMessagePreparation(chatId: number): Disposable {
+    let generation = this.automationGeneration;
     if (this.#preparingChatMessages.has(chatId)) {
       throw new Error("A chat message is already being prepared for this chat.");
     }
@@ -4407,6 +5264,8 @@ class OverseerImpl implements AgentHooks {
         let liveChat = this.#liveChats.get(chatId);
         if (liveChat?.pendingAgentCallbacks.length && !meta?.activeAgent) {
           this.#startAgentForCallbacks(meta, liveChat);
+        } else if (generation !== this.automationGeneration) {
+          this.ctx.waitUntil(this.drainChatQueue(chatId));
         }
       },
     };
@@ -4468,10 +5327,12 @@ class OverseerImpl implements AgentHooks {
 
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    this.#assertNamedResourceCaller(caller, target.id);
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
-          this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
+          let captured = this.#getOrCreateCapturedActions(caller);
+          if (captured) captured.accessedGadget = true;
         }
         let chatId = "chatId" in caller ? caller.chatId : undefined;
         return this.getGadgetFacet(target.id, chatId);
@@ -4489,10 +5350,11 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Maps chat ID to action numbers recently performed by that chat's agent. These are drained into
-  // the chat log after the tool returns. `awaitDecision` is true if any captured action needs it.
-  #capturedActions = new Map<number, {actions: number[], accessedGadget: boolean,
-                                      awaitDecision: boolean}>();
+  // A sealed caller belongs to one live turn, including untracked legacy turns. Run identity alone
+  // is not enough: an approval/retry starts another attempt of the same logical task.
+  #agentActionCallers = new WeakMap<object, Extract<GatekeeperCaller, {from: "agent"}>>();
+  #capturedActions = new Map<string, {caller: Extract<GatekeeperCaller, {from: "agent"}>,
+    actions: number[], accessedGadget: boolean, awaitDecision: boolean}>();
 
   // Maps chat ID to connectionRequest message bodies created by that chat's agent during the
   // current step. Spliced into the chat log after the tool call returns (see
@@ -4503,19 +5365,103 @@ class OverseerImpl implements AgentHooks {
   // current step. Spliced into the chat log after the tool call returns.
   #capturedComputerHumanTakeovers = new Map<number, AiChatMessageBody[]>();
 
-  #getOrCreateCapturedActions(chatId: number) {
-    let result = this.#capturedActions.get(chatId);
-    if (!result) {
-      result = {actions: [], accessedGadget: false, awaitDecision: false};
-      this.#capturedActions.set(chatId, result);
+  #getAgentActionCaller(chatId: number): Extract<GatekeeperCaller, {from: "agent"}> {
+    const turn = this.#liveChats.get(chatId)?.turn;
+    let caller = turn && this.#agentActionCallers.get(turn);
+    if (!caller) {
+      const record = this.storage.activeAgents.get(chatId);
+      caller = {from: "agent", chatId, runId: record?.run?.id, attempt: record?.run?.attempt,
+        author: record?.initiator, captureId: turn ? crypto.randomUUID() : undefined};
+      if (turn) this.#agentActionCallers.set(turn, caller);
+    }
+    return caller;
+  }
+
+  #getOrCreateCapturedActions(caller: Extract<GatekeeperCaller, {from: "agent"}>, create = true) {
+    const live = this.#liveChats.get(caller.chatId);
+    const active = this.storage.activeAgents.get(caller.chatId);
+    if (!caller.captureId || !live?.turn || live.cancelController.signal.aborted || !active ||
+        this.#agentActionCallers.get(live.turn)?.captureId !== caller.captureId ||
+        active.run?.id !== caller.runId || active.run?.attempt !== caller.attempt ||
+        this.storage.chatMeta.get(caller.chatId)?.currentRunId !== caller.runId) return;
+    if (caller.runId) {
+      const run = this.storage.taskRuns.get(caller.runId);
+      if (run?.status !== "running" || run.attempt !== caller.attempt) return;
+    }
+    let result = this.#capturedActions.get(caller.captureId);
+    if (!result && create) {
+      result = {caller, actions: [], accessedGadget: false, awaitDecision: false};
+      this.#capturedActions.set(caller.captureId, result);
     }
     return result;
+  }
+
+  #postAgentActions(caller: Extract<GatekeeperCaller, {from: "agent"}>, actionIds: number[]) {
+    if (!this.storage.chatMeta.get(caller.chatId)) return;
+    const run = caller.runId ? this.storage.taskRuns.get(caller.runId) : undefined;
+    if (caller.runId && run?.chatId !== caller.chatId) return;
+    const messages = caller.runId
+      ? this.storage.chats.byRunSequence.list({prefix: `${caller.runId}.`, reverse: true})
+      : this.storage.chats.list({prefix: `${keyString(caller.chatId)}.`, reverse: true});
+    const posted = new Set<number>();
+    let author: AiChatAuthorInfo | undefined;
+    let sourceAuthor: AiChatAuthorInfo | undefined;
+    for (const message of messages) {
+      if (message.runId !== caller.runId) continue;
+      if (message.type === "action") posted.add(message.actionId);
+      if (message.author.type === "agent") author ??= message.author;
+      if (message.sequence === run?.sourceSequence || !caller.runId) sourceAuthor ??= message.author;
+    }
+    author ??= caller.author ?? sourceAuthor;
+    const msgs = actionIds.filter(id => !posted.has(id)).map(actionId => ({type: "action" as const, actionId}));
+    if (!msgs.length) return;
+    if (!author) throw new Error("Missing source author for agent action.");
+    this.ctx.storage.transactionSync(() => {
+      this.addChatMessages(caller.chatId, author, msgs,
+          undefined, undefined, undefined, undefined, caller.runId);
+    });
+  }
+
+  // Call from the execution finalizer (and restart recovery) with its ORIGINAL identity. Read the
+  // durable actions, not just the buffer: consume may have run before a failed step transaction,
+  // or the isolate may have died. Existing cards make this idempotent after a successful barrier.
+  flushCapturedActions(chatId: number, execution: ActiveAgentRecord["run"]): void {
+    const sources = new Map<string | undefined, {
+      caller: Extract<GatekeeperCaller, {from: "agent"}>, actions: number[],
+    }>();
+    const records = execution ? this.storage.actions.byRun.get(execution.id) : this.storage.actions.list();
+    for (const record of records) {
+      const caller = record.caller;
+      if (caller.from === "agent" && caller.chatId === chatId && caller.runId === execution?.id &&
+          caller.attempt === execution?.attempt) {
+        let source = sources.get(caller.captureId);
+        if (!source) sources.set(caller.captureId, source = {caller, actions: []});
+        source.actions.push(record.id);
+      }
+    }
+    for (const {caller, actions} of sources.values()) {
+      try {
+        this.#postAgentActions(caller, actions);
+      } catch (err) {
+        // Leave the canonical actions available for recovery without masking the turn's outcome.
+        this.logger.warn("failed to flush action chat messages", {
+          event: "action.chat.message.flush.failed", chatId, error: err,
+        });
+      }
+    }
+    for (const [key, {caller}] of this.#capturedActions) {
+      if (caller.chatId === chatId && caller.runId === execution?.id && caller.attempt === execution?.attempt) {
+        this.#capturedActions.delete(key);
+      }
+    }
   }
 
   async #associateAction(caller: GatekeeperCaller, actionId: number) {
     try {
       if (caller.from === "agent") {
-        this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
+        const captured = this.#getOrCreateCapturedActions(caller);
+        if (captured) captured.actions.push(actionId);
+        else this.#postAgentActions(caller, [actionId]);
       } else if (caller.from !== "hook" && caller.chatId !== undefined && this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
@@ -4537,6 +5483,7 @@ class OverseerImpl implements AgentHooks {
 
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
+    this.#assertNamedResourceCaller(caller, gatekeeperId);
     if (description.prohibitAllSharing) {
       if ((await this.getSharingManager()).hasAnyShares()) {
         throw new Error(
@@ -4557,6 +5504,7 @@ class OverseerImpl implements AgentHooks {
       await this.#enforceExcludeObservers(description.excludeObservers);
     }
 
+    this.#assertNamedResourceCaller(caller, gatekeeperId);
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -4579,11 +5527,36 @@ class OverseerImpl implements AgentHooks {
   }
 
   async getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array> {
+    const groupParent = this.storage.chatMeta.get(chatId)?.groupParent;
+    if (groupParent?.attachmentIds.includes(id)) chatId = groupParent.chatId;
     let content = this.storage.chatAttachmentContent.get(validateChatAttachmentId(id));
-    if (!content || content.state.type !== "committed" || content.state.chatId !== chatId) {
+    if (!content || content.state.type !== "committed" || content.state.chatId !== chatId || !this.storage.chatMeta.get(chatId)) {
       throw new Error("Chat attachment not found.");
     }
-    return content.data;
+    return content.modelText !== undefined ? new TextEncoder().encode(content.modelText) : this.readChatAttachmentContent(chatId, id);
+  }
+
+  /** Read original bytes only for a committed attachment in this conversation. */
+  async readChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array> {
+    const groupParent = this.storage.chatMeta.get(chatId)?.groupParent;
+    if (groupParent?.attachmentIds.includes(id)) chatId = groupParent.chatId;
+    const content = this.storage.chatAttachmentContent.get(validateChatAttachmentId(id));
+    if (!content || content.state.type !== 'committed' || content.state.chatId !== chatId || !this.storage.chatMeta.get(chatId)) throw new Error('Chat attachment not found.');
+    if (!content.blob) return content.data;
+    const object = await this.env.BLUEPRINT_CONTENT.get(content.blob.key);
+    if (!object || object.size !== content.blob.size || object.size > 4 * 1024 * 1024) throw new Error('Chat attachment not found.');
+    const data = new Uint8Array(await object.arrayBuffer());
+    if (!this.storage.chatMeta.get(chatId) || this.storage.chatAttachmentContent.get(id)?.state.type !== 'committed') throw new Error('Chat attachment not found.');
+    return data;
+  }
+
+  /** Delete staged/removed attachment bytes; paths always come from server-owned metadata. */
+  deleteAttachmentContent(id: string): void {
+    const content = this.storage.chatAttachmentContent.get(id);
+    this.storage.chatAttachmentContent.delete(id);
+    if (content?.blob) this.ctx.waitUntil(Promise.resolve().then(async () => {
+      if (!this.storage.chatAttachmentContent.get(id)) await this.env.BLUEPRINT_CONTENT.delete(content.blob!.key);
+    }).catch(() => {}));
   }
 
   // Prepare a stored chat message for delivery to a client: inline image attachment bytes
@@ -4592,6 +5565,13 @@ class OverseerImpl implements AgentHooks {
   // rollback insurance (see git-migration.ts) but nothing can apply it, so it must not ship as
   // dead weight on the wire (it is not part of the message's API type).
   hydrateChatMessageForClient(msg: AiChatMessage): AiChatMessage {
+    if (msg.type === "namedDelegation") {
+      try {
+        const result = this.getNamedDelegation(msg.delegation.id);
+        if (isDeepStrictEqual(result.receipt, msg.delegation)) return {...msg, result};
+      } catch { /* Missing/corrupt optional presentation must not break the transcript. */ }
+      return {...msg, result: undefined};
+    }
     if (msg.type === "changes" && "update" in msg) {
       let {update: _, ...rest} = msg as AiChatMessage & {update?: Uint8Array};
       msg = rest as AiChatMessage;
@@ -4615,6 +5595,7 @@ class OverseerImpl implements AgentHooks {
   canonicalizeChatAttachmentRefs(
     attachments?: ChatAttachmentHandle[],
     provider?: AiModelConfig["provider"],
+    multiAuthor = false,
   ): ChatAttachmentRef[] | undefined {
     if (!attachments || attachments.length === 0) return undefined;
     if (attachments.length > MAX_CHAT_ATTACHMENTS_PER_MESSAGE) {
@@ -4622,6 +5603,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     let total = 0;
+    let modelBytes = 0;
     let result: ChatAttachmentRef[] = [];
     let seenIds = new Set<string>();
     for (let attachment of attachments) {
@@ -4632,18 +5614,21 @@ class OverseerImpl implements AgentHooks {
       if (!content || content.state.type !== "staged") {
         throw new Error("Chat attachment not found.");
       }
-      assertChatAttachmentSupportedByProvider(provider, content.state.mimeType, content.data.byteLength);
-      total += content.data.byteLength;
+      const size = content.blob?.size ?? content.data.byteLength;
+      assertChatAttachmentSupportedByProvider(provider, content.state.mimeType, size);
+      total += size;
+      modelBytes += content.modelText === undefined ? size : new TextEncoder().encode(content.modelText).byteLength;
       result.push({
         id,
         mimeType: content.state.mimeType,
         name: content.state.name,
-        size: content.data.byteLength,
+        size,
       });
     }
     if (total > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
       throw new Error("Attached files are too large.");
     }
+    if (multiAuthor && modelBytes > 2 * 1024 * 1024) throw new Error('Concurrent group attachment inputs must total 2 MiB or less after Office text extraction.');
     return result;
   }
 
@@ -4655,8 +5640,7 @@ class OverseerImpl implements AgentHooks {
         throw new Error("Chat attachment is no longer available.");
       }
       this.storage.chatAttachmentContent.put({
-        fileId: id,
-        data: content.data,
+        ...content,
         state: {type: "committed", chatId},
       });
     }
@@ -4666,7 +5650,7 @@ class OverseerImpl implements AgentHooks {
     let cutoff = Date.now() - MAX_STAGED_CHAT_ATTACHMENT_AGE_MS;
     this.ctx.storage.transactionSync(() => {
       for (let content of Array.from(this.storage.chatAttachmentContent.stagedByUploadedAt.list({end: cutoff}))) {
-        this.storage.chatAttachmentContent.delete(content.fileId);
+        this.deleteAttachmentContent(content.fileId);
       }
     });
   }
@@ -4725,9 +5709,49 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
-  async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
-    if (!this.ownerId) throw new Error("Workspace not initialized.");
-    return resolveComputerSession(this.ctx, this.ownerId, agentId);
+  /** Verify both the current owner and the agent's dedicated workspace, never a group workspace. */
+  async assertComputerWorkspace(ownerId: string, agentId: string): Promise<void> {
+    if (!ownerId || this.ownerId !== ownerId) throw new Error("Browser control is owner-only");
+    const owner = this.users.get(this.users.idFromString(ownerId));
+    const agent = await retryOnDoReset(() => owner.getAgent(agentId), this.logger);
+    if (this.ownerId !== ownerId) throw new Error("Browser control is owner-only");
+    if (!agent || agent.workspaceId !== this.ctx.id.toString()) {
+      throw new Error("Browser access requires the agent's dedicated workspace");
+    }
+  }
+
+  /** Recheck synchronous policy after awaits; no browser observation bypasses sensitive lockdown. */
+  assertComputerAccess(ownerId: string, agentId: string, actor: "owner" | "agent", action: boolean, revision?: number): void {
+    if (!ownerId || this.ownerId !== ownerId) throw new Error("Browser control is owner-only");
+    const control = this.storage.computerControl.get();
+    if (revision !== undefined && revision !== (control?.revision ?? 0)) {
+      throw new Error("Browser control changed; retry with current authority");
+    }
+    if (actor === "agent") {
+      this.assertAutomationAllowed();
+      if (this.storage.prohibitAllSharing.get()) {
+        throw new Error("Agent browser access is blocked because this workspace has observed sensitive data");
+      }
+    }
+    const mode = control?.agentId === agentId ? control.mode : "disabled";
+    if (mode === "disabled") throw new Error("Browser access is disabled; the owner must explicitly enable it");
+    if (actor === "agent" && mode !== "agent") throw new Error("Browser is under human control");
+    if (actor === "owner" && action && mode !== "human") {
+      throw new Error("Switch browser control to human before manual interaction");
+    }
+  }
+
+  async getComputerSession(agentId: string): Promise<RpcStub<ComputerSession>> {
+    const generation = this.automationGeneration;
+    this.assertAutomationAllowed(generation);
+    const ownerId = this.ownerId;
+    if (!ownerId) throw new Error("Workspace not initialized.");
+    const revision = this.storage.computerControl.get()?.revision ?? 0;
+    this.assertComputerAccess(ownerId, agentId, "agent", false, revision);
+    await this.assertComputerWorkspace(ownerId, agentId);
+    this.assertAutomationAllowed(generation);
+    this.assertComputerAccess(ownerId, agentId, "agent", false, revision);
+    return resolveComputerSession(this, ownerId, agentId, "agent");
   }
 
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
@@ -4739,7 +5763,7 @@ class OverseerImpl implements AgentHooks {
       resourceTitle: string,
       resourceUrl: string | undefined,
       description: ObservationDescription): Promise<void> {
-    let caller: GatekeeperCaller = {from: "agent", chatId};
+    let caller = this.#getAgentActionCaller(chatId);
 
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
@@ -4763,6 +5787,7 @@ class OverseerImpl implements AgentHooks {
   async submitAction(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
       : Promise<void> {
+    this.#assertNamedResourceCaller(caller, gatekeeperId);
     if (this.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace is prohibited " +
@@ -4793,12 +5818,14 @@ class OverseerImpl implements AgentHooks {
     // Same auto-approval gate as before, named because awaitDecision uses it too. The drain is
     // deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
     let willAutoApprove = !!(description.autoApprovable && description.actionKind &&
-        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined);
+        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined &&
+        await this.canAutoApprove(gatekeeperId, description.actionKind.tag));
 
     // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
     // Auto-approved actions keep the seamless behavior the user opted into.
     if (caller.from === "agent" && description.awaitDecision && !willAutoApprove) {
-      this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
+      const captured = this.#getOrCreateCapturedActions(caller);
+      if (captured) captured.awaitDecision = true;
     }
 
     if (willAutoApprove) {
@@ -4810,6 +5837,10 @@ class OverseerImpl implements AgentHooks {
         gatekeeperId: number, controller: Fetcher<HookController<Hook>>,
         callback: NativeRpcStub<Hook>, description: HookDescription, caller: GatekeeperCaller)
         : Promise<void> {
+    this.#assertNamedResourceCaller(caller, gatekeeperId);
+    if (caller.from === "agent" && caller.runId && this.storage.namedDelegations.get(caller.runId)) {
+      throw new Error("Named delegated tasks cannot register persistent hooks.");
+    }
     let hookId = this.storage.nextHookId.get();
     this.storage.nextHookId.put(hookId + 1);
 
@@ -5212,6 +6243,7 @@ class OverseerImpl implements AgentHooks {
     let queue = publicChatQueue(this.storage.chatQueue, meta.id);
     return {
       ...meta,
+      queuePaused: this.storage.automationPaused.get() || meta.queuePaused,
       queue: queue.length > 0 ? queue : undefined,
     };
   }
@@ -5232,6 +6264,8 @@ class OverseerImpl implements AgentHooks {
     formats?: MessageFormatRef[],
     agentId?: string,
   ): ChatQueueItem {
+    if (this.#namedChildContext(chatId)) throw new Error("Send follow-up instructions in the parent conversation.");
+    this.assertAutomationAllowed();
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
@@ -5291,20 +6325,24 @@ class OverseerImpl implements AgentHooks {
   }
 
   async drainChatQueue(chatId: number): Promise<void> {
+    let generation = this.automationGeneration;
     let meta = this.storage.chatMeta.get(chatId);
-    if (!meta || meta.activeAgent || meta.queuePaused || this.isPreparingChatMessage(chatId)
-        || this.#drainingChats.has(chatId)) {
+    if (this.storage.automationPaused.get() || !meta || meta.activeAgent || meta.queuePaused ||
+        this.isPreparingChatMessage(chatId) || this.#drainingChats.has(chatId)) {
       return;
     }
-    let head = takeChatQueueHead(this.storage.chatQueue, chatId);
+    // Keep the head durable until its prompt is committed. The in-memory reservation excludes
+    // concurrent drains; a crash during preparation leaves the original queue intact. Preparation
+    // (notably a slash command) can still have external effects; this is not exactly-once execution.
+    let head = listChatQueue(this.storage.chatQueue, chatId)[0];
     if (!head) return;
-    this.storage.chatMeta.put(meta);
     this.#drainingChats.add(chatId);
+    let completed = false;
     try {
       await this.#deliverQueuedPrompt(head);
+      completed = true;
     } catch (err) {
-      restoreChatQueueHead(this.storage.chatQueue, head);
-      this.storage.chatMeta.put(meta);
+      if (err instanceof AutomationPausedError) return;
       this.logger.error("failed to drain chat queue", {
         event: "chat.queue.drain.failed",
         chatId,
@@ -5315,17 +6353,27 @@ class OverseerImpl implements AgentHooks {
           err instanceof Error ? err.message : `${err}`);
     } finally {
       this.#drainingChats.delete(chatId);
+      // Continue after a consumed/edited/canceled head, or a resume that arrived while the old
+      // admission still held this reservation. Failures otherwise leave the queue for user retry.
+      if ((completed || generation !== this.automationGeneration) && !this.storage.automationPaused.get()) {
+        this.ctx.waitUntil(this.drainChatQueue(chatId));
+      }
     }
   }
 
   async #deliverQueuedPrompt(item: ChatQueueRecord): Promise<void> {
+    let generation = this.automationGeneration;
+    this.assertAutomationAllowed(generation);
     let user = wrapDoStubForTelemetry(
         this.users.get(this.users.idFromString(item.initiatorUserId)), this.logger);
     let userMeta = await retryOnDoReset(
         () => user.getChatContext(item.modelId, this.ctx.id.toString(), item.agentId), this.logger);
+    this.assertAutomationAllowed(generation);
+    let fresh = listChatQueue(this.storage.chatQueue, item.chatId)[0];
+    if (!fresh || fresh.id !== item.id) return;
     await this.sendChatMessage(
-        user, userMeta, item.chatId, item.message, item.capsules, item.attachments, undefined,
-        item.formats, true);
+        user, userMeta, fresh.chatId, fresh.message, fresh.capsules, fresh.attachments, undefined,
+        fresh.formats, fresh);
   }
 
   #drainingChats = new Set<number>();
@@ -5452,8 +6500,14 @@ class OverseerImpl implements AgentHooks {
       chatId: number, timestamp: Date, author: AiChatAuthorInfo,
       prepared: PreparedChatMessage, capsules: CapsuleSpecifier[] | undefined,
       attachments: ChatAttachmentRef[] | undefined,
-      formats: MessageFormatRef[] | undefined): number | undefined {
+      formats: MessageFormatRef[] | undefined,
+      source?: TaskRunSource): number | undefined {
     this.#validateCapsules(chatId, capsules);
+    if (prepared.message !== undefined && !source) {
+      const meta = this.getChatMetaOrThrow(chatId);
+      delete meta.currentRunId;
+      this.storage.chatMeta.put(meta);
+    }
     // Format references describe the text the user wrote, which for a slash command is its
     // arguments, what the transcript shows, not the message the provider expanded them into.
     formats = sanitizeMessageFormatRefs(
@@ -5485,6 +6539,7 @@ class OverseerImpl implements AgentHooks {
         formats,
         ...(prepared.skillName ? {skillName: prepared.skillName} : {}),
       });
+      if (source) this.admitTaskRun(chatId, messageSequence, source);
       return messageSequence;
     }
 
@@ -5504,7 +6559,446 @@ class OverseerImpl implements AgentHooks {
       formats,
       ...(prepared.skillName ? {skillName: prepared.skillName} : {}),
     });
+    if (source) this.admitTaskRun(chatId, messageSequence, source);
     return messageSequence;
+  }
+
+  async #namedDelegationSource(ownerId: string): Promise<AgentProfile> {
+    if (!this.ownerId || ownerId !== this.ownerId) {
+      throw new Error("Only the workspace owner can configure named delegation.");
+    }
+    const user = this.#ownerUserDo();
+    const [source, group] = await Promise.all([
+      user.getAgentByWorkspaceId(this.ctx.id.toString()),
+      user.getGroupByWorkspaceId(this.ctx.id.toString()),
+    ]);
+    if (this.ownerId !== ownerId || !source || source.workspaceId !== this.ctx.id.toString() || group) {
+      throw new Error("Named delegation requires a dedicated source bot workspace.");
+    }
+    return source;
+  }
+
+  #validateNamedBindings(bindings: Record<string, WorkpieceId>): void {
+    if (Object.keys(bindings).length > MAX_NAMED_BINDINGS) throw new Error("Too many delegation bindings.");
+    for (const [name, id] of Object.entries(bindings)) {
+      validateBindingName(name);
+      if (this.storage.gatekeepers.get(id)?.creationSpec?.type !== "gatekeeper") {
+        throw new Error("Delegation bindings must reference existing external gatekeeper resources.");
+      }
+    }
+  }
+
+  #namedDelegationConfig(): NamedDelegationConfig {
+    const {revision, targets} = this.storage.namedDelegationConfig.get();
+    return {revision, targets, resources: [...this.storage.gatekeepers.list()]
+      .filter(record => record.creationSpec?.type === "gatekeeper")
+      .map(record => ({id: record.id, title: record.resourceTitle ?? `Resource ${record.id}`}))};
+  }
+
+  async getNamedDelegationConfig(ownerId: string): Promise<NamedDelegationConfig> {
+    await this.#namedDelegationSource(ownerId);
+    return this.#namedDelegationConfig();
+  }
+
+  async setNamedDelegationConfig(ownerId: string, targets: NamedDelegationTargetConfig[],
+      expectedRevision: number): Promise<NamedDelegationConfig> {
+    const source = await this.#namedDelegationSource(ownerId);
+    if (this.storage.namedDelegationConfig.get().revision !== expectedRevision) {
+      throw new Error("Delegation configuration changed; reload before saving.");
+    }
+    if (targets.length > MAX_NAMED_TARGETS || new Set(targets.map(t => t.targetAgentId)).size !== targets.length) {
+      throw new Error("Configure at most eight distinct delegation targets.");
+    }
+    targets = structuredClone(targets);
+    const user = this.#ownerUserDo();
+    await Promise.all(targets.map(async target => {
+      this.#validateNamedBindings(target.bindings);
+      const profile = await user.getAgent(target.targetAgentId);
+      if (!profile || profile.id === source.id || profile.workspaceId === this.ctx.id.toString()) {
+        throw new Error("Delegation targets must be other bots owned by the workspace owner.");
+      }
+    }));
+    const currentSource = await this.#namedDelegationSource(ownerId);
+    if (source.id !== currentSource.id || this.storage.namedDelegationConfig.get().revision !== expectedRevision) {
+      throw new Error("Delegation configuration changed; reload before saving.");
+    }
+    for (const target of targets) this.#validateNamedBindings(target.bindings);
+    this.storage.namedDelegationConfig.put({revision: expectedRevision + 1, sourceAgentId: source.id, targets});
+    return this.#namedDelegationConfig();
+  }
+
+  #assertNamedParent(chatId: number, execution: {id: string; attempt: number}, generation: number): void {
+    this.assertAutomationAllowed(generation);
+    const meta = this.storage.chatMeta.get(chatId);
+    const context = this.storage.chatContext.get(chatId);
+    const active = this.storage.activeAgents.get(chatId);
+    const run = this.storage.taskRuns.get(execution.id);
+    if (!this.ownerId || !meta?.activeAgent || meta.currentRunId !== execution.id ||
+        !context?.agentId || context.spawnerConfig || context.namedDelegation || meta.namedDelegation ||
+        active?.initiatorUserId !== this.ownerId || active.callbackInitiated ||
+        active.run?.id !== execution.id || active.run.attempt !== execution.attempt ||
+        run?.chatId !== chatId || run.status !== "running" || run.attempt !== execution.attempt ||
+        this.#liveChats.get(chatId)?.cancelController.signal.aborted) {
+      throw new Error("Named delegation requires an active owner-initiated tracked parent bot task.");
+    }
+  }
+
+  async listNamedDelegates(chatId: number): Promise<Array<{targetAgentId: string; name: string; bindingNames: string[]}>> {
+    const execution = this.storage.activeAgents.get(chatId)?.run;
+    if (!execution) return [];
+    const generation = this.automationGeneration;
+    const group = this.storage.chatMeta.get(chatId)?.groupParent;
+    if (group) {
+      this.#assertGroupAuthor(chatId, execution, generation);
+      const self = this.storage.chatMeta.get(chatId)?.namedDelegation?.targetAgentId;
+      return group.members.filter(member => member.id !== self).map(member => ({ targetAgentId: member.id,
+        name: member.name, bindingNames: Object.keys(this.storage.chatContext.get(chatId)?.bindings ?? {}) }));
+    }
+    try { this.#assertNamedParent(chatId, execution, generation); } catch { return []; }
+    const config = this.storage.namedDelegationConfig.get();
+    if (config.targets.length === 0) return [];
+    const source = await this.#namedDelegationSource(this.ownerId!);
+    if (source.id !== this.storage.chatContext.get(chatId)?.agentId || source.id !== config.sourceAgentId) return [];
+    const user = this.#ownerUserDo();
+    const targets = await Promise.all(config.targets.map(async target => {
+      const profile = await user.getAgent(target.targetAgentId);
+      return profile && profile.id !== source.id && profile.workspaceId !== this.ctx.id.toString()
+        ? [{targetAgentId: profile.id, name: profile.name, bindingNames: Object.keys(target.bindings).toSorted()}] : [];
+    }));
+    this.#assertNamedParent(chatId, execution, generation);
+    if (this.storage.namedDelegationConfig.get().revision !== config.revision) return [];
+    return targets.flat();
+  }
+
+  #assertGroupAuthor(chatId: number, execution: { id: string; attempt: number }, generation: number): void {
+    this.assertAutomationAllowed(generation);
+    const meta = this.getChatMetaOrThrow(chatId);
+    const parent = meta.groupParent && this.storage.chatMeta.get(meta.groupParent.chatId);
+    const active = this.storage.activeAgents.get(chatId);
+    if (!meta.groupParent || parent?.groupRound?.id !== meta.groupParent.roundId || parent.currentRunId !== meta.groupParent.roundId ||
+        active?.run?.id !== execution.id || active.run.attempt !== execution.attempt || active.initiatorUserId !== this.ownerId ||
+        this.isNamedDelegationCanceled(chatId) || this.#liveChats.get(chatId)?.cancelController.signal.aborted) {
+      throw new Error('Group author is no longer active in this round');
+    }
+  }
+
+  async #prepareGroupHandoff(chatId: number, execution: { id: string; attempt: number }, input: NamedDelegationInput): Promise<PreparedNamedDelegation> {
+    const generation = this.automationGeneration;
+    this.#assertGroupAuthor(chatId, execution, generation);
+    const group = this.getChatMetaOrThrow(chatId).groupParent!;
+    const self = this.getChatMetaOrThrow(chatId).namedDelegation?.targetAgentId;
+    if (input.targetAgentId === self || !group.members.some(member => member.id === input.targetAgentId)) throw new Error('Choose another group member');
+    const digest = delegationInputDigest(input);
+    const id = createHash('sha256').update(JSON.stringify([this.ctx.id.toString(), execution.id, input.requestId])).digest('hex');
+    const base = { id, input, execution, parentChatId: chatId, generation, configRevision: 0, group };
+    const existing = this.storage.namedDelegations.get(id);
+    if (existing) {
+      if (existing.inputDigest !== digest) throw new Error('Handoff requestId reused with different input');
+      return { ...base, existing: existing.receipt };
+    }
+    if ((this.getChatMetaOrThrow(group.chatId).groupRound?.childChatIds.length ?? MAX_GROUP_EXECUTIONS) >= MAX_GROUP_EXECUTIONS) throw new Error('Group round reached its handoff limit');
+    const bindings: Record<string, WorkpieceId> = {};
+    const allowed = this.storage.chatContext.get(chatId)?.bindings ?? {};
+    for (const name of input.bindingNames ?? []) {
+      if (!Object.hasOwn(allowed, name)) throw new Error('Resource not shared with this group author');
+      bindings[name] = allowed[name];
+    }
+    this.#validateNamedBindings(bindings);
+    const user = this.#ownerUserDo();
+    const target = await user.getAgent(input.targetAgentId);
+    if (!target) throw new Error('Group member no longer exists');
+    const modelId = target.defaultModelId ?? this.storage.chatContext.get(chatId)?.spawnerConfig?.modelId;
+    if (!modelId) throw new Error('Group member has no model');
+    const { aiModel } = await user.getChatContext(modelId);
+    if (!aiModel) throw new Error('Group member model unavailable');
+    this.#assertGroupAuthor(chatId, execution, generation);
+    return { ...base, model: aiModel, targetName: target.name, targetInstructions: target.description.slice(0, 16_000), bindings };
+  }
+
+  #updateGroupRound(chatId: number, roundId: string): void {
+    const meta = this.storage.chatMeta.get(chatId);
+    if (!meta?.groupRound || meta.groupRound.id !== roundId || meta.currentRunId !== roundId) return;
+    const children = meta.groupRound.childChatIds.map(id => this.storage.chatMeta.get(id));
+    const runs = children.map(child => child?.currentRunId ? this.storage.taskRuns.get(child.currentRunId) : undefined);
+    const activeAuthors = children.flatMap((child, index) => child?.activeAgent && ['running', 'admitted'].includes(runs[index]?.status ?? '') ? [child.activeAgent] : []);
+    const run = this.storage.taskRuns.get(roundId);
+    if (run && run.status !== 'canceled' && children.length) {
+      const waiting = runs.some(child => child?.status === 'waiting');
+      const finished = runs.every(child => child?.status === 'finished');
+      const state = activeAuthors.length ? { status: 'running', reason: undefined } as const
+        : waiting ? { status: 'waiting', reason: 'action_approval' } as const
+        : finished ? { status: 'finished', reason: 'model_stop' } as const
+        : { status: 'incomplete', reason: 'interrupted' } as const;
+      this.storage.taskRuns.put({ ...run, ...state, updatedAt: this.getChatTimestamp() });
+    }
+    this.storage.chatMeta.put({ ...meta, activeAgent: activeAuthors[0], activeAuthors, lastActive: this.getChatTimestamp() });
+    if (!activeAuthors.length) this.ctx.waitUntil(this.drainChatQueue(chatId));
+  }
+
+  async #startGroupRound(chatId: number, user: DurableObjectStub<UserDurableObject>, context: UserChatContext, message: string, generation: number): Promise<void> {
+    const meta = this.getChatMetaOrThrow(chatId);
+    const runId = meta.currentRunId;
+    if (!runId || !context.group || user.id.toString() !== this.ownerId || context.group.workspaceId !== this.ctx.id.toString()) throw new Error('Group execution requires its owning workspace');
+    const live = this.#getLiveChat(chatId);
+    const preparation = live.turn = {};
+    const current = () => {
+      this.assertAutomationAllowed(generation);
+      if (this.storage.chatMeta.get(chatId)?.currentRunId !== runId || live.cancelController.signal.aborted || live.turn !== preparation) throw new Error('Group prompt was canceled or replaced');
+    };
+    const messages = [...this.storage.chats.list({ prefix: `${keyString(chatId)}.`, reverse: true, limit: 60 })].toReversed();
+    const prompt = groupPrompt(messages);
+    const source = messages.find(item => item.runId === runId && item.type === 'message');
+    const attachments = source?.type === 'message' ? source.attachments : undefined;
+    const shared = { ...this.defaultBindingList(), ...this.storage.chatContext.get(chatId)?.bindings };
+    for (const item of messages) if (item.type === 'message') for (const capsule of item.capsules ?? []) {
+      if (!Object.values(shared).includes(capsule.gatekeeperId)) shared[`GROUP_RESOURCE_${capsule.gatekeeperId}`] = capsule.gatekeeperId;
+    }
+    const bindings = Object.fromEntries(Object.entries(shared).filter(([, id]) => this.storage.gatekeepers.get(id)?.creationSpec?.type === 'gatekeeper'));
+    const launches: { chatId: number; model: UserAiModelRecord }[] = [];
+    try {
+      this.#validateNamedBindings(bindings);
+      const profiles = (await Promise.all(context.group.memberAgentIds.map(id => user.getAgent(id)))).filter(profile => profile !== null);
+      current();
+      const prepared = await Promise.all(groupRecipients(message, profiles).map(async profile => {
+        try {
+          const { aiModel } = await user.getChatContext(profile.defaultModelId ?? context.aiModel!.profile.id);
+          return { profile, model: aiModel };
+        } catch { return { profile, model: undefined }; }
+      }));
+      current();
+      this.storage.transaction(() => {
+        const parentExecution = this.#beginTaskExecution(chatId);
+        if (!parentExecution) throw new Error('Group prompt no longer exists');
+        const childChatIds: number[] = [];
+        const members = profiles.map(profile => ({ id: profile.id, name: profile.name }));
+        for (const item of prepared) {
+          const { profile, model } = item;
+          const modelId = model?.profile.id ?? profile.defaultModelId ?? context.aiModel!.profile.id;
+          const id = crypto.randomUUID();
+          const childChatId = this.nextChatId();
+          const timestamp = this.getChatTimestamp();
+          const input: NamedDelegationInput = { requestId: id, targetAgentId: profile.id, title: `Group: ${profile.name}`.slice(0, 120), prompt };
+          const receipt: NamedDelegationReceipt = { id, parentRunId: runId, parentChatId: chatId, parentAttempt: parentExecution.attempt,
+            parentSequence: this.nextChatSequencePeek(chatId), childChatId, targetAgentId: profile.id, targetName: profile.name };
+          const groupParent = { chatId, roundId: runId, members, attachmentIds: attachments?.map(attachment => attachment.id) ?? [] };
+          this.storage.namedDelegations.put({ id, receipt, input, inputDigest: delegationInputDigest(input), canceled: false });
+          this.storage.chatMeta.put({ id: childChatId, title: input.title, started: timestamp, lastActive: timestamp, namedDelegation: receipt, groupParent,
+            activeAgent: model ? { ...model.profile, name: profile.name, agentProfileId: profile.id } : undefined });
+          this.storage.chatContext.put({ chatId: childChatId, namedDelegation: receipt, groupPeers: members,
+            spawnerConfig: { displayName: profile.name, modelId, env: bindings }, bindings,
+            agentInstructions: `${profile.description.slice(0, 16_000)}\nYou are participating in a shared group conversation. Respond as yourself. Use delegateToBot for an asynchronous handoff to a listed peer; mentions alone do not trigger bots.`,
+            alwaysAvailableCapsuleIds: [], alwaysAvailableCatalogs: [] });
+          this.addChatMessages(childChatId, context.profile, [{ type: 'message', message: prompt, attachments }]);
+          const childRun = this.admitTaskRun(childChatId, 0, { type: 'delegation', parent: { runId, chatId, attempt: parentExecution.attempt, targetAgentId: profile.id, targetName: profile.name } }, id);
+          if (model) {
+            this.storage.activeAgents.put({ chatId: childChatId, modelId, initiator: context.profile, initiatorUserId: this.ownerId!, callbackInitiated: false });
+            launches.push({ chatId: childChatId, model });
+          } else this.storage.taskRuns.put({ ...childRun, status: 'incomplete', reason: 'model_unavailable' });
+          this.addChatMessages(chatId, context.profile, [{ type: 'namedDelegation', delegation: receipt }], undefined, undefined, undefined, undefined, runId);
+          childChatIds.push(childChatId);
+        }
+        const parent = this.getChatMetaOrThrow(chatId);
+        this.storage.chatMeta.put({ ...parent, groupRound: { id: runId, childChatIds } });
+        if (!childChatIds.length) {
+          this.finishTaskExecution(parentExecution, { status: 'incomplete', reason: 'model_unavailable' });
+          this.storage.chatMeta.put({ ...this.getChatMetaOrThrow(chatId), activeAgent: undefined, activeAuthors: [] });
+        }
+      });
+      for (const launch of launches) {
+        this.#registerRunningAgent(launch.chatId);
+        this.ctx.waitUntil(this.#runAgentTurn(launch.chatId, launch.model, context.profile, false, this.#getLiveChat(launch.chatId)));
+      }
+      this.#updateGroupRound(chatId, runId);
+    } catch (error) {
+      if (this.storage.chatMeta.get(chatId)?.currentRunId === runId) {
+        const run = this.storage.taskRuns.get(runId);
+        if (run) this.finishTaskExecution({ id: runId, attempt: run.attempt }, { status: 'incomplete', reason: 'interrupted' });
+        this.storage.chatMeta.put({ ...this.getChatMetaOrThrow(chatId), activeAgent: undefined, activeAuthors: [] });
+      }
+      throw error;
+    }
+  }
+
+  async prepareNamedDelegation(chatId: number, execution: {id: string; attempt: number},
+      input: NamedDelegationInput): Promise<PreparedNamedDelegation> {
+    if (this.storage.chatMeta.get(chatId)?.groupParent) return this.#prepareGroupHandoff(chatId, execution, input);
+    const generation = this.automationGeneration;
+    this.#assertNamedParent(chatId, execution, generation);
+    delegationInputDigest(input);
+    input = {...input, bindingNames: [...new Set(input.bindingNames ?? [])].toSorted()};
+    const id = createHash("sha256").update(JSON.stringify([
+      this.ctx.id.toString(), execution.id, input.requestId,
+    ])).digest("hex");
+    const config = this.storage.namedDelegationConfig.get();
+    const base = {id, input, parentChatId: chatId, execution: {...execution}, generation, configRevision: config.revision};
+    const existing = this.storage.namedDelegations.get(id);
+    if (existing) {
+      if (existing.inputDigest !== delegationInputDigest(input)) throw new Error("Delegation requestId reused with different input.");
+      return {...base, existing: existing.receipt};
+    }
+    const target = config.targets.find(t => t.targetAgentId === input.targetAgentId);
+    if (!target) throw new Error("Named delegation target is not configured.");
+    const bindings: Record<string, WorkpieceId> = Object.create(null);
+    for (const name of input.bindingNames!) {
+      if (!Object.hasOwn(target.bindings, name)) throw new Error("Delegation binding is not granted.");
+      bindings[name] = target.bindings[name];
+    }
+    this.#validateNamedBindings(bindings);
+    if ([...this.storage.namedDelegations.byParentRun.get(execution.id)].length >= MAX_NAMED_CHILDREN) {
+      throw new Error("Parent task has reached its lifetime delegation limit.");
+    }
+    const ownerId = this.ownerId!;
+    const source = await this.#namedDelegationSource(ownerId);
+    if (source.id !== config.sourceAgentId || source.id !== this.storage.chatContext.get(chatId)?.agentId) {
+      throw new Error("Source bot binding changed.");
+    }
+    // The profile is a snapshot, not access to the target's private chat, skills or accounts.
+    // Later remote profile edits do not mutate this admission; only local grants remain live.
+    const user = this.#ownerUserDo();
+    const profile = await user.getAgent(input.targetAgentId);
+    if (!profile || profile.id === source.id || profile.workspaceId === this.ctx.id.toString()) {
+      throw new Error("Delegation target no longer exists or is not eligible.");
+    }
+    if (new TextEncoder().encode(profile.description).length > MAX_DELEGATION_INSTRUCTIONS_BYTES) {
+      throw new Error("Delegation target instructions are too large.");
+    }
+    if (profile.defaultModelId === null) throw new Error("Delegation target has no model.");
+    const {aiModel} = await user.getChatContext(profile.defaultModelId);
+    if (!aiModel) throw new Error("Delegation target model is unavailable.");
+    const currentSource = await this.#namedDelegationSource(ownerId);
+    this.#assertNamedParent(chatId, execution, generation);
+    if (currentSource.id !== source.id || this.ownerId !== ownerId || this.storage.chatContext.get(chatId)?.agentId !== source.id ||
+        this.storage.namedDelegationConfig.get().revision !== config.revision) {
+      throw new Error("Delegation configuration changed during preparation.");
+    }
+    this.#validateNamedBindings(bindings);
+    return {...base, model: aiModel, targetName: profile.name, targetInstructions: profile.description, bindings};
+  }
+
+  getNamedDelegation(id: string): NamedDelegationResult {
+    const record = this.storage.namedDelegations.get(id);
+    if (!record || record.id !== id || record.receipt?.id !== id ||
+        !Number.isSafeInteger(record.receipt.childChatId) || typeof record.canceled !== "boolean") {
+      throw new Error("No such named delegation.");
+    }
+    const deleted = !this.storage.chatMeta.get(record.receipt.childChatId);
+    const run = deleted ? undefined : this.storage.taskRuns.get(id);
+    let response: string | undefined;
+    if (!deleted) {
+      try {
+        for (const msg of this.storage.chats.byRunSequence.list({prefix: `${id}.`, reverse: true, limit: 100})) {
+          if (msg.type !== "message" || msg.author.type !== "agent" || typeof msg.message !== "string" || !msg.message.trim()) continue;
+          const bytes = new TextEncoder().encode(msg.message);
+          let end = Math.min(bytes.length, MAX_DELEGATION_RESULT_BYTES);
+          while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) --end;
+          response = new TextDecoder().decode(bytes.subarray(0, end));
+          break;
+        }
+      } catch {
+        // A damaged evidence index must not hide the canonical execution status.
+        response = undefined;
+      }
+    }
+    return {receipt: record.receipt, run, response, deleted, canceled: record.canceled};
+  }
+
+  async getNamedDelegationResult(chatId: number, id: string): Promise<NamedDelegationResult> {
+    if (this.storage.namedDelegations.get(id)?.receipt.parentChatId !== chatId || !this.storage.chatMeta.get(chatId)) {
+      throw new Error("No such named delegation in this conversation.");
+    }
+    return this.getNamedDelegation(id);
+  }
+
+  isNamedDelegationCanceled(chatId: number): boolean {
+    return this.storage.namedDelegations.byChildChat.get(chatId)?.canceled ?? false;
+  }
+
+  #namedDelegationRefreshes = new Map<string, TaskRun | undefined>();
+
+  #refreshNamedDelegation(id: string, before: TaskRun | undefined): void {
+    if (this.#namedDelegationRefreshes.has(id)) return;
+    // Collection subscribers run BEFORE the primary write, inside synchronous transactions.
+    // Keep the first pre-write status so rolled-back or net-zero changes publish nothing.
+    this.#namedDelegationRefreshes.set(id, before);
+    if (this.#namedDelegationRefreshes.size !== 1) return;
+    queueMicrotask(() => {
+      const pending = this.#namedDelegationRefreshes;
+      this.#namedDelegationRefreshes = new Map();
+      for (const [delegationId, prior] of pending) {
+        try {
+          const run = this.storage.taskRuns.get(delegationId);
+          if (prior?.status === run?.status && prior?.reason === run?.reason && prior?.attempt === run?.attempt) continue;
+          const receipt = this.storage.namedDelegations.get(delegationId)?.receipt;
+          if (!receipt) continue;
+          const groupParent = this.storage.chatMeta.get(receipt.childChatId)?.groupParent;
+          if (groupParent) this.#updateGroupRound(groupParent.chatId, groupParent.roundId);
+          const meta = this.storage.chatMeta.get(receipt.parentChatId);
+          const key = `${keyString(receipt.parentChatId)}.${keyString(receipt.parentSequence)}`;
+          const msg = this.storage.chats.get(key);
+          if (!meta || msg?.type !== "namedDelegation" || msg.delegation.id !== delegationId) continue;
+          // Only presentation is refreshed, from committed state; never launch/recreate work.
+          this.storage.transaction(() => {
+            const timestamp = this.getChatTimestamp();
+            this.storage.chats.put({...msg, timestamp});
+            this.storage.chatMeta.put({...meta, lastActive: timestamp});
+          });
+        } catch {
+          this.logger.warn("failed to refresh delegation receipt", {event: "delegation.receipt.refresh.failed"});
+        }
+      }
+    });
+  }
+
+  // Called only at source admission, alongside the durable prompt/callback. Continuations never
+  // call this: their original source and evidence must survive approval, compaction and restart.
+  admitTaskRun(chatId: number, sourceSequence: number, source: TaskRunSource, id = crypto.randomUUID()): TaskRun {
+    const meta = this.getChatMetaOrThrow(chatId);
+    const message = this.storage.chats.get(`${keyString(chatId)}.${keyString(sourceSequence)}`);
+    if (!message) throw new Error("Task source must be committed with its run.");
+    const run: TaskRun = {
+      id, chatId, sourceSequence, source,
+      startedAt: message.timestamp, updatedAt: message.timestamp,
+      attempt: 0, lastSequence: sourceSequence, status: "admitted",
+    };
+    this.storage.taskRuns.put(run);
+    this.storage.chats.put({...message, runId: run.id});
+    meta.currentRunId = run.id;
+    this.storage.chatMeta.put(meta);
+    return run;
+  }
+
+  #beginTaskExecution(chatId: number): ActiveAgentRecord["run"] {
+    const id = this.storage.chatMeta.get(chatId)?.currentRunId;
+    const run = id && this.storage.taskRuns.get(id);
+    if (!run) return; // Do not invent provenance for legacy work.
+    const {reason: _reason, ...previous} = run;
+    const next: TaskRun = {...previous, status: "running", attempt: run.attempt + 1,
+      updatedAt: this.getChatTimestamp()};
+    this.storage.taskRuns.put(next);
+    return {id: next.id, attempt: next.attempt};
+  }
+
+  // Execution identity fences late finalizers; cancellation wins over a late completed step.
+  finishTaskExecution(execution: ActiveAgentRecord["run"], disposition: TaskRunDisposition): void {
+    if (!execution) return;
+    const run = this.storage.taskRuns.get(execution.id);
+    if (!run || run.attempt !== execution.attempt ||
+        (run.status !== "running" && run.status !== "admitted")) return;
+    this.storage.taskRuns.put({...run, ...disposition, updatedAt: this.getChatTimestamp()});
+    const meta = this.storage.chatMeta.get(run.chatId);
+    if (meta) {
+      meta.lastActive = this.getChatTimestamp();
+      this.storage.chatMeta.put(meta);
+    }
+  }
+
+  canResumeTask(chatId: number, runId: string | undefined, attempt?: number): boolean {
+    if (this.isNamedDelegationCanceled(chatId)) return false;
+    const meta = this.storage.chatMeta.get(chatId);
+    if (!meta || meta.currentRunId !== runId) return false;
+    if (!runId) return true; // A legacy approval may resume only an entirely untracked chat.
+    const run = this.storage.taskRuns.get(runId);
+    return run?.status === "waiting" && (attempt === undefined || run.attempt === attempt);
   }
 
   async newChat(
@@ -5516,7 +7010,15 @@ class OverseerImpl implements AgentHooks {
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     externalChatKey?: string,
     formats?: MessageFormatRef[],
+    routineAdmission?: RoutineAdmission,
   ): Promise<number> {
+    let occurrenceKey = routineAdmission?.firing && routineOccurrenceKey(
+        routineAdmission.id, routineAdmission.registrationId, routineAdmission.firing);
+    let receipt = occurrenceKey === undefined ? undefined : this.storage.routineOccurrences.get(occurrenceKey);
+    if (receipt?.status === "admitted") return receipt.chatId;
+    if (receipt) throw new RoutineInactiveError();
+    let generation = this.automationGeneration;
+    this.assertAutomationAllowed(generation);
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
       if (decision.reuseExisting) return decision.record.chatId;
@@ -5525,16 +7027,40 @@ class OverseerImpl implements AgentHooks {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
-        attachments, userMeta.aiModel?.config.provider);
+        attachments, userMeta.aiModel?.config.provider, userMeta.group?.multiAuthor);
     let prepared = await this.#prepareChatMessage(
         initialMessage, (canonicalAttachments?.length ?? 0) > 0, userMeta.agentProfile?.id);
+    let routine = routineAdmission ? await clientUser.getRoutineById(routineAdmission.id) : undefined;
 
     // No code base is established at creation: gadgets pin lazily, when their code is first
     // modified in the chat (see ChatCodeBase). Until then the chat reads committed code live at
     // each gadget's current head.
     let chatId!: number;
-    let timestamp = this.getChatTimestamp();
+    let reusedOccurrence = false;
     this.ctx.storage.transactionSync(() => {
+      // Another delivery may have committed while preparation awaited. Check before allocating IDs
+      // or admitting a prompt, and never restart inference/title generation for an existing receipt.
+      let existing = occurrenceKey === undefined ? undefined : this.storage.routineOccurrences.get(occurrenceKey);
+      if (existing?.status === "admitted") {
+        chatId = existing.chatId;
+        reusedOccurrence = true;
+        return;
+      }
+      if (existing) throw new RoutineInactiveError();
+      if (routineAdmission) {
+        let hook = this.storage.boundHooks.get(routineAdmission.hookId);
+        if (!routine || routine.paused || (routine.revision ?? 0) !== routineAdmission.revision ||
+            routine.hookId !== routineAdmission.hookId || !hook?.enabled ||
+            hook.routine?.id !== routineAdmission.id ||
+            hook.routine.registrationId !== routineAdmission.registrationId ||
+            hook.routine.scheduleId !== routineAdmission.firing?.scheduleId) {
+          throw new RoutineInactiveError();
+        }
+        // No await between the local fence and commit. Pause/delete acknowledge only after
+        // disabling/removing this registration, fencing even a stale User DO snapshot.
+      }
+      this.assertAutomationAllowed(generation);
+      let timestamp = this.getChatTimestamp();
       chatId = this.nextChatId();
       let meta: AiChatMetadata = {
         id: chatId,
@@ -5558,7 +7084,21 @@ class OverseerImpl implements AgentHooks {
       }
 
       let promptSequence = this.#commitPreparedChatMessage(
-          chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats);
+          chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats,
+          routineAdmission ? {
+            type: "routine", routineId: routineAdmission.id, revision: routineAdmission.revision,
+            registrationId: routineAdmission.registrationId,
+            ...(routineAdmission.firing ? {
+              scheduleId: routineAdmission.firing.scheduleId,
+              occurrenceId: routineAdmission.firing.runId,
+              scheduledTime: routineAdmission.firing.scheduledTime,
+            } : {}),
+          } : userMeta.aiModel ? {type: "prompt"} : undefined);
+      if (routineAdmission && !userMeta.aiModel) {
+        const runId = this.storage.chatMeta.get(chatId)?.currentRunId;
+        const run = runId && this.storage.taskRuns.get(runId);
+        if (run) this.finishTaskExecution(run, {status: "incomplete", reason: "model_unavailable"});
+      }
       if (responseTargetRegistration) {
         if (promptSequence === undefined) {
           throw new Error("External messages require a prompt.");
@@ -5573,29 +7113,83 @@ class OverseerImpl implements AgentHooks {
       if (externalChatKey) {
         this.storage.externalChats.put({ externalChatKey, chatId });
       }
+      if (routineAdmission?.firing) {
+        this.storage.routineOccurrences.put({
+          routineId: routineAdmission.id, registrationId: routineAdmission.registrationId,
+          firing: routineAdmission.firing, status: "admitted", chatId,
+        });
+      }
     });
+
+    if (reusedOccurrence) return chatId;
 
     if (prepared.message !== undefined && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       
-      if (userMeta.group && userMeta.group.memberAgentIds.length >= 2 && !userMeta.agentProfile) {
-        for (let memberId of userMeta.group.memberAgentIds) {
-          let memberProfile = await clientUser.getAgent(memberId);
-          if (memberProfile && memberProfile.defaultModelId) {
-            let memberContext = await retryOnDoReset(
-                () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
-            if (memberContext.aiModel) {
-              this.#registerRunningAgent(chatId);
-              this.storage.activeAgents.put({
-                chatId,
-                initiatorUserId: clientUser.id.toString(),
-                modelId: memberContext.aiModel.profile.id,
-                initiator: userMeta.profile,
-                callbackInitiated: false,
-              });
-              let liveChat = this.#getLiveChat(chatId);
-              await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
+      if (userMeta.group?.multiAuthor) {
+        await this.#startGroupRound(chatId, clientUser, userMeta, prepared.message, generation);
+      } else if (userMeta.group && userMeta.group.memberAgentIds.length >= 2 && !userMeta.agentProfile) {
+        const originRunId = this.getChatMetaOrThrow(chatId).currentRunId;
+        const liveChat = this.#getLiveChat(chatId);
+        const preparation = liveChat.turn = {};
+        const canStartMember = () => {
+          const meta = this.storage.chatMeta.get(chatId);
+          const run = originRunId ? this.storage.taskRuns.get(originRunId) : undefined;
+          return !this.storage.automationPaused.get() && generation === this.automationGeneration &&
+              this.#liveChats.get(chatId) === liveChat && !liveChat.cancelController.signal.aborted &&
+              liveChat.turn === preparation &&
+              meta?.currentRunId === originRunId && run?.status === "admitted" && run.attempt === 0 &&
+              meta?.activeAgent?.id === userMeta.aiModel?.profile.id &&
+              !this.#runningAgents.has(chatId) && !this.storage.activeAgents.get(chatId);
+        };
+        try {
+          for (let memberId of userMeta.group.memberAgentIds) {
+            if (!canStartMember()) break;
+            let memberProfile = await clientUser.getAgent(memberId);
+            if (!canStartMember()) break;
+            if (memberProfile && memberProfile.defaultModelId) {
+              let memberContext = await retryOnDoReset(
+                  () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
+              if (!canStartMember()) break;
+              if (memberContext.aiModel) {
+                // Fence the admission across lookups, then bind execution without another await.
+                const run = this.#beginTaskExecution(chatId);
+                if (!run) break;
+                this.storage.chatMeta.put({...this.getChatMetaOrThrow(chatId), activeAgent: memberContext.aiModel.profile});
+                this.#registerRunningAgent(chatId);
+                this.storage.activeAgents.put({
+                  chatId,
+                  initiatorUserId: clientUser.id.toString(),
+                  modelId: memberContext.aiModel.profile.id,
+                  initiator: userMeta.profile,
+                  callbackInitiated: false,
+                  run,
+                });
+                await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
+                // A completed assistant tail is not another member's prompt. Waiting/terminal
+                // dispositions must also survive unchanged; group membership cannot resume them.
+                break;
+              }
             }
+          }
+        } finally {
+          // A failed/exhausted lookup must release its reservation, never a replacement turn's.
+          if (liveChat.turn === preparation && this.#liveChats.get(chatId) === liveChat &&
+              this.storage.chatMeta.get(chatId)?.currentRunId === originRunId &&
+              !this.#runningAgents.has(chatId) && !this.storage.activeAgents.get(chatId)) {
+            const run = originRunId ? this.storage.taskRuns.get(originRunId) : undefined;
+            if (run?.status === "admitted") {
+              this.finishTaskExecution({id: run.id, attempt: 0},
+                  this.storage.automationPaused.get() || generation !== this.automationGeneration
+                    ? {status: "canceled", reason: "workspace_paused"}
+                    : liveChat.cancelController.signal.aborted
+                      ? {status: "canceled", reason: "user_stop"}
+                      : {status: "incomplete", reason: "model_unavailable"});
+            }
+            const meta = this.getChatMetaOrThrow(chatId);
+            delete meta.activeAgent;
+            this.storage.chatMeta.put(meta);
+            this.#liveChats.delete(chatId);
           }
         }
       } else {
@@ -5604,7 +7198,7 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
-    if (userMeta.quickModel) {
+    if (userMeta.quickModel && !this.storage.automationPaused.get() && generation === this.automationGeneration) {
       let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
         prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
         `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
@@ -5630,8 +7224,13 @@ class OverseerImpl implements AgentHooks {
     attachments?: ChatAttachmentHandle[],
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     formats?: MessageFormatRef[],
-    forceImmediate = false,
+    queuedItem?: ChatQueueRecord,
   ): Promise<void> {
+    if (this.#namedChildContext(chatId)) {
+      throw new Error("Send follow-up instructions in the parent conversation, not an isolated delegated task.");
+    }
+    let generation = this.automationGeneration;
+    this.assertAutomationAllowed(generation);
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
       if (decision.reuseExisting) return;
@@ -5643,7 +7242,9 @@ class OverseerImpl implements AgentHooks {
     if (!existing) {
       throw new Error("No such chatId: " + chatId);
     }
-    if (!forceImmediate && !responseTargetRegistration &&
+    if (queuedItem && (existing.queuePaused ||
+        !this.storage.chatQueue.get(chatQueueKey(chatId, queuedItem.id)))) return;
+    if (!queuedItem && !responseTargetRegistration &&
         (existing.activeAgent || this.isPreparingChatMessage(chatId)
           || this.#drainingChats.has(chatId))) {
       this.enqueueChatPrompt(
@@ -5653,13 +7254,18 @@ class OverseerImpl implements AgentHooks {
       return;
     }
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
-        attachments, userMeta.aiModel?.config.provider);
+        attachments, userMeta.aiModel?.config.provider, userMeta.group?.multiAuthor);
     this.assertChatNotActive(chatId);
     using _chatMessageReservation = this.reserveChatMessagePreparation(chatId);
     let prepared = await this.#prepareChatMessage(
         message, (canonicalAttachments?.length ?? 0) > 0, userMeta.agentProfile?.id);
+    this.assertAutomationAllowed(generation);
 
     let meta = this.assertChatNotActive(chatId, true);
+    // The reserved head remains editable while preparation awaits. Never commit an old prompt
+    // after the user changed/canceled/reordered it; the drain will retry the current head.
+    if (queuedItem && (meta.queuePaused || JSON.stringify(queuedItem) !==
+        JSON.stringify(listChatQueue(this.storage.chatQueue, chatId)[0]))) return;
     let result = this.materializeChatChanges(chatId, meta);
     if (result) meta = result.meta;
     meta.lastActive = this.getChatTimestamp();
@@ -5685,7 +7291,12 @@ class OverseerImpl implements AgentHooks {
       this.storage.chatMeta.put(meta);
       let promptSequence = this.#commitPreparedChatMessage(
           chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments,
-          formats);
+          formats, userMeta.aiModel ? {type: queuedItem ? "queue" : "prompt"} : undefined);
+      if (queuedItem) {
+        cancelChatQueueItem(this.storage.chatQueue, chatId, queuedItem.id);
+        this.storage.chatMeta.put({...meta,
+          currentRunId: this.storage.chatMeta.get(chatId)?.currentRunId});
+      }
       if (responseTargetRegistration) {
         if (promptSequence === undefined) {
           throw new Error("External messages require a prompt.");
@@ -5702,24 +7313,72 @@ class OverseerImpl implements AgentHooks {
     if (runsAgentTurn && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       
-      if (userMeta.group && userMeta.group.memberAgentIds.length >= 2 && !userMeta.agentProfile) {
-        for (let memberId of userMeta.group.memberAgentIds) {
-          let memberProfile = await clientUser.getAgent(memberId);
-          if (memberProfile && memberProfile.defaultModelId) {
-            let memberContext = await retryOnDoReset(
-                () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
-            if (memberContext.aiModel) {
-              this.#registerRunningAgent(chatId);
-              this.storage.activeAgents.put({
-                chatId,
-                initiatorUserId: clientUser.id.toString(),
-                modelId: memberContext.aiModel.profile.id,
-                initiator: userMeta.profile,
-                callbackInitiated: false,
-              });
-              let liveChat = this.#getLiveChat(chatId);
-              await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
+      if (userMeta.group?.multiAuthor && prepared.message !== undefined) {
+        await this.#startGroupRound(chatId, clientUser, userMeta, prepared.message, generation);
+      } else if (userMeta.group && userMeta.group.memberAgentIds.length >= 2 && !userMeta.agentProfile) {
+        const originRunId = this.getChatMetaOrThrow(chatId).currentRunId;
+        const maintenance = prepared.message === undefined && prepared.slashCommand?.id.builtin === true;
+        const liveChat = this.#getLiveChat(chatId);
+        // A preceding finalizer may still hold this context; preparation owns it now.
+        const preparation = liveChat.turn = {};
+        const canStartMember = () => {
+          const currentMeta = this.storage.chatMeta.get(chatId);
+          const run = originRunId ? this.storage.taskRuns.get(originRunId) : undefined;
+          return !this.storage.automationPaused.get() && generation === this.automationGeneration &&
+              this.#liveChats.get(chatId) === liveChat && !liveChat.cancelController.signal.aborted &&
+              liveChat.turn === preparation &&
+              currentMeta?.currentRunId === originRunId &&
+              // The shared entry must still recognize maintenance, not reopen the prior task.
+              (maintenance ? isCompactionTurn(this.#listChatTail(chatId, this.getActiveChatCompaction(chatId)))
+                : run?.status === "admitted" && run.attempt === 0) &&
+              currentMeta?.activeAgent?.id === userMeta.aiModel?.profile.id &&
+              !this.#runningAgents.has(chatId) && !this.storage.activeAgents.get(chatId);
+        };
+        try {
+          for (let memberId of userMeta.group.memberAgentIds) {
+            if (!canStartMember()) break;
+            let memberProfile = await clientUser.getAgent(memberId);
+            if (!canStartMember()) break;
+            if (memberProfile && memberProfile.defaultModelId) {
+              let memberContext = await retryOnDoReset(
+                  () => clientUser.getChatContext(memberProfile.defaultModelId, undefined, memberId), this.logger);
+              if (!canStartMember()) break;
+              if (memberContext.aiModel) {
+                const run = maintenance ? undefined : this.#beginTaskExecution(chatId);
+                if (!maintenance && !run) break;
+                this.storage.chatMeta.put({...this.getChatMetaOrThrow(chatId), activeAgent: memberContext.aiModel.profile});
+                this.#registerRunningAgent(chatId);
+                this.storage.activeAgents.put({
+                  chatId,
+                  initiatorUserId: clientUser.id.toString(),
+                  modelId: memberContext.aiModel.profile.id,
+                  initiator: userMeta.profile,
+                  callbackInitiated: false,
+                  run,
+                });
+                await this.#runAgentTurn(chatId, memberContext.aiModel, userMeta.profile, false, liveChat, memberProfile);
+                // No group handoff prompt is admitted by this turn (including /compact).
+                break;
+              }
             }
+          }
+        } finally {
+          if (liveChat.turn === preparation && this.#liveChats.get(chatId) === liveChat &&
+              this.storage.chatMeta.get(chatId)?.currentRunId === originRunId &&
+              !this.#runningAgents.has(chatId) && !this.storage.activeAgents.get(chatId)) {
+            const run = originRunId ? this.storage.taskRuns.get(originRunId) : undefined;
+            if (!maintenance && run?.status === "admitted") {
+              this.finishTaskExecution({id: run.id, attempt: 0},
+                  this.storage.automationPaused.get() || generation !== this.automationGeneration
+                    ? {status: "canceled", reason: "workspace_paused"}
+                    : liveChat.cancelController.signal.aborted
+                      ? {status: "canceled", reason: "user_stop"}
+                      : {status: "incomplete", reason: "model_unavailable"});
+            }
+            const currentMeta = this.getChatMetaOrThrow(chatId);
+            delete currentMeta.activeAgent;
+            this.storage.chatMeta.put(currentMeta);
+            this.#liveChats.delete(chatId);
           }
         }
       } else {
@@ -5848,6 +7507,8 @@ class OverseerImpl implements AgentHooks {
   }
 
   async deliverReadyExternalMessageResponses(): Promise<void> {
+    // Keep the legacy retry/sweep behavior while busy, but do not block attention on agent idle.
+    if (this.#runningAgents.size > 0) return;
     let readyRecords = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list()];
 
     let results = await Promise.allSettled(
@@ -5859,7 +7520,61 @@ class OverseerImpl implements AgentHooks {
     this.#updateExternalMessageResponseDeliveryAlarm();
   }
 
+  cancelNamedDelegations(chatId: number | undefined, reason: "user_stop" | "workspace_paused",
+      conversationWide = false): void {
+    // Subscriber writes can start another kv.list(), invalidating a live iterator.
+    const groupChats = [...this.storage.chatMeta.list()];
+    for (const meta of groupChats) {
+      if ((chatId !== undefined && meta.id !== chatId) || !meta.groupRound || meta.groupRound.id !== meta.currentRunId) continue;
+      const run = this.storage.taskRuns.get(meta.groupRound.id);
+      if (run && ['running', 'admitted', 'waiting'].includes(run.status)) {
+        this.storage.taskRuns.put({ ...run, status: 'canceled', reason, updatedAt: this.getChatTimestamp() });
+        this.storage.chatMeta.put({ ...meta, activeAgent: undefined, activeAuthors: [] });
+      }
+    }
+    const self = chatId === undefined ? undefined : this.storage.namedDelegations.byChildChat.get(chatId);
+    const parentRunId = chatId === undefined ? undefined : this.storage.chatMeta.get(chatId)?.currentRunId;
+    const records = chatId === undefined || conversationWide
+      ? [...this.storage.namedDelegations.list()].filter(record => chatId === undefined || record.receipt.parentChatId === chatId)
+      : parentRunId ? [...this.storage.namedDelegations.byParentRun.get(parentRunId)] : [];
+    if (self) records.push(self);
+    for (const record of records) {
+      const run = this.storage.taskRuns.get(record.id);
+      if (!run || !["admitted", "running", "waiting"].includes(run.status)) continue;
+      // Fence durable waits and restart intents before aborting live execution. Approval decisions
+      // and already-dispatched external effects are deliberately not rolled back.
+      this.storage.namedDelegations.put({...record, canceled: true});
+      this.flushCapturedActions(run.chatId, run);
+      this.storage.activeAgents.delete(run.chatId);
+      this.storage.taskRuns.put({...run, status: "canceled", reason, updatedAt: this.getChatTimestamp()});
+      this.#liveChats.get(run.chatId)?.cancelController.abort(new Error("Named delegation canceled."));
+      const meta = this.storage.chatMeta.get(run.chatId);
+      if (meta && !this.#runningAgents.has(run.chatId)) {
+        delete meta.activeAgent;
+        this.storage.chatMeta.put(meta);
+      }
+    }
+  }
+
+  forgetNamedDelegationInput(chatId: number): void {
+    const record = this.storage.namedDelegations.byChildChat.get(chatId);
+    if (!record) return;
+    const {input: _input, ...tombstone} = record;
+    this.storage.namedDelegations.put(tombstone);
+    this.#refreshNamedDelegation(record.id, this.storage.taskRuns.get(record.id));
+  }
+
   cancelAgent(chatId: number) {
+    this.cancelNamedDelegations(chatId, "user_stop");
+    this.flushCapturedActions(chatId, this.storage.activeAgents.get(chatId)?.run);
+    this.finishTaskExecution(this.storage.activeAgents.get(chatId)?.run,
+        {status: "canceled", reason: "user_stop"});
+    this.storage.activeAgents.delete(chatId);
+    const id = this.storage.chatMeta.get(chatId)?.currentRunId;
+    const run = id ? this.storage.taskRuns.get(id) : undefined;
+    if (run?.status === "waiting" || run?.status === "admitted") {
+      this.storage.taskRuns.put({...run, status: "canceled", reason: "user_stop", updatedAt: this.getChatTimestamp()});
+    }
     let ctx = this.#liveChats.get(chatId);
     if (ctx) {
       ctx.cancelController.abort(new Error("User requested to stop agent."));
@@ -6006,132 +7721,6 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Agent-to-agent communication for group chats: after a member bot completes its turn, check
-  // if it @mentioned other group members in its response. If so, queue turns for those mentioned
-  // members. This enables bots to respond to each other without unbounded ping-pong (only explicit
-  // @mentions trigger follow-up turns).
-  //
-  // Hard hop cap: mentionDepth >= 1 blocks further queuing, limiting agent-to-agent chains to
-  // one round (user → agent A → agent B, stop). This prevents infinite recursion when models
-  // keep @mentioning each other.
-  async #queueMentionedGroupMembers(
-      chatId: number, startSequence: number,
-      currentAgentModel: UserAiModelRecord, currentAgentAuthor: AiChatAuthorInfo,
-      mentionDepth: number): Promise<void> {
-    try {
-      // Hard stop: only allow one round of mention-triggered turns per user-initiated turn.
-      if (mentionDepth >= 1) return;
-
-      if (!this.ownerId) return;
-
-      // Get the owner's user DO to access group and agent profile information.
-      let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
-      
-      // Get chat context to determine if this is a group chat.
-      let chatContext = this.storage.chatContext.get(chatId);
-      if (!chatContext?.agentId) return;  // Not an agent chat
-      
-      // Get the agent profile and its workspace to find the associated group.
-      let agentProfile = await ownerStub.getAgent(chatContext.agentId);
-      if (!agentProfile) return;
-      
-      let group = await ownerStub.getGroupByWorkspaceId(agentProfile.workspaceId);
-      if (!group || group.memberAgentIds.length <= 1) return;  // Not a group or single member
-      
-      // Collect messages posted during this turn.
-      let newMessages: Array<{sequence: number, text: string}> = [];
-      for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
-        if (msg.sequence > startSequence && msg.author.type === "agent") {
-          // Only process regular message types that have a message field
-          if (msg.type === "message" && typeof msg.message === "string") {
-            newMessages.push({sequence: msg.sequence, text: msg.message});
-          }
-        }
-      }
-      
-      if (newMessages.length === 0) return;
-      
-      // Extract @mentions from all new messages. Look for @name patterns where name matches
-      // a group member's name or agentId.
-      let mentionedAgentIds = new Set<string>();
-      let mentionPattern = /@(\w[\w\s-]*)/g;
-      
-      for (let msg of newMessages) {
-        let matches = msg.text.matchAll(mentionPattern);
-        for (let match of matches) {
-          let mentionText = match[1].trim();
-          // Check if this mention matches any group member by name or ID
-          for (let memberId of group.memberAgentIds) {
-            if (memberId === chatContext.agentId) continue;  // Skip the current agent
-            let memberProfile = await ownerStub.getAgent(memberId);
-            if (!memberProfile) continue;
-            
-            // Match by name (case-insensitive) or exact ID
-            if (memberProfile.name.toLowerCase() === mentionText.toLowerCase() ||
-                memberProfile.title.toLowerCase() === mentionText.toLowerCase() ||
-                memberId === mentionText) {
-              mentionedAgentIds.add(memberId);
-            }
-          }
-        }
-      }
-      
-      // Queue a turn for each mentioned member agent (sequentially to avoid overlapping turns).
-      for (let mentionedAgentId of mentionedAgentIds) {
-        let memberProfile = await ownerStub.getAgent(mentionedAgentId);
-        if (!memberProfile) continue;
-        
-        // Get the member's model configuration.
-        let memberMeta = await ownerStub.getChatContext(
-          memberProfile.defaultModelId,
-          memberProfile.workspaceId,
-          mentionedAgentId
-        );
-        
-        if (!memberMeta.aiModel) {
-          this.logger.warn("skipping mentioned group member with no model", {
-            event: "agent.group.mention.skip",
-            chatId,
-          });
-          continue;
-        }
-        
-        this.logger.info("starting agent turn for mentioned group member", {
-          event: "agent.group.mention.turn",
-          chatId,
-        });
-        
-        this.#registerRunningAgent(chatId);
-        this.storage.activeAgents.put({
-          chatId,
-          initiatorUserId: ownerStub.id.toString(),
-          modelId: memberMeta.aiModel.profile.id,
-          initiator: memberMeta.aiModel.profile,
-          callbackInitiated: false,
-        });
-        
-        let meta = this.storage.chatMeta.get(chatId);
-        if (meta) {
-          meta.activeAgent = memberMeta.aiModel.profile;
-          meta.lastActive = this.getChatTimestamp();
-          this.storage.chatMeta.put(meta);
-        }
-        
-        let liveChat = this.#getLiveChat(chatId);
-        await this.#runAgentTurn(chatId, memberMeta.aiModel, memberMeta.aiModel.profile,
-                                 false, liveChat, memberProfile, mentionDepth + 1);
-      }
-    } catch (err) {
-      // Log but don't throw: agent-to-agent triggering is best-effort and should never
-      // block the primary turn's completion.
-      this.logger.warn("failed to queue mentioned group members", {
-        event: "agent.group.mention.failed",
-        chatId,
-        error: err,
-      });
-    }
-  }
-
   // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
   // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
   // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
@@ -6157,6 +7746,7 @@ class OverseerImpl implements AgentHooks {
              callbackInitiated: boolean = false,
              keepAlive: boolean = false,
              agentProfile?: AgentProfile): void {
+    this.assertAutomationAllowed();
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -6177,30 +7767,37 @@ class OverseerImpl implements AgentHooks {
                 initiator: AiChatAuthorInfo,
                 callbackInitiated: boolean,
                 liveChat: LiveChatContext,
-                agentProfile?: AgentProfile,
-                mentionDepth: number = 0): Promise<void> {
+                agentProfile?: AgentProfile): Promise<void> {
+    const delegation = this.storage.chatMeta.get(chatId)?.namedDelegation;
+    if (delegation) aiModel = {...aiModel, profile: {...aiModel.profile, name: delegation.targetName,
+      ...(this.storage.chatMeta.get(chatId)?.groupParent ? { agentProfileId: delegation.targetAgentId } : {})}};
     return obsContext.with({
       operation: "agent.run",
       gadgetId: this.ctx.id.toString(),
       chatId,
       modelId: aiModel.profile.id,
     }, () => traced("agent.run", () => this.#runAgentTurnWithContext(
-        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile, mentionDepth)));
+        chatId, aiModel, initiator, callbackInitiated, liveChat, agentProfile)));
   }
 
   async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
                                  initiator: AiChatAuthorInfo,
                                  callbackInitiated: boolean,
                                  liveChat: LiveChatContext,
-                                 agentProfile?: AgentProfile,
-                                 mentionDepth: number = 0): Promise<void> {
+                                 agentProfile?: AgentProfile): Promise<void> {
+    let generation = this.automationGeneration;
+    let turn = liveChat.turn = {};
+    const maintenance = isCompactionTurn(this.#listChatTail(chatId, this.getActiveChatCompaction(chatId)));
+    const record = this.storage.activeAgents.get(chatId);
+    const execution = maintenance ? undefined : record?.run ?? this.#beginTaskExecution(chatId);
+    if (record && execution) this.storage.activeAgents.put({...record, run: execution});
+    this.#getAgentActionCaller(chatId); // Capture provenance before cancellation can erase restart intent.
+    let disposition: TaskRunDisposition = {status: "incomplete", reason: "interrupted"};
     // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
     let byokOwnerStub: DurableObjectStub<UserDurableObject> | undefined;
     let startedAt = Date.now();
-    // Track the sequence number at turn start to identify messages added during this turn.
-    let startSequence = this.nextChatSequence(chatId) - 1;
     const turnLogger = this.logger.with({
       operation: "agent.run",
       chatId,
@@ -6211,12 +7808,16 @@ class OverseerImpl implements AgentHooks {
     });
 
     try {
+      this.assertAutomationAllowed(generation);
+      liveChat.cancelController.signal.throwIfAborted();
       // Reap any provisional gadgets orphaned by a crashed prior turn before snapshotting
       // history: replay must not see registry records the chat log doesn't back (an unstamped
       // record's creating step never reached its barrier, so the log holds no trace of it; see
       // reconcilePendingGadgets). The model then simply re-creates a reaped gadget if it still
       // wants it.
       await this.reconcilePendingGadgets(chatId);
+      this.assertAutomationAllowed(generation);
+      liveChat.cancelController.signal.throwIfAborted();
 
       // Turn-start materialization: live rows recorded before this turn (user edits, for turns
       // not started via sendChatMessage -- callbacks, resumes) become a durable "changes"
@@ -6233,9 +7834,12 @@ class OverseerImpl implements AgentHooks {
       if (!callbackInitiated && this.ownerId) {
         let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
         let usage = await checkUsageAndBalance(this.env, ownerStub);
+        this.assertAutomationAllowed(generation);
+        liveChat.cancelController.signal.throwIfAborted();
         if (!usage.allowed) {
+          disposition = {status: "incomplete", reason: "usage_limit"};
           this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile),
-              usage.reason ?? "Usage limit reached.", "usage_limit");
+              usage.reason ?? "Usage limit reached.", "usage_limit", execution?.id);
           turnLogger.debug("agent run finished", {
             event: "agent.run.finished", outcome: "usage_limit",
             durationMs: Date.now() - startedAt,
@@ -6252,6 +7856,7 @@ class OverseerImpl implements AgentHooks {
       }
 
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
+      this.assertAutomationAllowed(generation);
       let chosenModel = getModel(
           this.env, aiModel.config, initiator, {
             sessionAffinity,
@@ -6265,25 +7870,32 @@ class OverseerImpl implements AgentHooks {
       let hasBeenNudged = false;
       let outcome: "ok" | "callbacks_stalled" = "ok";
       while (true) {
+        this.assertAutomationAllowed(generation);
+        controller.signal.throwIfAborted();
         let checkpoint = this.getActiveChatCompaction(chatId);
         let chatMessages = this.#listChatTail(chatId, checkpoint);
         let callbackCountBefore = liveChat.activeAgentCallbacks.size;
 
         let compactionTurn = isCompactionTurn(chatMessages);
-        let newCheckpoint = await runAgent(
+        let result = await runAgent(
             this, chosenModel, chatId, this.#makeAgentAuthor(aiModel, agentProfile), chatMessages, controller.signal,
             initiator, callbackInitiated, {
               checkpoint,
               modelConfig: aiModel.config,
               measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
-            });
-        if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
+            }, execution);
+        this.assertAutomationAllowed(generation);
+        controller.signal.throwIfAborted();
+        if (result && "checkpoint" in result) this.#commitChatCompaction(chatId, result.checkpoint);
         // `/compact` is done once it has compacted. An automatic compaction returned before
         // prompting the model, so rerun the turn now that the history is shorter. Each compaction
         // moves the boundary strictly forward and can never pass the newest turn start, so this
         // reruns a bounded number of times.
         if (compactionTurn) break;
-        if (newCheckpoint) continue;
+        if (result && "checkpoint" in result) continue;
+        if (result) disposition = result.disposition;
+        // Waiting is an explicit barrier, not a reason to nudge the model past approval.
+        if (disposition.status !== "finished") break;
 
         // If not callback-initiated, or all callbacks are resolved, we're done.
         if (!callbackInitiated || liveChat.activeAgentCallbacks.size === 0) {
@@ -6299,8 +7911,9 @@ class OverseerImpl implements AgentHooks {
           this.rejectAllAgentCallbacks(chatId,
               "Agent failed to resolve callbacks after multiple attempts.");
           this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile),
-              `Failed to resolve ${count} outstanding callback(s).`);
+              `Failed to resolve ${count} outstanding callback(s).`, undefined, execution?.id);
           outcome = "callbacks_stalled";
+          disposition = {status: "incomplete", reason: "callbacks_stalled"};
           break;
         }
 
@@ -6328,7 +7941,7 @@ class OverseerImpl implements AgentHooks {
         this.addChatMessages(chatId, initiator, [{
           type: "agentNudge",
           text: nudgeText,
-        }]);
+        }], undefined, undefined, undefined, undefined, execution?.id);
         hasBeenNudged = true;
       }
       turnLogger.debug("agent run finished", {
@@ -6336,6 +7949,12 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
     } catch (err: unknown) {
+      if (err instanceof AutomationPausedError || liveChat.cancelController.signal.aborted) {
+        disposition = {status: "canceled", reason: err instanceof AutomationPausedError ? "workspace_paused" : "user_stop"};
+        this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile), stringifyError(err), undefined, execution?.id);
+        return;
+      }
+      disposition = {status: "failed", reason: "execution_error"};
       // A failed model request surfaces as AgentTurnError (pi reports provider failures as data;
       // runAgent converts them back to a throw), carrying the failing request's HTTP status when
       // one was observed.
@@ -6368,7 +7987,7 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile), errorMessage);
+      this.postAgentErrorMessage(chatId, this.#makeAgentAuthor(aiModel, agentProfile), errorMessage, undefined, execution?.id);
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);
@@ -6377,6 +7996,8 @@ class OverseerImpl implements AgentHooks {
       }
       liveChat.activeAgentCallbacks.clear();
     } finally {
+      this.flushCapturedActions(chatId, execution);
+      this.finishTaskExecution(execution, disposition);
       // If this turn billed the user's own Cloudflare account, refresh their cached balance now (in
       // the background) so the next turn's billing decision reflects the spend just incurred. Runs
       // on both the success and error paths — an "insufficient funds" failure is exactly when an
@@ -6395,39 +8016,39 @@ class OverseerImpl implements AgentHooks {
       // provisional streaming state when it observes that the agent is no longer running (i.e. when
       // chat metadata's activeAgent becomes unset, which happens just below).
 
-      let meta = this.storage.chatMeta.get(chatId);
-      if (meta) {
-        delete meta.activeAgent;
-        meta.lastActive = this.getChatTimestamp();
-        this.storage.chatMeta.put(meta);
-      }
+      // A deleted/replaced context belongs to another turn. Its active record and metadata are
+      // not ours to tear down, even if its model and initiator happen to be identical.
+      if (this.#liveChats.get(chatId) === liveChat && liveChat.turn === turn) {
+        let meta = this.storage.chatMeta.get(chatId);
+        if (meta) {
+          delete meta.activeAgent;
+          meta.lastActive = this.getChatTimestamp();
+          this.storage.chatMeta.put(meta);
+        }
 
-      // Tear down the registry entry, persistent `activeAgents` record, and keep-alive alarm in the
-      // same synchronous step as clearing `activeAgent` above, so the chat never appears idle while
-      // stale records of this agent linger. If pending callbacks below restart the agent, they'll
-      // re-register everything consistently.
-      this.#unregisterRunningAgent(chatId);
+        // Tear down the registry entry, persistent `activeAgents` record, and keep-alive alarm in the
+        // same synchronous step as clearing `activeAgent` above, so the chat never appears idle while
+        // stale records of this agent linger. If pending callbacks below restart the agent, they'll
+        // re-register everything consistently.
+        this.#unregisterRunningAgent(chatId);
 
-      // Resolve any agent callback returns that weren't explicitly returned (they get undefined).
-      for (let [, cb] of liveChat.activeAgentCallbacks) {
-        cb.resolve(undefined);
-      }
-      liveChat.activeAgentCallbacks.clear();
+        // A stopped execution is not an implicit successful callback return. Suspended callers
+        // must retry independently; transient return capabilities cannot survive durable waits.
+        for (let [, cb] of liveChat.activeAgentCallbacks) {
+          cb.reject(new Error(`Agent did not return a result (${disposition.reason}).`));
+        }
+        liveChat.activeAgentCallbacks.clear();
 
-      // Agent-to-agent communication for group chats: if this turn posted messages that @mention
-      // other group member agents, queue turns for those mentioned members. This enables bots to
-      // respond to each other without unbounded ping-pong (only explicit @mentions trigger).
-      await this.#queueMentionedGroupMembers(chatId, startSequence, aiModel, initiator, mentionDepth);
-
-      // If any new messages were queued waiting for the agent to finish, deliver them now.
-      if (liveChat.pendingAgentCallbacks.length > 0) {
-        this.#startAgentForCallbacks(meta, liveChat);
-      } else {
-        this.#deliverWaitingExternalMessageResponse(chatId);
-
-        // LiveChatContext is now empty.
-        this.#liveChats.delete(chatId);
-        await this.drainChatQueue(chatId);
+        if (this.#liveChats.get(chatId) === liveChat && liveChat.turn === turn && !this.#runningAgents.has(chatId)) {
+          // If any new messages were queued waiting for the agent to finish, deliver them now.
+          if (liveChat.pendingAgentCallbacks.length > 0) {
+            this.#startAgentForCallbacks(meta, liveChat);
+          } else {
+            this.#deliverWaitingExternalMessageResponse(chatId);
+            this.#liveChats.delete(chatId);
+            await this.drainChatQueue(chatId);
+          }
+        }
       }
     }
   }
@@ -6489,6 +8110,8 @@ class OverseerImpl implements AgentHooks {
   async deliverAgentCallback(
       chatId: number, methodName: string, args: unknown[],
       initiatorUserId: string, initiatorModelId: string): Promise<unknown> {
+    if (this.#namedChildContext(chatId)) throw new Error("Isolated delegated tasks do not accept callbacks.");
+    this.assertAutomationAllowed();
     if (!this.ownerId) throw new Error("Workspace has been deleted.");
 
     // Compute the summary eagerly (it only reads, doesn't mutate or need the sequence).
@@ -6519,8 +8142,10 @@ class OverseerImpl implements AgentHooks {
   async #startAgentForCallbacks(
       meta: AiChatMetadata | undefined, liveChat: LiveChatContext): Promise<void> {
     let callbacks = liveChat.pendingAgentCallbacks;
+    let generation = this.automationGeneration;
 
     try {
+      this.assertAutomationAllowed(generation);
       if (callbacks.length === 0) {
         // Shouldn't happen -- our callers only call us when the list is non-empty -- but just
         // in case.
@@ -6537,6 +8162,7 @@ class OverseerImpl implements AgentHooks {
       let user = this.users.get(this.users.idFromString(callbacks[0].initiatorUserId));
 
       let userMeta = await user.getChatContext(callbacks[0].initiatorModelId);
+      this.assertAutomationAllowed(generation);
 
       if (!userMeta.aiModel) {
         throw new Error("No AI model configured for agent callback processing.");
@@ -6547,6 +8173,7 @@ class OverseerImpl implements AgentHooks {
       let preparation = this.waitForChatMessagePreparation(chatId);
       while (preparation) {
         await preparation;
+        this.assertAutomationAllowed(generation);
         preparation = this.waitForChatMessagePreparation(chatId);
       }
       meta = this.storage.chatMeta.get(chatId);
@@ -6564,6 +8191,8 @@ class OverseerImpl implements AgentHooks {
       // have to wait for the next round.
       liveChat.pendingAgentCallbacks = [];
 
+      let callbackRun: TaskRun | undefined;
+      this.ctx.storage.transactionSync(() => {
       for (let cb of callbacks) {
         // Append the agentCallback message and get its sequence number.
         let sequence = this.nextChatSequence(chatId);
@@ -6588,7 +8217,9 @@ class OverseerImpl implements AgentHooks {
           type: "agentCallback",
           methodName: cb.methodName,
           argsSummary: cb.argsSummary,
+          ...(callbackRun ? {runId: callbackRun.id} : {}),
         });
+        callbackRun ??= this.admitTaskRun(chatId, sequence, {type: "callback"});
 
         // Store the storable args in a separate table (not sent to clients).
         // TODO: Catch serialization errors and store an error stub instead?
@@ -6605,8 +8236,11 @@ class OverseerImpl implements AgentHooks {
           reject: cb.reject,
         });
       }
+      });
+      meta = this.getChatMetaOrThrow(chatId);
 
       // Start the agent.
+      liveChat.cancelController = new AbortController();
       meta.activeAgent = userMeta.aiModel.profile;
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
@@ -6886,6 +8520,20 @@ class OverseerImpl implements AgentHooks {
   //     stamping just means naming reruns next turn.
   async prepareChatBindings(chatId: number, chatMessages: AiChatMessage[])
       : Promise<SeedBindingInfo[]> {
+    const child = this.#namedChildContext(chatId);
+    if (child) {
+      // The snapshot is the whole grant, not a seed to augment from ambient discovery or history.
+      const result: SeedBindingInfo[] = [];
+      for (const [name, target] of Object.entries(child.bindings!)) {
+        validateBindingName(name);
+        const resource = this.storage.gatekeepers.get(target);
+        if (resource?.creationSpec?.type === "gatekeeper") {
+          result.push({name, target, title: resource.resourceTitle ?? "External resource", isGadget: false});
+        }
+      }
+      return result;
+    }
+    const caller = this.#getAgentActionCaller(chatId);
     let context = this.getChatAgentContext(chatId);
     let dirty = false;
 
@@ -7105,7 +8753,7 @@ class OverseerImpl implements AgentHooks {
           if (!record) return null;  // disconnected since the chat froze its set — no catalog.
           try {
             using authorizer = new RpcStub<ObservationAuthorizer>(new ApprovalQueueImpl(
-                this, gatekeeperId, {from: "agent", chatId}));
+                this, gatekeeperId, caller));
             // The catalog comes from the installed gatekeeper facet (gadget-side), authorized as an
             // observation via the approval queue. getAgentCatalog is optional on Gatekeeper; ambient
             // resources always implement it (the agent relies on it for discovery), so we view the
@@ -7509,23 +9157,9 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  postAgentErrorMessage(chatId: number, author: AiChatAuthorInfo, message: string, code?: string) {
-    let meta = this.storage.chatMeta.get(chatId);
-    if (!meta) {
-      // Chat thread deleted?
-      return;
-    }
-
-    let timestamp = this.getChatTimestamp();
-    this.storage.chats.put({
-      chatId,
-      sequence: this.nextChatSequence(chatId),
-      timestamp,
-      author,
-      type: "error",
-      message,
-      ...(code ? { code } : {}),
-    });
+  postAgentErrorMessage(chatId: number, author: AiChatAuthorInfo, message: string, code?: string, runId?: string) {
+    this.addChatMessages(chatId, author, [{type: "error", message, ...(code ? {code} : {})}],
+        undefined, undefined, undefined, undefined, runId);
   }
 
   // Auto-generate a title for the given
@@ -7621,7 +9255,7 @@ class OverseerImpl implements AgentHooks {
   addChatMessages(chatId: number, author: AiChatAuthorInfo,
         msgs: AiChatMessageBodyWithModelData[],
         totalTokens?: number, aiGatewayLogId?: string,
-        aiGatewayLogRoute?: AiGatewayLogRoute, estimatedCost?: number): void {
+        aiGatewayLogRoute?: AiGatewayLogRoute, estimatedCost?: number, runId?: string): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -7670,13 +9304,29 @@ class OverseerImpl implements AgentHooks {
         timestamp: this.getChatTimestamp(),
         author,
         ...msg,
+        ...(runId ? {runId} : {}),
       });
+      if (this.ownerId && msg.type === "message" && author.type === "agent" &&
+          msg.generatedBySlashCommandSequence === undefined && msg.message.trim()) {
+        this.storage.rosterLastReply.put({chatId, text: msg.message.replace(/\s+/g, " ").trim().slice(0, 180),
+          timestamp: this.getChatTimestamp().getTime()});
+        this.initializeAttention();
+        this.#dirtyAttention();
+      }
+      if (runId) {
+        const run = this.storage.taskRuns.get(runId);
+        if (run?.chatId === chatId) this.storage.taskRuns.put({...run, lastSequence: sequence});
+      }
 
       // The step's model-facing snapshot lands beside its message in the same synchronous step
       // (atomic under the output gate), so the two can never disagree. Destructured off `msg`
       // above so it can't leak into the client-visible record.
       if (modelData) {
         this.storage.chatModelData.put({chatId, sequence, message: modelData});
+      }
+      if (meta.groupParent && msg.type === 'message' && author.type === 'agent' && msg.message.trim()) {
+        this.addChatMessages(meta.groupParent.chatId, author, [{ type: 'message', message: msg.message }],
+          undefined, undefined, undefined, undefined, meta.groupParent.roundId);
       }
     }
 
@@ -7760,11 +9410,44 @@ class OverseerImpl implements AgentHooks {
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
   #codeModeOutputSubscribers = new Map<string, (delta: string) => void>();
 
+  #assertNamedResourceCaller(caller: GatekeeperCaller, gatekeeperId: number): void {
+    if (caller.from !== "agent" || !caller.runId) return;
+    const record = this.storage.namedDelegations.get(caller.runId);
+    if (!record) return;
+    if (record.canceled || record.receipt.childChatId !== caller.chatId || !this.storage.chatMeta.get(caller.chatId)) {
+      throw new Error("Named delegation canceled or deleted.");
+    }
+    const context = this.#namedChildContext(caller.chatId);
+    if (!context || !Object.values(context.bindings!).includes(gatekeeperId) ||
+        this.storage.gatekeepers.get(gatekeeperId)?.creationSpec?.type !== "gatekeeper") {
+      throw new Error("Resource is outside this delegation's frozen grant.");
+    }
+  }
+
+  #namedChildContext(chatId: number): AiChatAgentContext | undefined {
+    const meta = this.storage.chatMeta.get(chatId);
+    const context = this.storage.chatContext.get(chatId);
+    if (!meta?.namedDelegation && !context?.namedDelegation) return;
+    if (!meta?.namedDelegation || !context?.namedDelegation ||
+        !isDeepStrictEqual(meta.namedDelegation, context.namedDelegation) ||
+        meta.namedDelegation.childChatId !== chatId || !context.spawnerConfig ||
+        !context.bindings || context.agentId !== undefined) {
+      throw new Error("Invalid isolated delegation context.");
+    }
+    return context;
+  }
+
   async executeCodeMode(chatId: number, code: string,
                         initiator: AiChatAuthorInfo, initiatorModelId: string,
                         bindings: Record<string, ChatBindingEntry>,
                         onOutputText?: (delta: string) => void)
       : Promise<string> {
+    const child = this.#namedChildContext(chatId);
+    if (child && this.isNamedDelegationCanceled(chatId)) throw new Error("Named delegation canceled.");
+    let generation = this.automationGeneration;
+    let signal = this.#liveChats.get(chatId)?.cancelController.signal;
+    this.assertAutomationAllowed(generation);
+    signal?.throwIfAborted();
     let bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     let executionId: string = bytes.toBase64();
@@ -7791,11 +9474,11 @@ class OverseerImpl implements AgentHooks {
           "disallow_importable_env",
 
           // Make ctx.restore() available.
-          "allow_irrevocable_stub_storage",
+          ...(child ? [] : ["allow_irrevocable_stub_storage"]),
         ],
         mainModule: "harness.js",
         modules: {
-          "harness.js": CODE_MODE_HARNESS,
+          "harness.js": child ? NAMED_CHILD_CODE_MODE_HARNESS : CODE_MODE_HARNESS,
           "agent.js": code,
         },
         // The agent's env holds the chat's named bindings (see getEnvForAgent).
@@ -7808,10 +9491,13 @@ class OverseerImpl implements AgentHooks {
 
       // First check the code actually starts up. Treat startup errors as total failures.
       await entrypoint.verify();
+      // Verification is an external await, not admission to execute the code.
+      this.assertAutomationAllowed(generation);
+      signal?.throwIfAborted();
 
       // Create the `self` magic object that allows executed code to call back into this
       // chat thread. Uses the initiator's user ID for model resolution on callbacks.
-      let selfStub = this.ctx.exports.AgentSelfLoopback({props: {
+      let selfStub = child ? undefined : this.ctx.exports.AgentSelfLoopback({props: {
         overseerId: this.ctx.id.toString(),
         chatId,
         initiatorUserId: this.users.idFromName(initiator.id).toString(),
@@ -7824,7 +9510,7 @@ class OverseerImpl implements AgentHooks {
       let callbackResolvers: Record<string,
           {resolve: (v: unknown) => void, reject: (e: unknown) => void}> | undefined;
       for (let [name, entry] of Object.entries(bindings)) {
-        if (entry.type === "value") {
+        if (!child && entry.type === "value") {
           callbackResolvers ??= {};
           let sequence = entry.messageSequence;
           callbackResolvers[name] = {
@@ -7842,8 +9528,8 @@ class OverseerImpl implements AgentHooks {
       try {
         // The forger is a transient stub argument, so the capability to forge persistent
         // gadget-restore stubs lives exactly as long as this run() call.
-        await entrypoint.run(selfStub, callbackResolvers,
-            new RestoreForgerImpl(this, chatId, bindings));
+        if (child) await entrypoint.run();
+        else await entrypoint.run(selfStub, callbackResolvers, new RestoreForgerImpl(this, chatId, bindings));
       } catch (err) {
         if (err instanceof Error && err.stack) {
           error = err.stack;
@@ -7881,13 +9567,105 @@ class OverseerImpl implements AgentHooks {
   }
 
   consumeCapturedActions(chatId: number)
-      : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined {
-    let result = this.#capturedActions.get(chatId);
-    this.#capturedActions.delete(chatId);
-    return result;
+       : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined {
+    const caller = this.#getAgentActionCaller(chatId);
+    const result = this.#getOrCreateCapturedActions(caller, false);
+    if (!result) return;
+    this.#capturedActions.delete(caller.captureId!);
+    const {caller: _caller, ...captured} = result;
+    return captured;
   }
 
   // --- Connection-request hooks ---
+
+  /** Prepare an inert proposal for the caller's turn-local step buffer, never persistent state. */
+  async prepareAgentProposal(chatId: number, input: {reason: string; draft: AgentProposalDraft})
+      : Promise<AgentProposal> {
+    const generation = this.automationGeneration;
+    this.assertAutomationAllowed(generation);
+    const context = this.storage.chatContext.get(chatId);
+    if (!this.storage.chatMeta.get(chatId) || !context?.agentId || context.spawnerConfig) {
+      throw new Error("Proposals require a live bot chat in its dedicated workspace.");
+    }
+    const ownerId = this.ownerId;
+    const agent = await this.#ownerUserStub().getAgent(context.agentId);
+    this.assertAutomationAllowed(generation);
+    if (this.ownerId !== ownerId || !this.storage.chatMeta.get(chatId) ||
+        !isDeepStrictEqual(context, this.storage.chatContext.get(chatId))) {
+      throw new Error("Proposal chat changed during preparation.");
+    }
+    if (!agent || agent.workspaceId !== this.ctx.id.toString()) {
+      throw new Error("Proposals require the bot's dedicated workspace.");
+    }
+
+    const text = (value: string, label: string, limit: number) => {
+      if (!value.trim() || value.length > limit) {
+        throw new Error(`${label} must be nonempty and at most ${limit} characters.`);
+      }
+    };
+    const integer = (value: number, label: string, min: number, max: number) => {
+      if (!Number.isSafeInteger(value) || value < min || value > max) {
+        throw new Error(`${label} must be an integer from ${min} through ${max}.`);
+      }
+    };
+    text(input.reason, "Proposal reason", 2_000);
+    const draft = input.draft;
+    text(draft.value.name, "Proposal name", 200);
+    if (draft.kind === "skill") {
+      text(draft.value.description, "Skill description", 2_000);
+      text(draft.value.body, "Skill instructions", 32_000);
+    } else {
+      text(draft.value.prompt, "Routine task", 16_000);
+      const schedule = draft.value.schedule;
+      if (schedule.kind === "calendar" || schedule.kind === "once") {
+        text(schedule.timeZone, "Time zone", 128);
+        new Intl.DateTimeFormat("en", {timeZone: schedule.timeZone}).format(0);
+      }
+      switch (schedule.kind) {
+        case "interval":
+          integer(schedule.everyMs, "Routine interval", 60_000, Number.MAX_SAFE_INTEGER);
+          break;
+        case "once":
+          integer(schedule.fireAt, "Routine time", 0, 8_640_000_000_000_000);
+          if (schedule.fireAt <= Date.now()) throw new Error("Routine time must be in the future.");
+          break;
+        case "calendar":
+          integer(schedule.interval ?? 1, "Calendar interval", 1, Number.MAX_SAFE_INTEGER);
+          integer(schedule.minute, "Calendar minute", 0, 59);
+          if (schedule.freq === "hourly") {
+            if (schedule.hour !== undefined) throw new Error("Hourly schedules cannot specify an hour.");
+          } else {
+            if (schedule.hour === undefined) throw new Error("Daily and weekly schedules require an hour.");
+            integer(schedule.hour, "Calendar hour", 0, 23);
+          }
+          if (schedule.freq === "weekly") {
+            if (!schedule.byDay?.length || schedule.byDay.length > 7 ||
+                new Set(schedule.byDay).size !== schedule.byDay.length) {
+              throw new Error("Weekly schedules require one to seven distinct weekdays.");
+            }
+          } else if (schedule.byDay !== undefined) {
+            throw new Error("Only weekly schedules can specify weekdays.");
+          }
+          break;
+        case "slack":
+          text(schedule.channelId, "Slack channel", 200);
+          if (schedule.matchKind === "keyword") text(schedule.keyword ?? "", "Slack keyword", 200);
+          else if (schedule.keyword !== undefined) throw new Error("Only keyword matches can specify a keyword.");
+          break;
+        case "github":
+          text(schedule.owner, "GitHub owner", 100);
+          text(schedule.repo, "GitHub repository", 100);
+          if (!schedule.events.length || schedule.events.length > 4 ||
+              new Set(schedule.events).size !== schedule.events.length) {
+            throw new Error("GitHub schedules require one to four distinct events.");
+          }
+          break;
+      }
+    }
+    return {type: "agentProposal", proposalId: `${chatId}:${crypto.randomUUID()}`,
+      agentId: agent.id, agentName: agent.name, artifactId: crypto.randomUUID(),
+      reason: input.reason, draft: structuredClone(draft), state: "pending"};
+  }
 
   #ownerUserStub() {
     if (!this.ownerId) throw new Error("Workspace has been deleted.");
@@ -8049,13 +9827,20 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
-  requestComputerHumanTakeover(chatId: number, reason: string, currentUrl: string): void {
+  requestComputerHumanTakeover(chatId: number, reason: string, currentUrl: string,
+      secretKind?: "password" | "otp" | "payment-confirmation"): void {
+    const control = this.storage.computerControl.get();
+    if (!control || !this.ownerId) throw new Error("Browser access is disabled");
+    this.assertComputerAccess(this.ownerId, control.agentId, "agent", false);
+    // Synchronous downgrade, before another tool or batch can issue a browser command.
+    this.storage.computerControl.put({ ...control, mode: "human", revision: control.revision + 1 });
     let requestId = `${chatId}:${crypto.randomUUID()}`;
     let body: AiChatMessageBody = {
       type: "computerHumanTakeover",
+      secretInput: secretKind ? {kind: secretKind, submitted: false} : undefined,
       requestId,
       reason,
-      currentUrl,
+      currentUrl: computerUrlLabel(currentUrl) ?? "about:blank",
       state: "pending",
     };
 
@@ -8723,7 +10508,9 @@ class OverseerImpl implements AgentHooks {
 
   restore(params: OverseerRestoreParams): any {
     if (params.type === "routine") {
-      return new NativeRpcStub(new RoutineCallbackTarget(this, params.routineId));
+      // Old sealed callbacks cannot be migrated to replacement authority. Re-register the routine.
+      if (!params.registrationId) throw new Error("Legacy routine callback requires re-registration.");
+      return new NativeRpcStub(new RoutineCallbackTarget(this, params.routineId, params.registrationId));
     }
 
     if (params.type !== "gadget") {
@@ -8744,159 +10531,230 @@ class OverseerImpl implements AgentHooks {
     return this.getGadgetFacetFetcher(this.resolveGadgetId(params.gadgetId));
   }
 
-  async handleRoutineFire(routineId: string, eventContext: string | undefined): Promise<void> {
+  async handleRoutineFire(
+      routineId: string, registrationId: string, eventContext: string | undefined,
+      firing?: ScheduledFiring): Promise<number | undefined> {
+    if (!registrationId) return;
+    let occurrenceKey = firing && routineOccurrenceKey(routineId, registrationId, firing);
+    let receipt = occurrenceKey === undefined ? undefined : this.storage.routineOccurrences.get(occurrenceKey);
+    if (receipt) return receipt.status === "admitted" ? receipt.chatId : undefined;
+    let hook = [...this.storage.boundHooks.list()].find(h =>
+      h.routine?.id === routineId && h.routine.registrationId === registrationId);
+    // Never adopt the routine's replacement hook or a caller-supplied schedule's authority.
+    if (!hook || hook.routine?.scheduleId !== firing?.scheduleId) return;
+    let skip = () => {
+      if (occurrenceKey !== undefined && firing) {
+        let existing = this.storage.routineOccurrences.get(occurrenceKey);
+        if (existing) return existing.status === "admitted" ? existing.chatId : undefined;
+        // Persist acknowledged skips too: losing the ack must not replay paused work after resume.
+        this.storage.routineOccurrences.put({ routineId, registrationId, firing, status: "skipped" });
+      }
+      return undefined;
+    };
+    let generation = this.automationGeneration;
+    if (this.storage.automationPaused.get() || !hook.enabled) return skip();
     if (!this.ownerId) throw new Error("No workspace owner");
     let userDo = this.#ownerUserDo();
     let routine = await userDo.getRoutineById(routineId);
+    if (this.storage.automationPaused.get() || generation !== this.automationGeneration || routine?.paused) return skip();
     if (!routine) {
       this.logger.warn("Routine not found for fire", { event: "routine.fire.notfound" });
-      return;
+      return skip();
     }
+    if (routine.hookId !== hook.id) return skip();
+    let admission: RoutineAdmission = {
+      id: routine.id, revision: routine.revision ?? 0, hookId: hook.id, registrationId, firing,
+    };
     let agent = await userDo.getAgentByWorkspaceId(this.ctx.id.toString());
+    if (this.storage.automationPaused.get() || generation !== this.automationGeneration) return skip();
     if (!agent || agent.id !== routine.agentId) {
       this.logger.warn("Routine agent mismatch", { event: "routine.fire.agent_mismatch" });
-      return;
+      return skip();
     }
     let userMeta = await retryOnDoReset(
       () => userDo.getChatContext(agent.defaultModelId, this.ctx.id.toString(), agent.id), this.logger);
+    if (this.storage.automationPaused.get() || generation !== this.automationGeneration) return skip();
+    // Routine enablement lives in the User DO and may have changed during model resolution.
+    routine = await userDo.getRoutineById(routineId);
+    if (!routine || routine.paused || routine.agentId !== agent.id ||
+        (routine.revision ?? 0) !== admission.revision || routine.hookId !== admission.hookId ||
+        !this.storage.boundHooks.get(admission.hookId)?.enabled ||
+        this.storage.automationPaused.get() || generation !== this.automationGeneration) return skip();
     let finalPrompt = routine.prompt;
     if (eventContext) {
       finalPrompt = `${routine.prompt}\n\nEvent context:\n${eventContext}`;
     }
-    await this.newChat(userDo, userMeta, finalPrompt, undefined, undefined, undefined, undefined, undefined);
+    try {
+      return await this.newChat(userDo, userMeta, finalPrompt, undefined, undefined, undefined, undefined, undefined, admission);
+    } catch (error) {
+      if (!(error instanceof AutomationPausedError) && !(error instanceof RoutineInactiveError)) throw error;
+      return skip();
+    }
   }
 
   async registerRoutine(routineId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<number> {
-    let callback = await this.ctx.restore({ type: "routine", routineId });
-    let beforeHookCount = [...this.storage.boundHooks.list()].length;
-    
-    if (schedule.kind === "slack") {
-      let userDo = this.#ownerUserDo();
-      let routine = await userDo.getRoutineById(routineId);
-      let agent = routine ? await userDo.getAgent(routine.agentId) : null;
-      
-      let allSlackGks = [...this.storage.gatekeepers.list()].filter(gk => 
-        gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "slack");
-      
-      let slackGk: GatekeeperRecord | undefined;
-      if (agent?.defaultBindings && agent.defaultBindings.length > 0) {
-        for (let accountId of agent.defaultBindings) {
-          let vendorId = await userDo.getAccountVendorId(accountId);
-          if (vendorId === "slack") {
-            let accountFetcher = await userDo.getConnectedAccount(accountId);
-            if (accountFetcher) {
-              try {
-                let accountDesc = (await accountFetcher.describe()) as { uniqueName?: string; displayName: string };
-                for (let gk of allSlackGks) {
-                  let gkFacet = this.getGatekeeperFacet(gk.id);
-                  let gkDesc = (await gkFacet.describe()) as { url?: string; title: string };
-                  if (gkDesc.url && accountDesc.uniqueName && gkDesc.url.includes(accountDesc.uniqueName)) {
-                    slackGk = gk;
-                    break;
+    let registrationId = crypto.randomUUID();
+    using callback: NativeRpcStub<RoutineCallbackTarget> = await this.ctx.restore({ type: "routine", routineId, registrationId });
+    let hookId: number | undefined;
+    let scheduleId: string | undefined;
+    try {
+      if (schedule.kind === "slack") {
+        let userDo = this.#ownerUserDo();
+        let routine = await userDo.getRoutineById(routineId);
+        let agent = routine ? await userDo.getAgent(routine.agentId) : null;
+
+        let allSlackGks = [...this.storage.gatekeepers.list()].filter(gk =>
+          gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "slack");
+
+        let slackGk: GatekeeperRecord | undefined;
+        if (agent?.defaultBindings && agent.defaultBindings.length > 0) {
+          for (let accountId of agent.defaultBindings) {
+            let vendorId = await userDo.getAccountVendorId(accountId);
+            if (vendorId === "slack") {
+              let accountFetcher = await userDo.getConnectedAccount(accountId);
+              if (accountFetcher) {
+                try {
+                  let accountDesc = (await accountFetcher.describe()) as { uniqueName?: string; displayName: string };
+                  for (let gk of allSlackGks) {
+                    let gkFacet = this.getGatekeeperFacet(gk.id);
+                    let gkDesc = (await gkFacet.describe()) as { url?: string; title: string };
+                    if (gkDesc.url && accountDesc.uniqueName && gkDesc.url.includes(accountDesc.uniqueName)) {
+                      slackGk = gk;
+                      break;
+                    }
+                    if (gk.resourceUrl && accountDesc.displayName &&
+                        (gk.resourceUrl.includes(accountDesc.displayName) ||
+                         gkDesc.title === accountDesc.displayName)) {
+                      slackGk = gk;
+                      break;
+                    }
                   }
-                  if (gk.resourceUrl && accountDesc.displayName && 
-                      (gk.resourceUrl.includes(accountDesc.displayName) || 
-                       gkDesc.title === accountDesc.displayName)) {
-                    slackGk = gk;
-                    break;
-                  }
+                  if (slackGk) break;
+                } catch {
                 }
-                if (slackGk) break;
-              } catch {
               }
+              break;
             }
-            break;
           }
         }
-      }
-      if (!slackGk) {
-        slackGk = allSlackGks[0];
-      }
-      
-      if (!slackGk) {
-        throw new Error("No Slack connection found. Please connect Slack first.");
-      }
-      let gatekeeperFacet = this.getGatekeeperFacet(slackGk.id);
-      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.channelId, schedule.matchKind, schedule.keyword);
-      await this.bindHook(slackGk.id, controller, callback, {
-        title: name,
-        description: `Routine: ${prompt.slice(0, 100)}`,
-      }, { from: "agent", chatId: 0 });
-    } else if (schedule.kind === "github") {
-      let userDo = this.#ownerUserDo();
-      let routine = await userDo.getRoutineById(routineId);
-      let agent = routine ? await userDo.getAgent(routine.agentId) : null;
-      
-      let allGitHubGks = [...this.storage.gatekeepers.list()].filter(gk => 
-        gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "github");
-      
-      let githubGk: GatekeeperRecord | undefined;
-      if (agent?.defaultBindings && agent.defaultBindings.length > 0) {
-        for (let accountId of agent.defaultBindings) {
-          let vendorId = await userDo.getAccountVendorId(accountId);
-          if (vendorId === "github") {
-            let expectedRepoUrl = `https://github.com/${schedule.owner}/${schedule.repo}`;
-            for (let gk of allGitHubGks) {
-              if (gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.resourceUrl === expectedRepoUrl) {
-                githubGk = gk;
-                break;
+        if (!slackGk) {
+          slackGk = allSlackGks[0];
+        }
+
+        if (!slackGk) {
+          throw new Error("No Slack connection found. Please connect Slack first.");
+        }
+        let gatekeeperFacet = this.getGatekeeperFacet(slackGk.id);
+        let controller = await (gatekeeperFacet as any).createEventHookController(schedule.channelId, schedule.matchKind, schedule.keyword);
+        hookId = this.storage.nextHookId.get();
+        await this.bindHook(slackGk.id, controller, callback, {
+          title: name,
+          description: `Routine: ${prompt.slice(0, 100)}`,
+        }, { from: "agent", chatId: 0 });
+      } else if (schedule.kind === "github") {
+        let userDo = this.#ownerUserDo();
+        let routine = await userDo.getRoutineById(routineId);
+        let agent = routine ? await userDo.getAgent(routine.agentId) : null;
+
+        let allGitHubGks = [...this.storage.gatekeepers.list()].filter(gk =>
+          gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.vendorId === "github");
+
+        let githubGk: GatekeeperRecord | undefined;
+        if (agent?.defaultBindings && agent.defaultBindings.length > 0) {
+          for (let accountId of agent.defaultBindings) {
+            let vendorId = await userDo.getAccountVendorId(accountId);
+            if (vendorId === "github") {
+              let expectedRepoUrl = `https://github.com/${schedule.owner}/${schedule.repo}`;
+              for (let gk of allGitHubGks) {
+                if (gk.creationSpec?.type === "gatekeeper" && gk.creationSpec.resourceUrl === expectedRepoUrl) {
+                  githubGk = gk;
+                  break;
+                }
               }
+              break;
             }
-            break;
           }
         }
-      }
-      
-      if (!githubGk) {
-        githubGk = allGitHubGks[0];
-      }
-      
-      if (!githubGk) {
-        throw new Error("No GitHub connection found. Please connect GitHub first.");
-      }
-      let gatekeeperFacet = this.getGatekeeperFacet(githubGk.id);
-      let controller = await (gatekeeperFacet as any).createEventHookController(schedule.owner, schedule.repo, schedule.events);
-      await this.bindHook(githubGk.id, controller, callback, {
-        title: name,
-        description: `Routine: ${prompt.slice(0, 100)}`,
-      }, { from: "agent", chatId: 0 });
-    } else {
-      let schedulerGk = [...this.storage.gatekeepers.list()].find(gk => 
-        gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
-      if (!schedulerGk) {
-        throw new Error("Scheduler gatekeeper not available");
-      }
-      let session = this.getGatekeeperFacet(schedulerGk.id);
-      if (schedule.kind === "interval") {
-        await (session as any).every(schedule.everyMs!, callback, {
+
+        if (!githubGk) {
+          githubGk = allGitHubGks[0];
+        }
+
+        if (!githubGk) {
+          throw new Error("No GitHub connection found. Please connect GitHub first.");
+        }
+        let gatekeeperFacet = this.getGatekeeperFacet(githubGk.id);
+        let controller = await (gatekeeperFacet as any).createEventHookController(schedule.owner, schedule.repo, schedule.events);
+        hookId = this.storage.nextHookId.get();
+        await this.bindHook(githubGk.id, controller, callback, {
           title: name,
           description: `Routine: ${prompt.slice(0, 100)}`,
-        });
-      } else if (schedule.kind === "calendar") {
-        await (session as any).calendarAt({
-          timeZone: schedule.timeZone!,
-          freq: schedule.freq!,
-          minute: schedule.minute!,
-          ...(schedule.freq !== "hourly" ? { hour: schedule.hour } : {}),
-          ...(schedule.byDay ? { byDay: schedule.byDay } : {}),
-        }, callback, {
-          title: name,
-          description: `Routine: ${prompt.slice(0, 100)}`,
-        });
-      } else if (schedule.kind === "once") {
-        await (session as any).runAt(schedule.fireAt!, callback, {
-          title: name,
-          description: `Routine: ${prompt.slice(0, 100)}`,
-        });
+        }, { from: "agent", chatId: 0 });
+      } else {
+        await this.ensureAmbientCapsules();
+        let schedulerGk = [...this.storage.gatekeepers.list()].find(gk =>
+          gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === "scheduler");
+        if (!schedulerGk) {
+          throw new Error("Scheduler gatekeeper not available");
+        }
+        let storage = this.storage;
+        let queue = new class extends ApprovalQueueImpl {
+          override bindHook<Hook extends RpcTarget>(
+              controller: Fetcher<HookController<Hook>>, target: NativeRpcStub<Hook>,
+              description: HookDescription): Promise<void> {
+            // bindHook allocates synchronously. Capture this call's hook, not another concurrent one.
+            hookId = storage.nextHookId.get();
+            return super.bindHook(controller, target, description);
+          }
+        }(this, schedulerGk.id, { from: "user" });
+        let gatekeeper: Fetcher<Gatekeeper<import("../../gatekeeper-scheduler/src/types.js").ScheduleSession>> =
+            this.getGatekeeperFacet(schedulerGk.id);
+        let session = gatekeeper.startSession(queue);
+        try {
+          let options = {
+            title: name,
+            description: `Routine: ${prompt.slice(0, 100)}`,
+          };
+          if (schedule.kind === "interval") {
+            scheduleId = await session.every(schedule.everyMs, callback, options);
+          } else if (schedule.kind === "calendar") {
+            scheduleId = await session.calendarAt({
+              timeZone: schedule.timeZone,
+              freq: schedule.freq,
+              minute: schedule.minute,
+              ...(schedule.interval !== undefined ? { interval: schedule.interval } : {}),
+              ...(schedule.freq !== "hourly" ? { hour: schedule.hour } : {}),
+              ...(schedule.byDay ? { byDay: schedule.byDay } : {}),
+            }, callback, options);
+          } else if (schedule.kind === "once") {
+            scheduleId = await session.runAt(schedule.fireAt, callback, options);
+          }
+        } finally {
+          // Keep native RPC pipelining (and persistent callbacks); the resolved session owns its queue.
+          using _ownedSession = await session;
+        }
       }
+      let hook = hookId === undefined ? undefined : this.storage.boundHooks.get(hookId);
+      if (!hook) {
+        throw new Error("Hook not created");
+      }
+      // Routines wake the bot workspace, not an arbitrarily attributed gadget within it.
+      delete hook.gadgetId;
+      hook.routine = { id: routineId, registrationId, ...(scheduleId !== undefined ? { scheduleId } : {}) };
+      this.storage.boundHooks.put(hook);
+      await this.enableHook(hook.id);
+      stampBindHookAction(this.storage, hook.actionId, true);
+      return hook.id;
+    } catch (error) {
+      let hook = hookId === undefined ? undefined : this.storage.boundHooks.get(hookId);
+      if (hook) {
+        // Binding or activation may have committed before losing its response.
+        // Disable even if our enabled bit is false, then remove the failed registration.
+        await hook.controller.disable();
+        await this.deleteHook(hook.id);
+      }
+      throw error;
     }
-    let hooks = [...this.storage.boundHooks.list()];
-    let hook = hooks[hooks.length - 1];
-    if (!hook || hooks.length <= beforeHookCount) {
-      throw new Error("Hook not created");
-    }
-    await this.enableHook(hook.id);
-    return hook.id;
   }
 
   async unregisterRoutine(hookId: number): Promise<void> {
@@ -8938,18 +10796,21 @@ class OverseerImpl implements AgentHooks {
   }
 }
 
+@validateRpc()
 class RoutineCallbackTarget extends NativeRpcTarget {
   #impl: OverseerImpl;
   #routineId: string;
+  #registrationId: string;
 
-  constructor(impl: OverseerImpl, routineId: string) {
+  constructor(impl: OverseerImpl, routineId: string, registrationId: string) {
     super();
     this.#impl = impl;
     this.#routineId = routineId;
+    this.#registrationId = registrationId;
   }
 
-  async onSchedule(): Promise<void> {
-    await this.#impl.handleRoutineFire(this.#routineId, undefined);
+  async onSchedule(firing: ScheduledFiring): Promise<void> {
+    await this.#impl.handleRoutineFire(this.#routineId, this.#registrationId, undefined, firing);
   }
 
   async onMessage(event: any): Promise<void> {
@@ -8957,12 +10818,12 @@ class RoutineCallbackTarget extends NativeRpcTarget {
     if (event.matchedMention) context += ` (bot mentioned)`;
     if (event.matchedKeyword) context += ` (matched keyword: ${event.matchedKeyword})`;
     context += `:\n${event.message.text}`;
-    await this.#impl.handleRoutineFire(this.#routineId, context);
+    await this.#impl.handleRoutineFire(this.#routineId, this.#registrationId, context);
   }
 
   async onEvent(event: any): Promise<void> {
     let context = `GitHub ${event.eventType} event in ${event.owner}/${event.repo} - PR #${event.prNumber}: ${event.prTitle} by ${event.prAuthor}`;
-    await this.#impl.handleRoutineFire(this.#routineId, context);
+    await this.#impl.handleRoutineFire(this.#routineId, this.#registrationId, context);
   }
 }
 
@@ -8989,6 +10850,8 @@ type OverseerRestoreParams = {
 } | {
   type: "routine";
   routineId: string;
+  // Optional only for persisted legacy self-tokens, which fail closed and require re-registration.
+  registrationId?: string;
 };
 
 export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
@@ -8999,20 +10862,26 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl = new OverseerImpl(ctx, env);
   }
 
-  /**
-   * The alarm handler kicks in when we've had running agents that haven't completed for at least a
-   * minute. This serves a few purposes:
-   * - If the DO is still running when this is called, but the client has closed their browser and
-   *   so isn't holding the DO alive anymore, the alarm handler will take over and hold the DO
-   *   open until it's done.
-   * - If the DO somehow died since the agents were scheduled, the alarm will wake it up (and the
-   *   DO constructor will have rescheduled the agents, before alarm() itself runs).
-   * - If the DO dies *while* the alarm is running, the system will retry the alarm, thus resuming
-   *   the agents yet again.
-   */
+  /** Wake agents after eviction and service bounded background work without waiting for a turn. */
   async alarm() {
-    await this.impl.waitForAllAgentsToComplete();
-    await this.impl.deliverReadyExternalMessageResponses();
+    try {
+      this.impl.bootstrapAttention();
+      await this.impl.deliverAttention();
+      await this.impl.deliverReadyExternalMessageResponses();
+    } finally {
+      this.impl.updateAlarm();
+    }
+  }
+
+  /** Owner-only backfill trigger; bounded bootstrap and snapshot delivery run on the shared alarm. */
+  async initializeAttention(ownerId: string): Promise<void> {
+    if (!this.impl.ownerId || this.impl.ownerId !== ownerId) throw new Error("Not the workspace owner.");
+    this.impl.initializeAttention();
+  }
+
+  /** Recheck a source immediately before notifying; identifiers never grant approval authority. */
+  async canNotifyAttention(ownerId: string, sourceId: string, version: number): Promise<boolean> {
+    return this.impl.canNotifyAttention(ownerId, sourceId, version);
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
@@ -9193,6 +11062,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async receiveExternalMessage(
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
+    let generation = this.impl.automationGeneration;
     if (!input.prompt.trim()) {
       return { accepted: false, message: "Please include a prompt." };
     }
@@ -9238,6 +11108,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
 
+    this.impl.assertAutomationAllowed(generation);
+
     // Complete pending registration in the owner's UserDO.
     if (this.impl.storage.ownerRegistrationPending.get()) {
       let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
@@ -9259,7 +11131,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     // Resolve the caller's profile and model.
+    this.impl.assertAutomationAllowed(generation);
     let userContext = await caller.getExternalMessageChatContext(modelId);
+    this.impl.assertAutomationAllowed(generation);
 
     // The caller must have an available agent model.
     let aiModel = userContext.aiModel;
@@ -9373,6 +11247,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   startGatekeeperHook(id: number): NativeRpcStub<RpcTarget> {
+    this.impl.assertAutomationAllowed();
     // TODO: There's a bug in workerd, if we return the RpcTarget directly here, because it is a
     //   Proxy, serializeJsValueWithPipeline() decides it is non-pipelineable, which is incorrect.
     //   Manually wrapping in a stub works around the problem for now.
@@ -9382,6 +11257,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async startHook(hookId: number): Promise<{
     callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue
   }> {
+    let generation = this.impl.automationGeneration;
+    this.impl.assertAutomationAllowed(generation);
     let record = this.impl.storage.boundHooks.get(hookId);
     if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
 
@@ -9390,6 +11267,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     if (!vendorId) throw new Error("Hook vendor is unavailable.");
 
     let config = await readAdminConfig(this.env);
+    this.impl.assertAutomationAllowed(generation);
+    record = this.impl.storage.boundHooks.get(hookId);
+    if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
     if (config.disabledGatekeepers.includes(vendorId) ||
         ambientGatekeeperMode(config, vendorId) === "disabled") {
       throw new Error("Gatekeeper is disabled.");
@@ -9432,6 +11312,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async spawnAgent(
       title: string, prompt: string, config: AgentSpawnerConfig,
       creatorUserId?: string, callable?: boolean) {
+    let generation = this.impl.automationGeneration;
+    this.impl.assertAutomationAllowed(generation);
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
     if (callable && !config.modelId) {
       throw new Error("Cannot create a callable agent without a model.");
@@ -9442,6 +11324,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let resolveUserId = creatorUserId ?? this.impl.ownerId;
     let user = this.impl.users.get(this.impl.users.idFromString(resolveUserId));
     let userMeta = await user.getChatContext(config.modelId);
+    this.impl.assertAutomationAllowed(generation);
 
     let chatId = this.impl.nextChatId();
     let timestamp = this.impl.getChatTimestamp();
@@ -9489,6 +11372,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       type: "message",
       message: prompt,
     });
+    if (!callable) {
+      const run = this.impl.admitTaskRun(chatId, 0, {type: "delegation"});
+      if (!userMeta.aiModel) this.impl.finishTaskExecution(run,
+          {status: "incomplete", reason: "model_unavailable"});
+    }
 
     if (callable) {
       // Return a stub that delivers calls to the new chat thread, like the `self` magic object.
@@ -9512,8 +11400,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.restore(params);
   }
 
-  async routineCallback(routineId: string): Promise<void> {
-    return this.impl.handleRoutineFire(routineId, undefined);
+  async routineCallback(routineId: string, registrationId: string, firing: ScheduledFiring): Promise<number | undefined> {
+    return this.impl.handleRoutineFire(routineId, registrationId, undefined, firing);
   }
 
   async registerRoutine(routineId: string, name: string, prompt: string, schedule: AgentRoutineSchedule): Promise<number> {
@@ -9528,6 +11416,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 type GatekeeperCaller = {
   from: "agent";
   chatId: number;
+  // Sealed into the execution's binding capability, including calls delivered after the turn ends.
+  runId?: string;
+  attempt?: number;
+  // An opaque per-turn key also separates legacy executions with no task run. Bookkeeping only;
+  // neither this key nor runId grants any authority to the code receiving the binding.
+  captureId?: string;
+  // Honest fallback when the original execution never committed an agent-authored message.
+  author?: AiChatAuthorInfo;
 } | {
   from: "gadget";
   chatId?: number;
@@ -9926,7 +11822,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (!this.isOwner) {
       result.owner = await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger);
     }
+    result.automationPaused = this.impl.storage.automationPaused.get();
     return result;
+  }
+
+  async getAutomationPaused(): Promise<boolean> {
+    return this.impl.storage.automationPaused.get();
+  }
+
+  async setAutomationPaused(paused: boolean): Promise<void> {
+    if (!this.isOwner) throw new Error("Only the workspace owner can pause or resume automation.");
+    await this.impl.setAutomationPaused(paused);
   }
 
   async subscribeToMetadata(
@@ -9966,17 +11872,26 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         callback(metadata).catch(unsubscribe);
       }
     };
+    metadata.automationPaused = this.impl.storage.automationPaused.get();
+    let automationSubscriber = {
+      update(value: boolean) {
+        metadata.automationPaused = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.prohibitAllSharing.unsubscribe(sharingProhibitedSubscriber);
+      this.impl.storage.automationPaused.unsubscribe(automationSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.prohibitAllSharing.subscribe(sharingProhibitedSubscriber);
+    this.impl.storage.automationPaused.subscribe(automationSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -10289,6 +12204,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async approveAction(id: number): Promise<void> {
+    let generation = this.impl.automationGeneration;
+    let canResume = !this.impl.storage.automationPaused.get();
     let action = this.impl.storage.actions.get(id);
     if (!action) {
       throw new Error(`No such action: ${id}`);
@@ -10311,8 +12228,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     // If this was an awaited agent action, resume only after all awaited actions in the turn are
     // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
-    if (action.caller.from === "agent" && action.description.awaitDecision) {
-      await this.#maybeResumeAfterActionDecision(action.caller.chatId);
+    if (canResume && generation === this.impl.automationGeneration &&
+        action.caller.from === "agent" && action.description.awaitDecision) {
+      await this.#maybeResumeAfterActionDecision(action.caller.chatId, action.caller.runId, action.caller.attempt);
     }
 
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
@@ -10389,7 +12307,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   // Resume a turn suspended on awaitDecision once all awaited actions from that turn are approved.
   // Scoping to the current turn prevents older rejected actions from blocking future resumes.
-  async #maybeResumeAfterActionDecision(chatId: number): Promise<void> {
+  async #maybeResumeAfterActionDecision(chatId: number, runId?: string, attempt?: number): Promise<void> {
+    let generation = this.impl.automationGeneration;
+    if (this.impl.storage.automationPaused.get()) return;
+    await this.impl.waitForChatAgent(chatId);
+    if (!this.impl.canResumeTask(chatId, runId, attempt)) return;
     let awaited: (ActionRecord & {type: "action"})[] = [];
     for (let msg of this.impl.storage.chats.list(
         {prefix: `${keyString(chatId)}.`, reverse: true})) {
@@ -10403,7 +12325,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       if (msg.type === "action") {
         let record = this.impl.storage.actions.get(msg.actionId);
         if (record && record.type === "action" &&
-            record.caller.from === "agent" && record.description.awaitDecision) {
+            record.caller.from === "agent" && record.caller.runId === runId &&
+            record.caller.attempt === attempt && record.description.awaitDecision) {
           awaited.push(record);
         }
       }
@@ -10423,9 +12346,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         `The changes you submitted have been approved and applied: ${titleList}. ` +
         `Reads now reflect them.`;
     let author = await this.#getClientProfile();
-    this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
+    if (this.impl.storage.automationPaused.get() || generation !== this.impl.automationGeneration) return;
+    if (!this.impl.canResumeTask(chatId, runId, attempt)) return;
+    this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}],
+        undefined, undefined, undefined, undefined, runId);
 
-    await this.#resumeSuspendedAgent(chatId);
+    await this.#resumeSuspendedAgent(chatId, generation, runId, attempt);
   }
 
   async rejectAction(id: number): Promise<void> {
@@ -10471,6 +12397,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     let profile = await this.#getClientProfile();
+    if (!await this.impl.canAutoApprove(gatekeeperId, actionKind.tag)) {
+      throw new Error('This action requires manual review, locked by your administrator.');
+    }
     this.impl.storage.autoApproveTags.put({
       gatekeeperId,
       actionKind,
@@ -10530,6 +12459,62 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return (await Promise.all(perGatekeeper)).flat();
   }
 
+  #findAgentProposal(proposalId: string): AiChatMessage & AgentProposal {
+    if (this.clientUserId !== this.impl.ownerId) {
+      throw new Error("Only the workspace owner can decide proposals.");
+    }
+    const prefix = proposalId.slice(0, proposalId.indexOf(":"));
+    const chatId = Number(prefix);
+    if (!/^(0|[1-9][0-9]*)$/.test(prefix) || !Number.isSafeInteger(chatId) ||
+        !this.impl.storage.chatMeta.get(chatId)) {
+      throw new Error("No such agent proposal.");
+    }
+    for (const msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+      if (msg.type === "agentProposal" && msg.proposalId === proposalId) return msg;
+    }
+    throw new Error("No such agent proposal.");
+  }
+
+  /** Save the canonical proposal once, without activating routines or resuming automation. */
+  async acceptAgentProposal(proposalId: string): Promise<AgentProposal> {
+    let msg = this.#findAgentProposal(proposalId);
+    if (msg.state === "accepted") return msg;
+    if (msg.state === "denied") throw new Error("Agent proposal was denied.");
+    if (msg.state === "pending") {
+      msg = {...msg, state: "accepting", decidedAt: new Date(), timestamp: this.impl.getChatTimestamp()};
+      this.impl.storage.chats.put(msg);
+    }
+    // Acceptance wins over denial before any mutating User DO call, including retry after restart.
+    await this.impl.ctx.storage.sync();
+    const accepting = this.#findAgentProposal(proposalId);
+    if (accepting.state === "accepted") return accepting;
+    if (accepting.state !== "accepting") throw new Error("Agent proposal is not accepting.");
+    const receipt = await this.#owner.ensureProposalArtifact(
+      {workspaceId: this.impl.ctx.id.toString(), proposalId},
+      accepting.agentId, accepting.artifactId, accepting.draft);
+    // Creation may finish after chat deletion; its receipt must not recreate any transcript state.
+    const fresh = this.#findAgentProposal(proposalId);
+    if (fresh.state === "accepted") return fresh;
+    if (fresh.state !== "accepting" || fresh.agentId !== accepting.agentId ||
+        fresh.artifactId !== accepting.artifactId || !isDeepStrictEqual(fresh.draft, accepting.draft) ||
+        fresh.decidedAt.valueOf() !== accepting.decidedAt.valueOf()) {
+      throw new Error("Agent proposal changed during acceptance.");
+    }
+    const accepted = {...fresh, state: "accepted" as const, receipt, timestamp: this.impl.getChatTimestamp()};
+    this.impl.storage.chats.put(accepted);
+    return accepted;
+  }
+
+  /** Record an owner denial only while pending; neither terminal decision changes on retry. */
+  async denyAgentProposal(proposalId: string): Promise<AgentProposal> {
+    const msg = this.#findAgentProposal(proposalId);
+    if (msg.state === "denied") return msg;
+    if (msg.state !== "pending") throw new Error("Agent proposal acceptance has already been decided.");
+    const denied = {...msg, state: "denied" as const, decidedAt: new Date(), timestamp: this.impl.getChatTimestamp()};
+    this.impl.storage.chats.put(denied);
+    return denied;
+  }
+
   // Find a pending connectionRequest message by id. The request id encodes the chat id as a prefix
   // (`${chatId}:...`) so we only scan that thread's messages.
   #findConnectionRequest(requestId: string): AiChatMessage & {type: "connectionRequest"} {
@@ -10563,30 +12548,58 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   // Restart a suspended agent turn after its outcome is recorded in chat history (accepted
   // connection, or all awaited actions approved). Denials intentionally don't call this.
-  async #resumeSuspendedAgent(chatId: number): Promise<void> {
+  async #resumeSuspendedAgent(chatId: number, generation = this.impl.automationGeneration,
+      runId?: string, attempt = runId ? this.impl.storage.taskRuns.get(runId)?.attempt : undefined): Promise<void> {
+    if (this.impl.storage.automationPaused.get() || generation !== this.impl.automationGeneration) return;
+    if (!this.impl.canResumeTask(chatId, runId, attempt)) return;
+    await this.impl.waitForChatAgent(chatId);
     await this.impl.waitForChatMessagePreparation(chatId);
+    if (this.impl.storage.automationPaused.get() || generation !== this.impl.automationGeneration) return;
+    if (!this.impl.canResumeTask(chatId, runId, attempt)) return;
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) return;  // Chat deleted.
     if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
 
     // Recover the model this thread was using. getChatContext(null) does NOT resolve a model, so we
     // find the id from the most recent agent-authored message (its author.id is the model id).
-    let modelId: string | null = null;
-    for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
-      if (msg.author.type === "agent") {
-        modelId = msg.author.id;
-        break;
+    let modelId: string | null = meta.namedDelegation
+      ? this.impl.getChatAgentContext(chatId).spawnerConfig?.modelId ?? null : null;
+    if (!meta.namedDelegation) {
+      for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
+        if (msg.author.type === "agent") {
+          modelId = msg.author.id;
+          break;
+        }
       }
     }
 
-    let userMeta = await retryOnDoReset(
-        () => this.#clientUser.getChatContext(modelId), this.impl.logger);
+    let userMeta: UserChatContext;
+    try {
+      // Approval authorizes continuation; it does not switch the child's original payer/model.
+      userMeta = await retryOnDoReset(
+          () => (meta.namedDelegation ? this.#owner : this.#clientUser).getChatContext(modelId), this.impl.logger);
+      if (meta.namedDelegation && !userMeta.aiModel) throw new Error("Delegated model is unavailable.");
+    } catch (error) {
+      if (!meta.namedDelegation) throw error;
+      const run = runId && this.impl.storage.taskRuns.get(runId);
+      if (run && this.impl.canResumeTask(chatId, runId, attempt)) {
+        this.impl.storage.taskRuns.put({...run, status: "incomplete", reason: "model_unavailable",
+          updatedAt: this.impl.getChatTimestamp()});
+        this.impl.postAgentErrorMessage(chatId,
+          {type: "agent", id: modelId ?? "unavailable", name: meta.namedDelegation.targetName},
+          "The decision was recorded, but the delegated model could not be resumed. Request another task from the parent conversation.",
+          undefined, run.id);
+      }
+      return;
+    }
+    if (this.impl.storage.automationPaused.get() || generation !== this.impl.automationGeneration) return;
+    if (!this.impl.canResumeTask(chatId, runId, attempt)) return;
     if (!userMeta.aiModel) return;  // No model resolved; nothing to resume.
 
     let preparation = this.impl.waitForChatMessagePreparation(chatId);
     if (preparation) {
       await preparation;
-      return this.#resumeSuspendedAgent(chatId);
+      return this.#resumeSuspendedAgent(chatId, generation, runId, attempt);
     }
 
     // Re-read after the await: another concurrent accept may have started the agent in the
@@ -10599,7 +12612,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.chatMeta.put(fresh);
 
     this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.#clientUser.id.toString(), false, false, userMeta.agentProfile);
+                         meta.namedDelegation ? this.impl.ownerId! : this.#clientUser.id.toString(),
+                         false, false, meta.namedDelegation ? undefined : userMeta.agentProfile);
   }
 
   async acceptConnectionRequest(
@@ -10629,7 +12643,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         break;
       }
     }
-    await this.#resumeSuspendedAgent(msg.chatId);
+    await this.#resumeSuspendedAgent(msg.chatId, this.impl.automationGeneration, msg.runId);
   }
 
   async denyConnectionRequest(requestId: string): Promise<void> {
@@ -10649,6 +12663,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async approveComputerHumanTakeover(requestId: string): Promise<void> {
+    if (this.clientUserId !== this.impl.ownerId) throw new Error("Browser control is owner-only");
+    // Unlike a manual action approval, this explicitly resumes automation; paused requests stay pending.
+    const generation = this.impl.automationGeneration;
+    this.impl.assertAutomationAllowed(generation);
+    const control = this.impl.storage.computerControl.get();
+    if (!control) throw new Error("Explicitly resume agent browser control first");
+    await this.impl.assertComputerWorkspace(this.clientUserId, control.agentId);
+    this.impl.assertAutomationAllowed(generation);
+    this.impl.assertComputerAccess(this.clientUserId, control.agentId, "agent", false, control.revision);
     let msg = this.#findComputerHumanTakeoverRequest(requestId);
     if (msg.state !== "pending") {
       throw new Error(`Computer takeover request is not pending: ${requestId}`);
@@ -10658,7 +12681,49 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     msg.timestamp = this.impl.getChatTimestamp();
     this.impl.storage.chats.put(msg);
 
-    await this.#resumeSuspendedAgent(msg.chatId);
+    await this.#resumeSuspendedAgent(msg.chatId, generation, msg.runId);
+  }
+
+  async submitComputerSecret(requestId: string, value: string): Promise<void> {
+    if (this.clientUserId !== this.impl.ownerId) throw new Error('Secret entry is owner-only');
+    if (!value || value.length > 4096) throw new Error('Enter a value of at most 4096 characters');
+    const control = this.impl.storage.computerControl.get();
+    if (!control) throw new Error('Browser access is disabled');
+    const check = async () => {
+      await this.impl.assertComputerWorkspace(this.clientUserId, control.agentId);
+      this.impl.assertComputerAccess(this.clientUserId, control.agentId, 'owner', true, control.revision);
+    };
+    await check();
+    const msg = this.#findComputerHumanTakeoverRequest(requestId);
+    if (msg.state !== 'pending' || !msg.secretInput || msg.secretInput.submitted) {
+      throw new Error('This secret request is no longer available');
+    }
+    const origin = new URL(msg.currentUrl).origin;
+    if (!origin.startsWith('https://')) throw new Error('Secret entry requires an HTTPS destination');
+    // Persist only the attempt, before I/O; a lost response must never replay a secret entry.
+    msg.secretInput = {...msg.secretInput, submitted: true};
+    this.impl.storage.chats.put(msg);
+    const sessions = this.impl.ctx.exports.ComputerSessionImpl;
+    using guard = new NativeRpcStub(check);
+    try {
+      await sessions.getByName(`${this.clientUserId}:${control.agentId}`).fillSecret(guard, origin, value);
+    } catch {
+      throw new Error('Secret entry could not be confirmed. Complete this step in Computer view.');
+    } finally {
+      value = '';
+    }
+  }
+
+  async importComputerCookies(agentId: string, data: Uint8Array): Promise<void> {
+    if (this.clientUserId !== this.impl.ownerId) throw new Error('Browser import is owner-only');
+    const revision = this.impl.storage.computerControl.get()?.revision ?? 0;
+    const check = async () => {
+      await this.impl.assertComputerWorkspace(this.clientUserId, agentId);
+      this.impl.assertComputerAccess(this.clientUserId, agentId, 'owner', true, revision);
+    };
+    await check();
+    using guard = new NativeRpcStub(check);
+    await this.impl.ctx.exports.ComputerSessionImpl.getByName(`${this.clientUserId}:${agentId}`).importCookies(guard, data);
   }
 
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
@@ -10739,6 +12804,62 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .map(meta => this.impl.chatMetadataForClient(meta));
   }
 
+  async listTaskRuns(chatId: number, beforeSequence?: number): Promise<TaskRunPage> {
+    this.impl.getChatMetaOrThrow(chatId);
+    const page = [...this.impl.storage.taskRuns.byChatSource.list({
+      prefix: `${keyString(chatId)}.`, reverse: true, limit: 31,
+      end: beforeSequence === undefined ? undefined : `${keyString(chatId)}.${keyString(beforeSequence)}`,
+    })];
+    const runs = page.slice(0, 30);
+    return {runs, ...(page.length > 30 ? {nextBeforeSequence: runs.at(-1)!.sourceSequence} : {})};
+  }
+
+  async getNamedDelegationConfig(): Promise<NamedDelegationConfig> {
+    return this.impl.getNamedDelegationConfig(this.clientUserId);
+  }
+
+  async setNamedDelegationConfig(targets: NamedDelegationTargetConfig[], expectedRevision: number): Promise<NamedDelegationConfig> {
+    return this.impl.setNamedDelegationConfig(this.clientUserId, targets, expectedRevision);
+  }
+
+  async getNamedDelegation(id: string): Promise<NamedDelegationResult> {
+    return this.impl.getNamedDelegation(id);
+  }
+
+  async getTaskRunEvidence(runId: string, beforeSequence?: number): Promise<TaskRunEvidencePage> {
+    const run = this.impl.storage.taskRuns.get(runId);
+    if (!run || !this.impl.storage.chatMeta.get(run.chatId)) throw new Error("No such task run.");
+    const page = [...this.impl.storage.chats.byRunSequence.list({
+      prefix: `${runId}.`, reverse: true, limit: 51,
+      end: beforeSequence === undefined ? undefined : `${runId}.${keyString(beforeSequence)}`,
+    })];
+    const entries: TaskRunEvidencePage["entries"] = page.slice(0, 50).map(message => ({
+      message: this.#getChatMessageForClient(message),
+      ...(message.type === "changes" ? {changeState: "proposed" as const} : {}),
+    }));
+    // A merge may accept contributions from several runs. Resolve each selected batch against
+    // canonical decisions, not the run that happened to be current when the owner accepted it.
+    const changes = entries.filter(entry => entry.changeState !== undefined);
+    if (changes.length) {
+      for (const decision of this.impl.storage.taskChangeDecisions.list({
+        prefix: `${keyString(run.chatId)}.`,
+        start: `${keyString(run.chatId)}.${keyString(changes.at(-1)!.message.sequence)}`,
+      })) {
+        for (const entry of changes) {
+          if (entry.changeState !== "proposed") continue;
+          if (decision.type === "merge" && entry.message.sequence <= decision.mergeThrough) {
+            entry.changeState = "merged";
+          } else if (decision.type === "revert" && entry.message.sequence >= decision.revertFrom &&
+              entry.message.sequence < decision.sequence) {
+            entry.changeState = "reverted";
+          }
+        }
+        if (changes.every(entry => entry.changeState !== "proposed")) break;
+      }
+    }
+    return {entries, ...(page.length > 50 ? {nextBeforeSequence: entries.at(-1)!.message.sequence} : {})};
+  }
+
   async listModels(): Promise<AiChatAuthorInfo[]> {
     return retryOnDoReset(() => this.#clientUser.listModels(), this.impl.logger);
   }
@@ -10764,11 +12885,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     );
 
     this.impl.sweepStagedChatAttachments();
+    if ([...this.impl.storage.chatAttachmentContent.stagedByUploadedAt.list({})].length >= 64) throw new Error('Too many staged attachments in this workspace.');
 
     let id = crypto.randomUUID();
+    const modelText = isOfficeAttachment(attachment.mimeType) ? extractOfficeText(attachment.content, attachment.mimeType) : undefined;
+    const blob = attachment.content.byteLength > 1024 * 1024 || modelText !== undefined
+      ? { key: `chat-attachments/${this.impl.ctx.id}/${id}`, size: attachment.content.byteLength } : undefined;
+    if (blob) await this.impl.env.BLUEPRINT_CONTENT.put(blob.key, attachment.content);
     this.impl.storage.chatAttachmentContent.put({
       fileId: id,
-      data: new Uint8Array(attachment.content),
+      data: blob ? new Uint8Array() : new Uint8Array(attachment.content), blob, modelText,
       state: {
         type: "staged",
         uploadedAt: Date.now(),
@@ -10782,18 +12908,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Fetch the bytes of a committed chat attachment over the authenticated RPC connection. The
   // caller already has its canonical metadata from the ChatAttachmentRef in the message.
   async getChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array> {
-    let content = this.impl.storage.chatAttachmentContent.get(validateChatAttachmentId(id));
-    if (!content || content.state.type !== "committed" || content.state.chatId !== chatId) {
-      throw new Error("Chat attachment not found.");
-    }
-    return content.data;
+    return this.impl.readChatAttachmentContent(chatId, id);
   }
 
   async deleteChatAttachment(id: string): Promise<void> {
     id = validateChatAttachmentId(id);
     let content = this.impl.storage.chatAttachmentContent.get(id);
     if (content?.state.type === "staged") {
-      this.impl.storage.chatAttachmentContent.delete(id);
+      this.impl.deleteAttachmentContent(id);
     }
   }
 
@@ -10838,32 +12960,33 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
-    let changedChatMetadata: AiChatMetadata[] = [];
     let replayCount = 0;
+    let closed = false;
 
     subscriber = subscriber.dup();  // keep stub after return
-    this.impl.addChatSubscriber(subscriber);
-    subscriber.onRpcBroken(_ => unsubscribe());
-
-    // Send the server-instance generation first, before any catch-up callbacks, so the client can
-    // detect a full DO restart and discard stale provisional stream state.
-    subscriber.streamGeneration(this.impl.streamGeneration).catch(unsubscribe);
 
     let self = this;
     let metaSubscriber = {
       add(record: AiChatMetadata) {
-        subscriber.metadata(self.impl.chatMetadataForClient(record)).catch(unsubscribe);
+        send(() => subscriber.metadata(self.impl.chatMetadataForClient(record)));
       },
       update(oldRecord: AiChatMetadata, newRecord: AiChatMetadata): void {
-        subscriber.metadata(self.impl.chatMetadataForClient(newRecord)).catch(unsubscribe);
+        send(() => subscriber.metadata(self.impl.chatMetadataForClient(newRecord)));
       },
       remove(record: AiChatMetadata): void {
-        subscriber.deleted(record.id);
+        send(() => subscriber.deleted(record.id));
       }
     }
 
+    function send(deliver: () => PromiseLike<unknown>) {
+      if (closed) return;
+      // These callbacks execute inside canonical storage writes. Presentation/RPC failures,
+      // including synchronous hydration errors, must disconnect only this subscriber.
+      try { void Promise.resolve(deliver()).catch(unsubscribe); } catch { unsubscribe(); }
+    }
+
     function deliverMessage(record: AiChatMessage) {
-      subscriber.message(self.#getChatMessageForClient(record)).catch(unsubscribe);
+      send(() => subscriber.message(self.#getChatMessageForClient(record)));
     }
 
     let msgSubscriber = {
@@ -10882,58 +13005,70 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     function unsubscribe() {
+      if (closed) return;
+      closed = true;
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
       self.impl.removeChatSubscriber(subscriber);
-      subscriber[Symbol.dispose]();
+      try { subscriber[Symbol.dispose](); } catch { /* Already broken. */ }
     };
 
-    if (startAfter !== undefined) {
-      // Catch up on metadata changes.
-      for (let meta of chatMeta.byLastActive.list({startAfter: startAfter.valueOf()})) {
-        changedChatMetadata.push(meta);
+    try {
+      this.impl.addChatSubscriber(subscriber);
+      subscriber.onRpcBroken(_ => unsubscribe());
+      // Generation precedes replay, so a client can discard pre-restart provisional state.
+      send(() => subscriber.streamGeneration(this.impl.streamGeneration));
+      if (startAfter !== undefined) {
+        // Hydration scans child evidence. Finish each bounded index cursor before hydrating:
+        // nested workerd KV iterators invalidate the outer reconnect scan.
+        let cursor = startAfter.valueOf();
+        while (true) {
+          if (closed) break;
+          const page = [...chats.byTimestamp.list({startAfter: cursor, limit: 100})];
+          for (const msg of page) { deliverMessage(msg); ++replayCount; }
+          if (page.length < 100) break;
+          cursor = page.at(-1)!.timestamp.valueOf();
+        }
+        // Messages establish the durable state that the corresponding metadata describes.
+        cursor = startAfter.valueOf();
+        while (true) {
+          if (closed) break;
+          const page = [...chatMeta.byLastActive.list({startAfter: cursor, limit: 100})];
+          for (const meta of page) { metaSubscriber.add(meta); ++replayCount; }
+          if (page.length < 100) break;
+          cursor = page.at(-1)!.lastActive.valueOf();
+        }
+      }
+
+      // Replay every currently retained (not-yet-materialized) change row so the subscriber can
+      // reconstruct uncommitted chat content without a separate fetch. Rows a "changes" message
+      // has absorbed are not replayed -- the message's watermark covers them -- and the rows are
+      // delivered after the message catch-up above, matching their position in the stream (rows
+      // are strictly newer than every materialized message of their generation). Delivered
+      // unconditionally (no startAfter filtering): the client dedupes by (generation, revision).
+      for (let row of this.impl.storage.chatChanges.list()) {
+        if (closed) break;
+        if (row.retired) continue;
+        send(() => subscriber.changeApplied(row.chatId, row.generation, row.revision, row.author, row.change,
+                                            row.submission));
         ++replayCount;
       }
-    }
 
-    if (startAfter !== undefined) {
-      // Catch up on messages.
-      for (let msg of chats.byTimestamp.list({startAfter: startAfter.valueOf()})) {
-        deliverMessage(msg);
-        ++replayCount;
+      this.impl.logger.debug("chat subscription replay completed", {
+        event: "chat.subscription.replay.completed",
+        size: replayCount,
+      });
+
+      if (!closed) {
+        chatMeta.subscribe(metaSubscriber);
+        chats.subscribe(msgSubscriber);
       }
-      // Messages establish the durable state that the corresponding metadata describes.
-      for (let meta of changedChatMetadata) {
-        subscriber.metadata(self.impl.chatMetadataForClient(meta)).catch(unsubscribe);
-      }
-    }
-
-    // Replay every currently retained (not-yet-materialized) change row so the subscriber can
-    // reconstruct uncommitted chat content without a separate fetch. Rows a "changes" message
-    // has absorbed are not replayed -- the message's watermark covers them -- and the rows are
-    // delivered after the message catch-up above, matching their position in the stream (rows
-    // are strictly newer than every materialized message of their generation). Delivered
-    // unconditionally (no startAfter filtering): the client dedupes by (generation, revision).
-    for (let row of this.impl.storage.chatChanges.list()) {
-      if (row.retired) continue;
-      subscriber.changeApplied(row.chatId, row.generation, row.revision, row.author, row.change,
-                               row.submission).catch(unsubscribe);
-      ++replayCount;
-    }
-
-    this.impl.logger.debug("chat subscription replay completed", {
-      event: "chat.subscription.replay.completed",
-      size: replayCount,
-    });
-
-    chatMeta.subscribe(metaSubscriber);
-    chats.subscribe(msgSubscriber);
+    } catch { unsubscribe(); }
 
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
       [Symbol.dispose]() {
         unsubscribe();
-        subscriber[Symbol.dispose]();
       }
     });
   }
@@ -10941,9 +13076,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                 formats?: MessageFormatRef[], agentId?: string): Promise<number> {
+    let generation = this.impl.automationGeneration;
+    this.impl.assertAutomationAllowed(generation);
     let workspaceId = this.impl.ctx.id.toString();
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId, workspaceId, agentId), this.impl.logger);
+    this.impl.assertAutomationAllowed(generation);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
                              undefined, undefined, formats);
   }
@@ -10952,9 +13090,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[], agentId?: string): Promise<void> {
+    if (this.impl.storage.chatMeta.get(chatId)?.namedDelegation) {
+      throw new Error("Send follow-up instructions in the parent conversation, not an isolated delegated task.");
+    }
+    let generation = this.impl.automationGeneration;
+    this.impl.assertAutomationAllowed(generation);
     let workspaceId = this.impl.ctx.id.toString();
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId, workspaceId, agentId), this.impl.logger);
+    this.impl.assertAutomationAllowed(generation);
     return this.impl.sendChatMessage(
         this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
   }
@@ -11013,6 +13157,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async deleteChat(chatId: number): Promise<void> {
     let startedAt = Date.now();
+    this.impl.cancelNamedDelegations(chatId, "user_stop", true);
+    this.impl.cancelAgent(chatId);
     let response = this.impl.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId);
     if (response?.status === "waiting") {
       this.impl.deliverExternalMessageResponse(response, "The chat was deleted before the agent responded.");
@@ -11036,8 +13182,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.impl.bumpVersion([gadget.id]);
       }
     }
+    // Gadget cleanup can yield. Fence any new turn/child admitted during those awaits too.
+    this.impl.cancelNamedDelegations(chatId, "user_stop", true);
+    this.impl.cancelAgent(chatId);
     this.impl.storage.chatMeta.delete(chatId);
+    this.impl.clearRosterReply(chatId);
     this.impl.storage.chatContext.delete(chatId);
+    for (const run of Array.from(this.impl.storage.taskRuns.byChatSource.list({prefix: `${keyString(chatId)}.`}))) {
+      this.impl.storage.taskRuns.delete(run.id);
+    }
     deleteChatQueue(this.impl.storage.chatQueue, chatId);
     // Buffer the keys first: deleting invalidates the list cursor.
     let checkpoints = Array.from(
@@ -11064,12 +13217,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Delete the chat's messages and the attachment content referenced by them. Attachment metadata
     // is canonical in each message's ChatAttachmentRef, so no separate attachment index is needed.
     this.impl.ctx.storage.transactionSync(() => {
-      for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+      // Source subscribers perform nested KV scans; finish this iterator before invoking them.
+      for (let msg of Array.from(this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`}))) {
         if (msg.type === "message") {
           for (let attachment of msg.attachments ?? []) {
             let content = this.impl.storage.chatAttachmentContent.get(attachment.id);
             if (content?.state.type === "committed" && content.state.chatId === chatId) {
-              this.impl.storage.chatAttachmentContent.delete(attachment.id);
+              this.impl.deleteAttachmentContent(attachment.id);
             }
           }
         }
@@ -11098,25 +13252,58 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     // Clean up all in-memory live state for this chat.
     this.impl.destroyLiveChat(chatId);
+    this.impl.forgetNamedDelegationInput(chatId);
 
     this.impl.logger.info("deleted chat", {
       event: "chat.delete.completed", chatId, durationMs: Date.now() - startedAt,
     });
   }
 
-  async getComputerSession(agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
-    const agent = await retryOnDoReset(
-      () => this.#clientUser.getAgent(agentId), this.impl.logger);
-    
-    if (!agent) {
-      throw new Error("Agent not found or does not belong to you");
-    }
+  async getComputerControl(agentId: string): Promise<ComputerControlMode> {
+    await this.impl.assertComputerWorkspace(this.clientUserId, agentId);
+    const control = this.impl.storage.computerControl.get();
+    return control?.agentId === agentId ? control.mode : "disabled";
+  }
 
-    return resolveComputerSession(this.impl.ctx, this.clientUserId, agentId);
+  async getComputerWorkspaceAccess(agentId: string): Promise<{ available: boolean; enabled: boolean }> {
+    await this.impl.assertComputerWorkspace(this.clientUserId, agentId);
+    return { available: !!this.impl.env.COMPUTER_RUNTIME, enabled: this.impl.storage.computerWorkspaceEnabled.get() };
+  }
+
+  async setComputerWorkspaceAccess(agentId: string, enabled: boolean): Promise<void> {
+    await this.impl.assertComputerWorkspace(this.clientUserId, agentId);
+    if (enabled && !this.impl.env.COMPUTER_RUNTIME) throw new Error('Computer runtime is not configured');
+    this.impl.storage.computerWorkspaceEnabled.put(enabled);
+    const control = this.impl.storage.computerControl.get();
+    if (control) this.impl.storage.computerControl.put({ ...control, revision: control.revision + 1 });
+    if (!enabled) await this.impl.ctx.exports.ComputerSessionImpl.getByName(`${this.clientUserId}:${agentId}`).stopWorkspace();
+  }
+
+  async setComputerControl(agentId: string, mode: ComputerControlMode): Promise<void> {
+    const revision = this.impl.storage.computerControl.get()?.revision ?? 0;
+    await this.impl.assertComputerWorkspace(this.clientUserId, agentId);
+    if (revision !== (this.impl.storage.computerControl.get()?.revision ?? 0)) {
+      throw new Error("Browser control changed; retry with current authority");
+    }
+    if (mode === "agent" && this.impl.storage.prohibitAllSharing.get()) {
+      throw new Error("Agent browser access is blocked because this workspace has observed sensitive data");
+    }
+    this.impl.storage.computerControl.put({ agentId, mode, revision: revision + 1 });
+    if (mode === "disabled") {
+      const sessions = this.impl.ctx.exports.ComputerSessionImpl;
+      await sessions.get(sessions.idFromName(`${this.clientUserId}:${agentId}`)).stop();
+    }
+  }
+
+  async getComputerSession(agentId: string): Promise<RpcStub<ComputerSession>> {
+    const revision = this.impl.storage.computerControl.get()?.revision ?? 0;
+    await this.impl.assertComputerWorkspace(this.clientUserId, agentId);
+    this.impl.assertComputerAccess(this.clientUserId, agentId, "owner", false, revision);
+    return resolveComputerSession(this.impl, this.clientUserId, agentId, "owner");
   }
 
   async computerScreenshot(agentId: string): Promise<Uint8Array> {
-    const session = await this.getComputerSession(agentId);
+    using session = await this.getComputerSession(agentId);
     return await session.screenshot();
   }
 
@@ -11125,10 +13312,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async retryAgent(chatId: number, modelId: string): Promise<void> {
+    const groupMeta = this.impl.storage.chatMeta.get(chatId);
+    if (groupMeta?.groupRound?.id === groupMeta?.currentRunId && groupMeta?.groupRound) throw new Error('Send a new group message to retry group authors.');
+    if (this.impl.storage.chatMeta.get(chatId)?.namedDelegation) {
+      throw new Error("Request another delegated task from the parent conversation instead of retrying this child.");
+    }
+    let generation = this.impl.automationGeneration;
+    this.impl.assertAutomationAllowed(generation);
+    const runId = this.impl.getChatMetaOrThrow(chatId).currentRunId;
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(modelId), this.impl.logger);
+    this.impl.assertAutomationAllowed(generation);
 
     let meta = this.impl.assertChatNotActive(chatId);
+    if (meta.currentRunId !== runId) throw new Error("Task changed while preparing retry.");
     if (!userMeta.aiModel) {
       throw new Error("No AI model available.");
     }
@@ -11480,6 +13677,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 
   // --- Allowed methods ---
 
+  async getAutomationPaused(): Promise<boolean> {
+    return this.impl.storage.automationPaused.get();
+  }
+
   async getMetadata(): Promise<GadgetMetadata> {
     return {
       id: this.impl.ctx.id.toString(),
@@ -11487,6 +13688,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
+      automationPaused: this.impl.storage.automationPaused.get(),
     };
   }
 
@@ -11501,6 +13703,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
+      automationPaused: this.impl.storage.automationPaused.get(),
     };
 
     let titleSubscriber = {
@@ -11510,12 +13713,21 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let automationSubscriber = {
+      update(value: boolean) {
+        metadata.automationPaused = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
+      this.impl.storage.automationPaused.unsubscribe(automationSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
+    this.impl.storage.automationPaused.subscribe(automationSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -11551,6 +13763,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 
   // --- Denied methods (build-only) ---
 
+  async setAutomationPaused(_paused: boolean): Promise<void> { this.#deny(); }
   async setTitle(_title: string): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
@@ -11598,7 +13811,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async acceptConnectionRequest(_requestId: string, _result: {gatekeeperId: number}): Promise<void> { this.#deny(); }
   async denyConnectionRequest(_requestId: string): Promise<void>  { this.#deny(); }
+  /** Use collaborators cannot decide proposals. */
+  async acceptAgentProposal(_proposalId: string): Promise<AgentProposal> { this.#deny(); }
+  /** Use collaborators cannot decide proposals. */
+  async denyAgentProposal(_proposalId: string): Promise<AgentProposal> { this.#deny(); }
   async approveComputerHumanTakeover(_requestId: string): Promise<void> { this.#deny(); }
+  async submitComputerSecret(_requestId: string, _value: string): Promise<void> { this.#deny(); }
+  async importComputerCookies(_agentId: string, _data: Uint8Array): Promise<void> { this.#deny(); }
   async subscribeToActions(
       subscriber: RpcStub<ActionsSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     // Inert: "use" sessions have no visibility into the action log. Signal a settled, empty log
@@ -11613,6 +13832,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     });
   }
   async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
+  async listTaskRuns(_chatId: number, _beforeSequence?: number): Promise<TaskRunPage> { this.#deny(); }
+  async getNamedDelegationConfig(): Promise<NamedDelegationConfig> { this.#deny(); }
+  async setNamedDelegationConfig(_targets: NamedDelegationTargetConfig[], _expectedRevision: number): Promise<NamedDelegationConfig> { this.#deny(); }
+  async getNamedDelegation(_id: string): Promise<NamedDelegationResult> { this.#deny(); }
+  async getTaskRunEvidence(_runId: string, _beforeSequence?: number): Promise<TaskRunEvidencePage> { this.#deny(); }
   async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
   async getChatHistory(_chatId: number, _beforeSequence?: number): Promise<AiChatHistoryPage> {
     this.#deny();
@@ -11652,7 +13876,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async finalizeChatDraft(_chatId: number): Promise<void> { this.#deny(); }
   async discardChatDraftChanges(_chatId: number): Promise<void> { this.#deny(); }
   async deleteChat(_chatId: number): Promise<void> { this.#deny(); }
-  async getComputerSession(_agentId: string): Promise<RpcStub<import("@gadgets/workshop-shared/api").ComputerSession>> {
+  async getComputerControl(_agentId: string): Promise<ComputerControlMode> { this.#deny(); }
+  async getComputerWorkspaceAccess(_agentId: string): Promise<{ available: boolean; enabled: boolean }> { this.#deny(); }
+  async setComputerWorkspaceAccess(_agentId: string, _enabled: boolean): Promise<void> { this.#deny(); }
+  async setComputerControl(_agentId: string, _mode: ComputerControlMode): Promise<void> { this.#deny(); }
+  async getComputerSession(_agentId: string): Promise<RpcStub<ComputerSession>> {
     this.#deny();
     throw new Error("Not authorized");
   }
