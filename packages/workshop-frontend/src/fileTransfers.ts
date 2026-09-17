@@ -8,11 +8,11 @@ function makeFilename(title: string, fallback: string): string {
 }
 
 export function makeBlueprintFilename(title: string, version: number): string {
-  return `${makeFilename(title, 'blueprint')}-v${version}${BLUEPRINT_ARCHIVE_EXTENSION}`
+  return `${makeFilename(title, 'template')}-v${version}${BLUEPRINT_ARCHIVE_EXTENSION}`
 }
 
 export function makeExportFilename(title: string, extension: string): string {
-  return `${makeFilename(title, 'gadget')}${extension}`
+  return `${makeFilename(title, 'output')}${extension}`
 }
 
 type SaveFileHandle = {

@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Popover } from '@cloudflare/kumo'
 import { ArrowRight, Pulse } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { CountBadge } from './components/CountBadge'
 import { ResolveButton } from './components/ResolveButton'
+import { WorkshopButton } from './components/WorkshopControls'
 import {
+  ActionApprovalDetails,
   formatRelativeTime,
   PENDING_CHECKING_COPY,
   PENDING_ERROR_COPY,
@@ -17,6 +19,8 @@ import { useResolveAction } from './useResolveAction'
 interface ActivityNotificationsProps {
   overseer: RpcStub<Overseer>
   onViewActivity: (view: ActivityView) => void
+  /** Show a labelled approval control only while requests are pending, instead of the Activity icon. */
+  pendingOnly?: boolean
 }
 
 const PREVIEW_LIMIT = 3
@@ -24,33 +28,50 @@ const PREVIEW_LIMIT = 3
 export default function ActivityNotifications({
   overseer,
   onViewActivity,
+  pendingOnly = false,
 }: ActivityNotificationsProps) {
   const [open, setOpen] = useState(false)
   const [processing, setProcessing] = useState<Set<number>>(new Set())
   const resolveAction = useResolveAction(overseer, setProcessing)
   const { status, pending } = useActions(overseer)
 
+  useEffect(() => {
+    if (pendingOnly && pending.length === 0) setOpen(false)
+  }, [pendingOnly, pending.length])
+
   const openFullView = (view: ActivityView) => {
     setOpen(false)
     onViewActivity(view)
   }
 
+  if (pendingOnly && pending.length === 0) return null
+
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <Popover.Trigger
         render={
-          <button
-            type="button"
-            aria-label={pending.length > 0
-              ? `Activity — ${pending.length} ${pending.length === 1 ? 'request needs' : 'requests need'} review`
-              : 'Activity'}
-            className={`relative flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors duration-150 hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${
-              pending.length > 0 ? 'text-kumo-strong' : 'text-kumo-subtle hover:text-kumo-default'
-            }`}
-          >
-            <Pulse size={16} weight={pending.length > 0 ? 'bold' : 'regular'} />
-            <CountBadge count={pending.length} tone="solid" className="absolute -right-0.5 -top-0.5" />
-          </button>
+          pendingOnly ? (
+            <WorkshopButton
+              aria-label={`Needs approval: ${pending.length} ${pending.length === 1 ? 'request' : 'requests'}`}
+              className="gap-1.5 whitespace-nowrap !px-2 text-kumo-strong sm:!px-3"
+            >
+              Needs approval
+              <CountBadge count={pending.length} max={99} />
+            </WorkshopButton>
+          ) : (
+            <button
+              type="button"
+              aria-label={pending.length > 0
+                ? `Activity — ${pending.length} ${pending.length === 1 ? 'request needs' : 'requests need'} review`
+                : 'Activity'}
+              className={`relative flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors duration-150 hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${
+                pending.length > 0 ? 'text-kumo-strong' : 'text-kumo-subtle hover:text-kumo-default'
+              }`}
+            >
+              <Pulse size={16} weight={pending.length > 0 ? 'bold' : 'regular'} />
+              <CountBadge count={pending.length} tone="solid" className="absolute -right-0.5 -top-0.5" />
+            </button>
+          )
         }
       />
       {/* Kumo always renders base-ui's arrow as the popup's first child; hide it so this sits flush
@@ -63,7 +84,7 @@ export default function ActivityNotifications({
       >
         <div className="flex items-center justify-between gap-2 px-3.5 pb-1 pt-2.5">
           <Popover.Title className="text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
-            Needs review
+            {pendingOnly ? 'Needs approval' : 'Needs review'}
           </Popover.Title>
           <CountBadge count={pending.length} />
         </div>
@@ -83,25 +104,18 @@ export default function ActivityNotifications({
                   key={action.id}
                   className={`px-3.5 py-2.5 ${index === 0 ? '' : 'border-t border-kumo-line'}`}
                 >
-                  <div className="flex items-start gap-2">
+                  <div>
+                    <h3 className="m-0 text-[14px] font-medium text-kumo-default">Allow this action?</h3>
+                    <span className="text-[11.5px] text-kumo-inactive">{formatRelativeTime(action.createdAt)}</span>
+                    <ActionApprovalDetails record={action} collapsible />
                     <button
                       type="button"
                       onClick={() => openFullView('review')}
-                      className="min-w-[7rem] flex-1 cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
+                      className="min-h-11 cursor-pointer text-left text-[13px] font-medium text-kumo-default underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
                     >
-                      <span className="block truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-                        {action.description.title}
-                      </span>
-                      <span className="mt-0.5 block truncate text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-                        {action.resourceTitle}
-                        <span className="px-1">·</span>
-                        {formatRelativeTime(action.createdAt)}
-                      </span>
-                      <span className="mt-1.5 block line-clamp-2 text-[12.5px] leading-[18px] tracking-[-0.2px] text-kumo-subtle">
-                        {action.description.description}
-                      </span>
+                      Review details
                     </button>
-                    <div className="ml-auto flex flex-shrink-0 items-center gap-0.5">
+                    <div className="mt-1 flex flex-wrap items-center justify-end gap-2 [&>button]:min-h-11 [&>button]:min-w-11">
                       <ResolveButton
                         tone="deny"
                         disabled={isProcessing}
@@ -109,6 +123,7 @@ export default function ActivityNotifications({
                       />
                       <ResolveButton
                         tone="approve"
+                        variant="filled"
                         disabled={isProcessing}
                         onClick={() => void resolveAction(action.id, 'approve')}
                       />

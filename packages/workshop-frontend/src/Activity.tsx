@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Check, Eye, Lightning, ShieldCheck } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { ActionLogEntry, Overseer, actionChangeTime } from '@gadgets/workshop-shared/api'
 import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
@@ -19,6 +21,7 @@ import { useVendorBranding } from './useVendorBranding'
 import { useResolveAction } from './useResolveAction'
 import { safeExternalUrl } from './utils/safeExternalUrl'
 import AutoApproveConfirmDialog from './components/AutoApproveConfirmDialog'
+import styles from './ChatInterface.module.css'
 
 export type ActivityView = 'review' | 'history' | 'auto'
 
@@ -166,8 +169,8 @@ export default function Activity({
     actionId: number
     gatekeeperId: number
     resourceTitle: string
+    resourceUrl?: string
     actionKind: ActionKind
-    actionLabel: string
   } | null>(null)
   const toasts = useKumoToastManager()
 
@@ -232,17 +235,15 @@ export default function Activity({
                       actionId: record.id,
                       gatekeeperId: record.gatekeeperId,
                       resourceTitle: record.resourceTitle,
+                      resourceUrl: record.resourceUrl,
                       actionKind: record.description.actionKind,
-                      actionLabel: record.description.title,
                     }
                   : undefined
               return (
                 <ReviewRequest
                   key={record.id}
                   record={record}
-                  expanded={expandedActionId === record.id}
                   processing={processingActions.has(record.id)}
-                  onToggle={() => toggleExpanded(record.id)}
                   onApprove={() => void resolveAction(record.id, 'approve')}
                   onReject={() => void resolveAction(record.id, 'deny')}
                   onAlwaysApprove={
@@ -434,8 +435,10 @@ export default function Activity({
       {confirmAutoApprove && (
         <AutoApproveConfirmDialog
           open
-          actionLabel={confirmAutoApprove.actionLabel}
+          actionKind={confirmAutoApprove.actionKind}
+          gatekeeperId={confirmAutoApprove.gatekeeperId}
           resourceTitle={confirmAutoApprove.resourceTitle}
+          resourceUrl={confirmAutoApprove.resourceUrl}
           isProcessing={processingActions.has(confirmAutoApprove.actionId)}
           onOpenChange={open => { if (!open) setConfirmAutoApprove(null) }}
           onConfirm={async () => {
@@ -460,6 +463,7 @@ function AutoApprovalPanel({
   const { entries, isLoading, loadError, pending, refresh, setEnabled } = useAutoApproval(overseer)
   const { authenticatedApi } = useAuthenticatedApi()
   const vendorBranding = useVendorBranding(authenticatedApi)
+  const [confirmEnable, setConfirmEnable] = useState<AutoApprovalEntry | null>(null)
 
   const previousReloadTrigger = useRef(reloadTrigger)
   useEffect(() => {
@@ -486,7 +490,7 @@ function AutoApprovalPanel({
       }
     }
     for (const group of byConnection.values()) {
-      group.title ||= 'Unavailable connection'
+      group.title ||= 'Connection title unavailable'
       group.entries = group.entries.toSorted((a, b) =>
         a.actionKind.label.localeCompare(b.actionKind.label))
     }
@@ -505,12 +509,12 @@ function AutoApprovalPanel({
     return (
       <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
         <p className="m-0 text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-          {loadError ? 'Could not load auto-approval' : 'Nothing can run automatically'}
+          {loadError ? 'Could not load auto-approval' : 'No auto-approval options listed'}
         </p>
         <p className="mt-1 max-w-xs text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
           {loadError
             ? 'The current rules may be incomplete. Try loading them again.'
-            : 'Action types appear here once a connected resource offers one its author marked safe to apply without review.'}
+            : 'No action categories are listed in the current catalog. Eligible requests may still offer Allow always when you review them.'}
         </p>
         {loadError && (
           <WorkshopButton className="mt-4" onClick={() => void refresh()}>
@@ -523,11 +527,13 @@ function AutoApprovalPanel({
 
   return (
     <>
-      <div className={`${PANE_BAR} gap-3 px-5`}>
-        <p className="m-0 min-w-0 flex-1 truncate text-[12.5px] leading-[17px] tracking-[-0.2px] text-kumo-subtle">
-          {loadError
-            ? 'Some auto-approval options could not be loaded.'
-            : 'Actions agents may take without asking. Everything else waits for your review.'}
+      <div className="flex flex-shrink-0 items-start gap-3 border-b border-kumo-line px-5 py-3">
+        <p className="m-0 min-w-0 flex-1 text-[12.5px] leading-[18px] tracking-[-0.2px] text-kumo-subtle">
+          Each rule covers one connection and action category throughout this workspace, across all
+          chats and apps. Eligible matching pending and future actions may run without asking.
+          Revoke a rule here in Activity &gt; Auto-approval by switching it off. Revoking does not undo
+          actions that have already run.
+          {loadError && <span className="mt-1 block">Some auto-approval options could not be loaded.</span>}
         </p>
         {loadError && (
           <button
@@ -550,8 +556,9 @@ function AutoApprovalPanel({
                 size={12}
                 className="h-5 w-5 rounded-md [&>img]:p-px"
               />
-              <h3 className="m-0 min-w-0 truncate text-[12px] font-medium leading-4 tracking-[-0.2px] text-kumo-subtle">
+              <h3 className="m-0 min-w-0 break-words text-[12px] font-medium leading-4 tracking-[-0.2px] text-kumo-subtle">
                 {group.title}
+                <span className="block">Connection #{group.gatekeeperId}</span>
               </h3>
             </div>
             {group.entries.map(entry => {
@@ -563,23 +570,26 @@ function AutoApprovalPanel({
                   className="flex w-full items-center gap-3 border-b border-kumo-line/60 px-5 py-2.5 text-left"
                 >
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                    <span className="block break-words text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
                       {entry.actionKind.label}
                     </span>
                     <span className="mt-0.5 block text-[12px] leading-4 tracking-[-0.2px] text-kumo-inactive">
                       {entry.orphaned
-                        ? 'This connection no longer offers this action; the rule still applies.'
+                        ? 'Not in the current catalog. This saved rule is still enabled; you can revoke it.'
                         : entry.enabled
-                          ? 'Applied without asking'
-                          : 'Waits for your approval'}
+                          ? 'Eligible matching actions may run without asking'
+                          : 'Auto-approval is off'}
                     </span>
                   </span>
                   <Switch
-                    size="sm"
+                    className="shrink-0 after:absolute after:left-1/2 after:top-1/2 after:h-11 after:w-11 after:-translate-x-1/2 after:-translate-y-1/2"
                     checked={entry.enabled}
                     disabled={busy}
-                    aria-label={`${entry.enabled ? 'Disable' : 'Enable'} auto-approval for ${entry.actionKind.label}`}
-                    onCheckedChange={enabled => void setEnabled(entry, enabled)}
+                    aria-label={`${entry.enabled ? 'Disable' : 'Enable'} auto-approval for ${entry.actionKind.label} on connection #${entry.gatekeeperId}`}
+                    onCheckedChange={enabled => {
+                      if (enabled) setConfirmEnable(entry)
+                      else void setEnabled(entry, false)
+                    }}
                   />
                 </div>
               )
@@ -587,75 +597,95 @@ function AutoApprovalPanel({
           </section>
         ))}
       </div>
+      {confirmEnable && (
+        <AutoApproveConfirmDialog
+          open
+          actionKind={confirmEnable.actionKind}
+          gatekeeperId={confirmEnable.gatekeeperId}
+          resourceTitle={confirmEnable.resourceTitle}
+          isProcessing={pending.has(autoApprovalKey(confirmEnable))}
+          onOpenChange={open => { if (!open) setConfirmEnable(null) }}
+          onConfirm={async () => {
+            if (await setEnabled(confirmEnable, true)) setConfirmEnable(null)
+          }}
+        />
+      )}
+    </>
+  )
+}
+
+/** The action's supplied details, never inferred recipient or account guarantees. */
+export function ActionApprovalDetails({ record, collapsible = false }: {
+  record: ActionLogEntry
+  collapsible?: boolean
+}) {
+  const url = safeExternalUrl(record.resourceUrl)
+  const description = (
+    <div className={`min-w-0 break-words text-[13px] leading-[19px] text-kumo-subtle ${styles.markdownContent}`}>
+      {record.description.description ? (
+        <ReactMarkdown skipHtml remarkPlugins={[remarkGfm]} components={{
+          // Review must not fetch agent-controlled image URLs, even inside collapsed details.
+          img: ({ alt }) => <span>[Image omitted{alt ? `: ${alt}` : ''}]</span>,
+          a: ({ href, children }) => {
+            const safeUrl = safeExternalUrl(href)
+            return safeUrl
+              ? <a href={safeUrl} target="_blank" rel="noopener noreferrer">{children}</a>
+              : <>{children}</>
+          },
+          table: ({ children }) => <div className="overflow-x-auto"><table>{children}</table></div>,
+        }}>
+          {record.description.description}
+        </ReactMarkdown>
+      ) : <p>No additional details provided.</p>}
+    </div>
+  )
+  return (
+    <>
+      <dl className="my-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px] leading-[19px]">
+        <dt className="text-kumo-subtle">Action</dt>
+        <dd className="m-0 break-words font-medium text-kumo-default">{record.description.title}</dd>
+        <dt className="text-kumo-subtle">Connection</dt>
+        <dd className="m-0 min-w-0 break-words text-kumo-default">
+          {record.resourceTitle || 'Connection title unavailable'}
+          {record.gatekeeperId !== undefined && <span className="block text-kumo-subtle">Connection #{record.gatekeeperId}</span>}
+          {url && <a href={url} target="_blank" rel="noopener noreferrer" className="block break-all underline">{url}</a>}
+        </dd>
+      </dl>
+      {collapsible ? (
+        <details>
+          <summary className="min-h-11 cursor-pointer py-3 text-[13px] font-medium text-kumo-default">Full action details</summary>
+          {description}
+        </details>
+      ) : description}
     </>
   )
 }
 
 function ReviewRequest({
   record,
-  expanded,
   processing,
-  onToggle,
   onApprove,
   onReject,
   onAlwaysApprove,
 }: {
   record: ActionLogEntry
-  expanded: boolean
   processing: boolean
-  onToggle: () => void
   onApprove: () => void
   onReject: () => void
   onAlwaysApprove?: () => void
 }) {
-  const resourceUrl = safeExternalUrl(record.resourceUrl)
   return (
     <article className="border-b border-kumo-line px-5 py-3 transition-colors hover:bg-kumo-elevated/50">
-      <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
-        <div className="min-w-[8rem] flex-1">
-          <button
-            type="button"
-            onClick={onToggle}
-            aria-expanded={expanded}
-            className="flex max-w-full cursor-pointer items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
-          >
-            <h3 className="m-0 truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-              {record.description.title}
-            </h3>
-            <CaretRight
-              size={12}
-              className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`}
-            />
-          </button>
-          <p className="mt-0.5 truncate text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-            {resourceUrl ? (
-              <a
-                href={resourceUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-kumo-default hover:underline"
-              >
-                {record.resourceTitle}
-              </a>
-            ) : record.resourceTitle}
-            <span className="px-1">·</span>
-            {formatRelativeTime(record.createdAt)}
-          </p>
-        </div>
-        <div className="ml-auto flex flex-shrink-0 items-center gap-0.5">
-          {onAlwaysApprove && (
-            <AlwaysApproveButton onClick={onAlwaysApprove} disabled={processing} />
-          )}
-          <ResolveButton tone="deny" onClick={onReject} disabled={processing} />
-          <ResolveButton tone="approve" onClick={onApprove} disabled={processing} />
-        </div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="m-0 text-[14px] font-medium text-kumo-default">Allow this action?</h3>
+        <span className="text-[11.5px] text-kumo-inactive">{formatRelativeTime(record.createdAt)}</span>
       </div>
-
-      {record.description.description && (
-        <p className={`mt-1.5 max-w-2xl whitespace-pre-wrap text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle ${expanded ? '' : 'line-clamp-2'}`}>
-          {record.description.description}
-        </p>
-      )}
+      <ActionApprovalDetails record={record} />
+      <div className="mt-3 flex flex-wrap items-center justify-end gap-2 [&>button]:min-h-11 [&>button]:min-w-11">
+        {onAlwaysApprove && <AlwaysApproveButton onClick={onAlwaysApprove} disabled={processing} />}
+        <ResolveButton tone="deny" onClick={onReject} disabled={processing} />
+        <ResolveButton tone="approve" variant="filled" onClick={onApprove} disabled={processing} />
+      </div>
     </article>
   )
 }

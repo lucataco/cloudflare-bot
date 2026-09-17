@@ -2,13 +2,11 @@ import { useNavigate } from '@tanstack/react-router'
 import { DropdownMenu } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useAvatar } from '../useAvatar'
-import { useUiFeatureFlag } from '../FeatureFlagsContext'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './menuStyles'
 
 export default function UserMenu() {
   const { authenticatedApi, logout, currentUser, isAdmin } = useAuthenticatedApi()
   const navigate = useNavigate()
-  const { enabled: agentShell } = useUiFeatureFlag('agentShell')
 
   const avatarUrl = useAvatar(authenticatedApi, currentUser?.id)
 
@@ -53,35 +51,6 @@ export default function UserMenu() {
           >
             Admin
           </DropdownMenu.Item>
-        )}
-        {agentShell && (
-          <>
-            <DropdownMenu.Separator />
-            <DropdownMenu.Item
-              onClick={() => navigate({ to: '/workspaces' })}
-              className={MENU_ITEM}
-            >
-              Workspaces
-            </DropdownMenu.Item>
-            <DropdownMenu.Item
-              onClick={() => navigate({ to: '/blueprints' })}
-              className={MENU_ITEM}
-            >
-              Blueprints
-            </DropdownMenu.Item>
-            <DropdownMenu.Item
-              onClick={() => navigate({ to: '/explore' })}
-              className={MENU_ITEM}
-            >
-              Explore
-            </DropdownMenu.Item>
-            <DropdownMenu.Item
-              onClick={() => navigate({ to: '/outputs' })}
-              className={MENU_ITEM}
-            >
-              Outputs
-            </DropdownMenu.Item>
-          </>
         )}
         <DropdownMenu.Separator />
         <DropdownMenu.Item

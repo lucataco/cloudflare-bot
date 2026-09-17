@@ -2,12 +2,13 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownMessage } from "./ChatInterface";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-describe("MarkdownMessage line breaks", () => {
+describe("MarkdownMessage", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -58,5 +59,17 @@ describe("MarkdownMessage line breaks", () => {
     await act(async () => button?.click());
 
     expect(writeText).toHaveBeenCalledWith("const answer = 42;");
+  });
+
+  it.each([undefined, true, false])("only disables images and React preloads when requested (allowImages=%s)", allowImages => {
+    const html = renderToStaticMarkup(createElement(MarkdownMessage, {
+      message: '![image description](https://example.com/image.png)\n\n<img src="https://example.com/raw.png">',
+      allowImages,
+    }));
+    expect(html.includes('[Image omitted: image description]')).toBe(allowImages === false);
+    expect(html.includes('<img src="https://example.com/image.png"')).toBe(allowImages !== false);
+    expect(/<link\b/.test(html)).toBe(allowImages !== false);
+    expect(html.includes('rel="preload"')).toBe(allowImages !== false);
+    expect(html).not.toContain('https://example.com/raw.png');
   });
 });

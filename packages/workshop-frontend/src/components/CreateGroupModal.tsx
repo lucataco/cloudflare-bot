@@ -41,8 +41,8 @@ export default function CreateGroupModal({
       newErrors.name = 'Group name is required'
     }
 
-    if (selectedAgentIds.length === 0) {
-      newErrors.members = 'Select at least one agent'
+    if (selectedAgentIds.length === 0 || selectedAgentIds.length > 6) {
+      newErrors.members = 'Select one through six bots'
     }
 
     setErrors(newErrors)
@@ -86,7 +86,7 @@ export default function CreateGroupModal({
             Create Group
           </Dialog.Title>
           <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-            Create a group chat with multiple agents
+            Up to six bots can respond together. Use @everyone or @Name, and bots can hand work to teammates.
           </Dialog.Description>
         </div>
         <div className="px-5 py-4">

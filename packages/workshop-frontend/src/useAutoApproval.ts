@@ -100,7 +100,7 @@ export function useAutoApproval(overseer: RpcStub<Overseer> | null) {
   }, [catalog, rules])
 
   const setEnabled = useCallback(async (entry: AutoApprovalEntry, enabled: boolean) => {
-    if (!overseer) return
+    if (!overseer) return false
     const key = autoApprovalKey(entry)
     setPending(previous => new Set(previous).add(key))
     setCatalog(previous => previous.map(action =>
@@ -111,12 +111,14 @@ export function useAutoApproval(overseer: RpcStub<Overseer> | null) {
     try {
       if (enabled) await overseer.setAutoApprovedActionKind(entry.gatekeeperId, entry.actionKind)
       else await overseer.removeAutoApprovedActionKind(entry.gatekeeperId, entry.actionKind.tag)
+      return true
     } catch (err) {
       console.error('Failed to update auto-approval rule:', err)
       toasts.add({
         title: `Failed to ${enabled ? 'enable' : 'disable'} auto-approval`,
         variant: 'error',
       })
+      return false
     } finally {
       await refresh()
       setPending(previous => {

@@ -131,13 +131,13 @@ export default function Sidebar({
             />
             <SidebarItem
               to="/blueprints"
-              label="Blueprints"
+              label="Templates"
               icon={<Blueprint size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem
               to="/outputs"
-              label="Outputs"
+              label="Apps & documents"
               icon={<Stack size={14} weight="regular" />}
               collapsed={collapsed}
             />
@@ -182,7 +182,7 @@ export default function Sidebar({
             })}
             <SidebarItem
               to="/explore"
-              label="Explore"
+              label="Explore templates"
               icon={<Compass size={14} weight="regular" />}
               collapsed={collapsed}
             />

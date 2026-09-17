@@ -82,7 +82,7 @@ export default function GadgetExportMenu({ gadget, gadgetTitle, chatId }: Props)
   if (!gadget) return null
 
   const exportingFormat = formats?.find(format => format.id === exportingId)
-  const tooltip = exportingFormat ? `Exporting to ${exportingFormat.label}` : 'Export Gadget'
+  const tooltip = exportingFormat ? `Exporting to ${exportingFormat.label}` : 'Export output'
 
   return (
     <Tooltip content={tooltip} asChild>
@@ -91,7 +91,7 @@ export default function GadgetExportMenu({ gadget, gadgetTitle, chatId }: Props)
           <DropdownMenu.Trigger
             render={(
               <WorkshopIconButton
-                aria-label="Export Gadget"
+                aria-label="Export output"
                 disabled={exportingId !== null}
               >
                 <DownloadSimple size={17} />
@@ -121,7 +121,7 @@ export default function GadgetExportMenu({ gadget, gadgetTitle, chatId }: Props)
               </div>
             ) : formats?.length === 0 ? (
               <p className="px-2.5 py-2 text-[12px] leading-4 text-kumo-subtle">
-                This Gadget does not support exports.
+                This output does not support exports.
               </p>
             ) : formats?.map(format => (
               <DropdownMenu.Item

@@ -12,7 +12,10 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AgentsRouteImport } from './routes/agents'
+import { Route as AttentionRouteImport } from './routes/attention'
+import { Route as AutoReviewRouteImport } from './routes/auto-review'
 import { Route as BlueprintsRouteImport } from './routes/blueprints'
+import { Route as ComputersRouteImport } from './routes/computers'
 import { Route as ContextRouteImport } from './routes/context'
 import { Route as ExploreRouteImport } from './routes/explore'
 import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
@@ -21,6 +24,7 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
+import { Route as AdminBoundariesRouteImport } from './routes/admin_.boundaries'
 import { Route as AgentsIdRouteImport } from './routes/agents_.$id'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
@@ -46,9 +50,24 @@ const AgentsRoute = AgentsRouteImport.update({
   path: '/agents',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AttentionRoute = AttentionRouteImport.update({
+  id: '/attention',
+  path: '/attention',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AutoReviewRoute = AutoReviewRouteImport.update({
+  id: '/auto-review',
+  path: '/auto-review',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BlueprintsRoute = BlueprintsRouteImport.update({
   id: '/blueprints',
   path: '/blueprints',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ComputersRoute = ComputersRouteImport.update({
+  id: '/computers',
+  path: '/computers',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContextRoute = ContextRouteImport.update({
@@ -89,6 +108,11 @@ const SignupRoute = SignupRouteImport.update({
 const WorkspacesRoute = WorkspacesRouteImport.update({
   id: '/workspaces',
   path: '/workspaces',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminBoundariesRoute = AdminBoundariesRouteImport.update({
+  id: '/admin_/boundaries',
+  path: '/admin/boundaries',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AgentsIdRoute = AgentsIdRouteImport.update({
@@ -141,7 +165,10 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/agents': typeof AgentsRoute
+  '/attention': typeof AttentionRoute
+  '/auto-review': typeof AutoReviewRoute
   '/blueprints': typeof BlueprintsRoute
+  '/computers': typeof ComputersRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
@@ -150,6 +177,7 @@ export interface FileRoutesByFullPath {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/admin/boundaries': typeof AdminBoundariesRoute
   '/agents/$id': typeof AgentsIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -164,7 +192,10 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/agents': typeof AgentsRoute
+  '/attention': typeof AttentionRoute
+  '/auto-review': typeof AutoReviewRoute
   '/blueprints': typeof BlueprintsRoute
+  '/computers': typeof ComputersRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
@@ -173,6 +204,7 @@ export interface FileRoutesByTo {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/admin/boundaries': typeof AdminBoundariesRoute
   '/agents/$id': typeof AgentsIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -188,7 +220,10 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/agents': typeof AgentsRoute
+  '/attention': typeof AttentionRoute
+  '/auto-review': typeof AutoReviewRoute
   '/blueprints': typeof BlueprintsRoute
+  '/computers': typeof ComputersRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
@@ -197,6 +232,7 @@ export interface FileRoutesById {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/admin_/boundaries': typeof AdminBoundariesRoute
   '/agents_/$id': typeof AgentsIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -213,7 +249,10 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/agents'
+    | '/attention'
+    | '/auto-review'
     | '/blueprints'
+    | '/computers'
     | '/context'
     | '/explore'
     | '/gatekeepers'
@@ -222,6 +261,7 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/admin/boundaries'
     | '/agents/$id'
     | '/blueprint/$id'
     | '/gadget/$id'
@@ -236,7 +276,10 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/agents'
+    | '/attention'
+    | '/auto-review'
     | '/blueprints'
+    | '/computers'
     | '/context'
     | '/explore'
     | '/gatekeepers'
@@ -245,6 +288,7 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/admin/boundaries'
     | '/agents/$id'
     | '/blueprint/$id'
     | '/gadget/$id'
@@ -259,7 +303,10 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/agents'
+    | '/attention'
+    | '/auto-review'
     | '/blueprints'
+    | '/computers'
     | '/context'
     | '/explore'
     | '/gatekeepers'
@@ -268,6 +315,7 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/admin_/boundaries'
     | '/agents_/$id'
     | '/blueprint/$id'
     | '/gadget/$id'
@@ -283,7 +331,10 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   AgentsRoute: typeof AgentsRoute
+  AttentionRoute: typeof AttentionRoute
+  AutoReviewRoute: typeof AutoReviewRoute
   BlueprintsRoute: typeof BlueprintsRoute
+  ComputersRoute: typeof ComputersRoute
   ContextRoute: typeof ContextRoute
   ExploreRoute: typeof ExploreRoute
   GatekeepersRoute: typeof GatekeepersRoute
@@ -292,6 +343,7 @@ export interface RootRouteChildren {
   ProvidersRoute: typeof ProvidersRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
+  AdminBoundariesRoute: typeof AdminBoundariesRoute
   AgentsIdRoute: typeof AgentsIdRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
@@ -326,11 +378,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/attention': {
+      id: '/attention'
+      path: '/attention'
+      fullPath: '/attention'
+      preLoaderRoute: typeof AttentionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auto-review': {
+      id: '/auto-review'
+      path: '/auto-review'
+      fullPath: '/auto-review'
+      preLoaderRoute: typeof AutoReviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/blueprints': {
       id: '/blueprints'
       path: '/blueprints'
       fullPath: '/blueprints'
       preLoaderRoute: typeof BlueprintsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/computers': {
+      id: '/computers'
+      path: '/computers'
+      fullPath: '/computers'
+      preLoaderRoute: typeof ComputersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/context': {
@@ -387,6 +460,13 @@ declare module '@tanstack/react-router' {
       path: '/workspaces'
       fullPath: '/workspaces'
       preLoaderRoute: typeof WorkspacesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin_/boundaries': {
+      id: '/admin_/boundaries'
+      path: '/admin/boundaries'
+      fullPath: '/admin/boundaries'
+      preLoaderRoute: typeof AdminBoundariesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agents_/$id': {
@@ -459,7 +539,10 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   AgentsRoute: AgentsRoute,
+  AttentionRoute: AttentionRoute,
+  AutoReviewRoute: AutoReviewRoute,
   BlueprintsRoute: BlueprintsRoute,
+  ComputersRoute: ComputersRoute,
   ContextRoute: ContextRoute,
   ExploreRoute: ExploreRoute,
   GatekeepersRoute: GatekeepersRoute,
@@ -468,6 +551,7 @@ const rootRouteChildren: RootRouteChildren = {
   ProvidersRoute: ProvidersRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
+  AdminBoundariesRoute: AdminBoundariesRoute,
   AgentsIdRoute: AgentsIdRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   GadgetIdRoute: GadgetIdRoute,

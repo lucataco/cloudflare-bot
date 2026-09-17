@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from "vitest";
-import type { AiChatMessage, AiChatMessageBody, ChatCodeBase } from "@gadgets/workshop-shared/api";
+import type { AiChatMessage, AiChatMessageBody, AiToolCall, ChatCodeBase } from "@gadgets/workshop-shared/api";
 import type { CodeChange } from "@gadgets/workshop-shared/code-change";
 import {
   buildChatDisplayEntries, computeChatEpochChanges, computeMessageStates,
@@ -38,6 +38,21 @@ function codeBase(overrides?: Partial<ChatCodeBase>): ChatCodeBase {
 const PRE_BOUNDARY: CodeChange = { 1: [["pre.txt", { set: "pre" }]] };
 const LOADED: CodeChange = { 1: [["loaded.txt", { set: "loaded" }]] };
 const OLDER: CodeChange = { 1: [["older.txt", { set: "older" }]] };
+
+describe("browser and memory transcript labels", () => {
+  const cases: { call: AiToolCall; label: string }[] = [
+    { call: { toolCallId: "navigate", toolName: "computerNavigate", input: { url: "https://user:private@example.com/?token=private#private" } }, label: "Navigated browser" },
+    { call: { toolCallId: "type", toolName: "computerType", input: { text: "private typed content" } }, label: "Typed in browser" },
+    { call: { toolCallId: "memory", toolName: "memoryWrite", input: { fact: "private memory content" } }, label: "Updated memory" },
+  ];
+  it.each(cases)("uses a bounded action label for $call.toolName", ({ call, label }) => {
+    const [entry] = buildChatDisplayEntries([message(1, { type: "message", message: "", toolCalls: [call] })], new Map());
+    expect(entry.type).toBe("workRun");
+    if (entry.type !== "workRun") throw new Error("Expected work row");
+    expect(entry.toolCallGroups[0].label).toBe(label);
+    expect(entry.toolCallGroups[0].detailLines).toEqual([]);
+  });
+});
 
 describe("computeMessageStates compaction seeding", () => {
   it("counts the boundary's proposed changes as one entry below the oldest loaded message", () => {

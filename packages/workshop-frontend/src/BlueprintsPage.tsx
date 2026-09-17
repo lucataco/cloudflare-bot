@@ -53,7 +53,7 @@ export default function BlueprintsPage() {
       .catch((err) => {
         console.error("Failed to load Explore data:", err);
         toastsRef.current.add({
-          title: "Failed to load featured blueprints",
+          title: "Failed to load featured templates",
           variant: "error",
         });
       })
@@ -81,7 +81,7 @@ export default function BlueprintsPage() {
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Explore</h1>
           <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-            Discover featured blueprints to use as starting points. Open one to create a workspace
+            Discover featured templates to use as starting points. Open one to create a workspace
             from it, or save it to reuse later.
           </p>
         </div>
@@ -102,7 +102,7 @@ export default function BlueprintsPage() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search blueprints…"
+            placeholder="Search templates…"
             className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
           />
         </div>
@@ -115,13 +115,13 @@ export default function BlueprintsPage() {
           <EmptySection
             title={
               search
-                ? "No blueprints match"
-                : "No featured blueprints yet"
+                ? "No templates match"
+                : "No featured templates yet"
             }
             message={
               search
                 ? "Try a different search term."
-                : "Featured blueprints will appear here when they’re published. You can still create blueprints from your own workspaces."
+                : "Featured templates will appear here when they’re published. You can still create templates from your own workspaces."
             }
           />
         ) : view === "grid" ? (
@@ -181,7 +181,7 @@ function FeaturedBlueprintCard({
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}
-        aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
+        aria-label={`Open featured template ${blueprint.metadata.title}`}
         className="absolute inset-0 z-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
       />
 

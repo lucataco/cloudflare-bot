@@ -29,12 +29,14 @@ export default function EditGroupModal({
   const [deleting, setDeleting] = useState(false)
   const [name, setName] = useState(group.name)
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>(group.memberAgentIds)
+  const [multiAuthor, setMultiAuthor] = useState(group.multiAuthor ?? false)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (visible) {
       setName(group.name)
-      setSelectedAgentIds(group.memberAgentIds)
+      setSelectedAgentIds(group.memberAgentIds.filter(id => agents.some(agent => agent.id === id)))
+      setMultiAuthor(group.multiAuthor ?? false)
       setErrors({})
     }
   }, [visible, group])
@@ -46,8 +48,8 @@ export default function EditGroupModal({
       newErrors.name = 'Group name is required'
     }
 
-    if (selectedAgentIds.length === 0) {
-      newErrors.members = 'Select at least one agent'
+    if (selectedAgentIds.length === 0 || selectedAgentIds.length > 6) {
+      newErrors.members = 'Select one through six bots'
     }
 
     setErrors(newErrors)
@@ -62,6 +64,7 @@ export default function EditGroupModal({
       await authenticatedApi.updateGroup(group.id, {
         name: name.trim(),
         memberAgentIds: selectedAgentIds,
+        multiAuthor,
       })
 
       toasts.add({
@@ -122,6 +125,7 @@ export default function EditGroupModal({
         </div>
         <div className="px-5 py-4">
           <div className="flex flex-col gap-4">
+            <Checkbox label="Concurrent group authors and teammate handoffs" checked={multiAuthor} disabled={loading || deleting} onCheckedChange={value => setMultiAuthor(value === true)} />
             <div>
               <label htmlFor="group-name" className="block text-sm font-medium text-kumo-default mb-1.5">
                 Group Name *

@@ -15,6 +15,7 @@ import { RpcStub } from 'capnweb'
 import {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
+  AiChatMessage,
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
@@ -79,6 +80,9 @@ export interface GatekeeperModalProps {
   initialVendorId?: string
   initialResourceUrl?: string
   initialResourceUrlPattern?: string
+  /** Agent-supplied request context, not an enforced restriction on the connection. */
+  connectionRequest?: Pick<Extract<AiChatMessage, { type: 'connectionRequest' }>,
+    'requestId' | 'vendorId' | 'vendorName' | 'resourceTitle' | 'resourceUrl' | 'resourceUrlPattern' | 'reason'>
 }
 
 type ConnectionTypeId =
@@ -126,6 +130,13 @@ type ConfiguratorFrameState = {
   accountId: number
   resourceUrlPattern: string
 }
+
+type ReviewedResourceSelection = Readonly<{
+  accountId: number
+  resourceUrl: string
+  connection: ConnectionType
+  frameKey: number
+}>
 
 function platformConnectionTypes(siteName: string): ConnectionType[] {
   return [
@@ -195,7 +206,7 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
 
 export default function GatekeeperModal({
   open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
-  initialVendorId, initialResourceUrl, initialResourceUrlPattern, workspaceId, agentId,
+  initialVendorId, initialResourceUrl, initialResourceUrlPattern, workspaceId, agentId, connectionRequest,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -218,6 +229,11 @@ export default function GatekeeperModal({
   const [configuratorLoading, setConfiguratorLoading] = useState(false)
   const [configuratorError, setConfiguratorError] = useState<string | null>(null)
   const [configuratorSelectionReady, setConfiguratorSelectionReady] = useState<boolean | null>(null)
+  const [reviewedSelection, setReviewedSelection] = useState<ReviewedResourceSelection | null>(null)
+  const [resourceEditSeed, setResourceEditSeed] = useState<ReviewedResourceSelection | null>(null)
+  const [collectingResource, setCollectingResource] = useState(false)
+  const resourceOperationRef = useRef(0)
+  const resourceCreationRef = useRef<number | null>(null)
   const [dialogMinHeight, setDialogMinHeight] = useState(0)
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
@@ -239,8 +255,24 @@ export default function GatekeeperModal({
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
 
+  const invalidateResourceReview = () => {
+    resourceOperationRef.current++
+    setReviewedSelection(null)
+    setCollectingResource(false)
+  }
+
+  const handleClose = () => {
+    if (creating || resourceCreationRef.current !== null) return
+    invalidateResourceReview()
+    onClose()
+  }
+
   const updateConfiguratorFrameState = (next: ConfiguratorFrameState | null) => {
     const previous = configuratorFrameRef.current
+    if (previous !== next) {
+      invalidateResourceReview()
+      setResourceEditSeed(null)
+    }
     if (previous?.frame !== next?.frame) disposeConfiguratorFrame(previous?.frame ?? null)
     configuratorFrameRef.current = next
     if (!next) {
@@ -302,6 +334,7 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     return () => {
+      resourceOperationRef.current++
       disposeConfiguratorFrame(configuratorFrameRef.current?.frame ?? null)
       configuratorFrameRef.current = null
     }
@@ -347,6 +380,10 @@ export default function GatekeeperModal({
   }, [open, selectedConnectionId])
 
   useEffect(() => {
+    invalidateResourceReview()
+    resourceCreationRef.current = null
+    setCreating(false)
+    setResourceEditSeed(null)
     if (!open) {
       // Reset the selection on close so reopening (e.g. for a different connection request) starts
       // clean and the pre-seed effect below can run again.
@@ -363,7 +400,6 @@ export default function GatekeeperModal({
     setSelectedConnectionId(null)
     setSearchText('')
     setExpandedGroups(new Set())
-    setCreating(false)
     setConnectingVendor(null)
     setReconnectingAccountId(null)
     setVendors([])
@@ -409,13 +445,15 @@ export default function GatekeeperModal({
 
     return () => {
       cancelled = true
+      resourceOperationRef.current++
     }
-  }, [open, authenticatedApi])
+  }, [open, authenticatedApi, workspaceId, agentId, connectionRequest?.requestId])
 
   useEffect(() => {
     if (!open) return
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
+    setAccounts([])
 
     const subscriber = new AccountsSubscriberAdapter({
       add({ id, description, vendor, supportedResources, credentialsValid, vendorId }) {
@@ -425,6 +463,7 @@ export default function GatekeeperModal({
       },
       remove(id) {
         if (cancelled) return
+        if (configuratorFrameRef.current?.accountId === id) invalidateResourceReview()
         accountMap.delete(id)
         setAccounts(Array.from(accountMap.values()))
       },
@@ -440,7 +479,7 @@ export default function GatekeeperModal({
       cancelled = true
       subscription[Symbol.dispose]()
     }
-  }, [open, authenticatedApi])
+  }, [open, authenticatedApi, workspaceId, agentId])
 
   useEffect(() => {
     setSelectedAccountId(null)
@@ -512,10 +551,13 @@ export default function GatekeeperModal({
   // configurator's initialValuesFromResourceUrl hook, or a URLPattern-group fallback). Excludes the
   // whole-instance catch-all, which has no per-resource inputs.
   const prefilledResourceUrl = useMemo(() => {
+    if (resourceEditSeed?.accountId === selectedAccountId && resourceEditSeed.connection.id === selectedConnection?.id) {
+      return resourceEditSeed.resourceUrl
+    }
     const pattern = selectedConnection?.resourceUrlPattern
     if (!pattern || pattern === 'https://*' || !initialResourceUrl) return null
     return matchesResourceUrlPattern(pattern, initialResourceUrl) ? initialResourceUrl : null
-  }, [selectedConnection?.resourceUrlPattern, initialResourceUrl])
+  }, [resourceEditSeed, selectedAccountId, selectedConnection?.id, selectedConnection?.resourceUrlPattern, initialResourceUrl])
 
   // Grantable resources the chosen connection needs that the selected account hasn't granted yet.
   // Until these are granted, the resource configurator can't load and the binding can't be created
@@ -717,36 +759,104 @@ export default function GatekeeperModal({
     }
   }
 
-  const handleCreateResourceConnection = async () => {
-    if (creating) return
-    if (!selectedConnection || selectedAccountId === null) return
-    const resourceUrlPattern = selectedConnection.resourceUrlPattern
-    if (!resourceUrlPattern) return
+  const resourceSelectionReady = Boolean(
+    open && selectedConnection?.resourceUrlPattern && selectedAccount &&
+    configuratorFrameState?.accountId === selectedAccount.id &&
+    configuratorFrameState?.resourceUrlPattern === selectedConnection.resourceUrlPattern &&
+    !configuratorLoading && !configuratorError &&
+    configuratorSelectionReady !== false && !hasMissingResourceGrants,
+  )
+  // Recheck after each async boundary: account subscriptions and frame changes can invalidate a
+  // collection or confirmation while the configurator / lazy overseer call is in flight.
+  const currentResourceSelection = {
+    requestId: connectionRequest?.requestId,
+    authenticatedApi,
+    workspaceId,
+    agentId,
+    ready: resourceSelectionReady,
+    accountId: selectedAccountId,
+    connectionId: selectedConnectionId,
+    frameKey: configuratorFrameState?.key,
+    review: reviewedSelection,
+  }
+  const resourceSelectionRef = useRef(currentResourceSelection)
+  resourceSelectionRef.current = currentResourceSelection
+  const isResourceSelectionCurrent = (selection: ReviewedResourceSelection) => {
+    const current = resourceSelectionRef.current
+    return current.ready && current.accountId === selection.accountId &&
+      current.connectionId === selection.connection.id && current.frameKey === selection.frameKey
+  }
+  const reviewIsCurrent = reviewedSelection !== null && isResourceSelectionCurrent(reviewedSelection)
 
+  useEffect(() => {
+    if (reviewedSelection && !reviewIsCurrent) invalidateResourceReview()
+  }, [reviewedSelection, reviewIsCurrent])
+
+  const handleReviewResourceConnection = async () => {
+    if (creating || collectingResource || !resourceSelectionReady || !selectedConnection || !configuratorFrameState) return
+    const operation = ++resourceOperationRef.current
+    setCollectingResource(true)
+    try {
+      const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
+      if (operation !== resourceOperationRef.current) return
+      if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
+      const selection: ReviewedResourceSelection = {
+        accountId: configuratorFrameState.accountId,
+        resourceUrl,
+        connection: selectedConnection,
+        frameKey: configuratorFrameState.key,
+      }
+      if (isResourceSelectionCurrent(selection)) setReviewedSelection(selection)
+    } catch (err) {
+      if (operation !== resourceOperationRef.current) return
+      console.error('Failed to review resource connection:', err)
+      toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to review connection', variant: 'error' })
+    } finally {
+      if (operation === resourceOperationRef.current) setCollectingResource(false)
+    }
+  }
+
+  const handleCreateResourceConnection = async () => {
+    if (creating || resourceCreationRef.current !== null || !reviewedSelection || !isResourceSelectionCurrent(reviewedSelection)) return
+    const selection = reviewedSelection
+    const operation = ++resourceOperationRef.current
+    const context = resourceSelectionRef.current
+    const isCurrent = () => {
+      const current = resourceSelectionRef.current
+      return operation === resourceOperationRef.current &&
+        current.requestId === context.requestId && current.authenticatedApi === context.authenticatedApi &&
+        current.workspaceId === context.workspaceId && current.agentId === context.agentId &&
+        current.review === selection && isResourceSelectionCurrent(selection)
+    }
+
+    resourceCreationRef.current = operation
     setCreating(true)
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
     try {
-      if (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern) {
-        throw new Error('Configurator is not ready.')
-      }
-      const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
-      if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
       const overseer = await getOverseer()
-      gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
+      if (!isCurrent()) return
+      gatekeeper = await overseer.newGatekeeper(selection.accountId, selection.resourceUrl)
+      // Creation cannot be canceled on the server. A late capability still belongs to this
+      // operation, never to a newly opened request; leave it to finally to dispose it.
+      if (!isCurrent()) return
       if (gatekeeper) {
         await onCreated(gatekeeper)
         transferred = true
-        onClose()
+        if (isCurrent()) onClose()
       } else {
         toasts.add({ title: 'Failed to create connection', variant: 'error' })
       }
     } catch (err) {
+      if (!isCurrent()) return
       console.error('Failed to create resource gatekeeper:', err)
       toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to create connection', variant: 'error' })
     } finally {
       if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
-      setCreating(false)
+      if (resourceCreationRef.current === operation) {
+        resourceCreationRef.current = null
+        setCreating(false)
+      }
     }
   }
 
@@ -757,16 +867,7 @@ export default function GatekeeperModal({
       return Boolean(spawnerDisplayName.trim()) && !spawnerEnvError
     }
     if (selectedConnection.resourceUrlPattern) {
-      const resourceUrlPattern = selectedConnection.resourceUrlPattern
-      return Boolean(
-        selectedAccountId !== null &&
-        resourceUrlPattern &&
-        configuratorFrameState?.frame &&
-        configuratorFrameState.accountId === selectedAccountId &&
-        configuratorFrameState.resourceUrlPattern === resourceUrlPattern &&
-        configuratorSelectionReady !== false &&
-        !hasMissingResourceGrants,
-      )
+      return reviewedSelection ? reviewIsCurrent : resourceSelectionReady
     }
     return false
   })()
@@ -778,16 +879,20 @@ export default function GatekeeperModal({
     } else if (selectedConnection.id === 'agent-spawner') {
       handleCreateAgentSpawner()
     } else if (selectedConnection.resourceUrlPattern) {
-      handleCreateResourceConnection()
+      if (reviewedSelection) handleCreateResourceConnection()
+      else handleReviewResourceConnection()
     }
   }
 
   const createLabel = selectedConnection?.resourceUrlPattern
-    ? 'Add connection'
+    ? reviewedSelection ? 'Add connection' : 'Review connection'
     : 'Create connection'
 
   return (
-    <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+    <Dialog.Root open={open} disablePointerDismissal={creating} onOpenChange={(o, details) => {
+      if (!o && (creating || resourceCreationRef.current !== null)) details.cancel()
+      else if (!o) handleClose()
+    }}>
       <Dialog
         className="responsive-dialog !z-[1000] !top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
         style={dialogMinHeight > 0 ? { minHeight: `${dialogMinHeight}px` } : undefined}
@@ -796,15 +901,18 @@ export default function GatekeeperModal({
         <div ref={headerRef} className="shrink-0 flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
           <div className="min-w-0">
             <Dialog.Title className="text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
-              {selectedConnection ? selectedConnection.title : 'Create New Connection'}
+              {reviewedSelection ? 'Review connection' : selectedConnection ? selectedConnection.title : 'Add a connection'}
             </Dialog.Title>
             <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-              {selectedConnection
+              {reviewedSelection
+                ? 'Confirm the account and resource to make available here.'
+                : selectedConnection
                 ? selectedConnection.description
-                : 'Choose what this gadget should be able to use.'}
+                : 'Choose a tool or resource to make available here.'}
             </Dialog.Description>
           </div>
           <Dialog.Close
+            disabled={creating}
             render={(props) => (
               <WorkshopIconButton {...props} aria-label="Close">
                 <X size={16} />
@@ -816,16 +924,55 @@ export default function GatekeeperModal({
         {selectedConnection ? (
           <div ref={scrollRef} className="new-gatekeeper-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <div ref={scrollContentRef}>
-              <button
+              {!reviewedSelection && <button
                 type="button"
                 onClick={() => setSelectedConnectionId(null)}
+                disabled={creating || collectingResource}
                 className="mb-4 inline-flex cursor-pointer items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
               >
                 <CaretLeft size={13} />
                 All connection types
-              </button>
+              </button>}
 
-              <div className="space-y-4">
+              {connectionRequest && (
+                <section className="mb-4 rounded-xl border border-kumo-line bg-kumo-elevated p-3 text-[13px] leading-5 [overflow-wrap:anywhere]">
+                  <p className="text-[12px] font-medium text-kumo-subtle">Bot's stated purpose</p>
+                  <p className="mt-1 whitespace-pre-wrap text-kumo-default">{connectionRequest.reason || 'No purpose supplied.'}</p>
+                  <p className="mt-2 text-[12px] text-kumo-subtle">This describes the bot's intent, not an enforced limit on how it can use the connection.</p>
+                  {!reviewedSelection && (
+                    <p className="mt-2 text-[12px] text-kumo-subtle">
+                      Requested service: {connectionRequest.vendorName}
+                      {connectionRequest.resourceTitle && <> · Resource type: {connectionRequest.resourceTitle}</>}
+                      {connectionRequest.resourceUrl && <span className="mt-1 block">Suggested resource URL (not yet selected): {connectionRequest.resourceUrl}</span>}
+                    </p>
+                  )}
+                </section>
+              )}
+
+              {reviewedSelection && (
+                <section className="space-y-3 rounded-xl border border-kumo-line bg-kumo-base p-3 text-[13px] leading-5 [overflow-wrap:anywhere]" aria-label="Connection review">
+                  <dl className="space-y-3">
+                    <div>
+                      <dt className="text-[12px] text-kumo-subtle">Account</dt>
+                      <dd className="font-medium text-kumo-default">{selectedAccount?.description.uniqueName || selectedAccount?.description.displayName || 'Connected account'}</dd>
+                      {selectedAccount?.description.uniqueName && selectedAccount.description.displayName && selectedAccount.description.uniqueName !== selectedAccount.description.displayName && (
+                        <dd className="text-kumo-subtle">{selectedAccount.description.displayName}</dd>
+                      )}
+                    </div>
+                    <div><dt className="text-[12px] text-kumo-subtle">Service</dt><dd className="text-kumo-default">{reviewedSelection.connection.vendor}</dd></div>
+                    <div><dt className="text-[12px] text-kumo-subtle">Resource type</dt><dd className="text-kumo-default">{reviewedSelection.connection.title}</dd></div>
+                    <div><dt className="text-[12px] text-kumo-subtle">Selected resource URL</dt><dd className="whitespace-pre-wrap font-mono text-[12px] text-kumo-default">{reviewedSelection.resourceUrl}</dd></div>
+                  </dl>
+                  <p className="text-[12px] text-kumo-subtle">Add connection creates a Workshop resource binding for this account and URL. It does not approve OAuth scopes. Any provider consent was handled earlier during account setup.</p>
+                  <p className="text-[12px] text-kumo-subtle">Cancel does not add this connection or revoke provider access already granted.</p>
+                </section>
+              )}
+
+              {/* Unmount the portaled iframe during review; confirmation uses only the snapshot. */}
+              {!reviewedSelection && <div className="space-y-4" inert={!!selectedConnection.resourceUrlPattern && (collectingResource || creating)}>
+                {selectedConnection.resourceUrlPattern && (
+                  <p className="text-[12px] leading-5 text-kumo-subtle">Choose an account and resource, then review before adding the Workshop connection. If setup asks for provider consent, that happens before this review.</p>
+                )}
                 {needsAccount && (
                   <AccountChooser
                     accounts={matchingAccounts}
@@ -885,7 +1032,7 @@ export default function GatekeeperModal({
                     selectContainer={selectPortalContainer}
                   />
                 )}
-              </div>
+              </div>}
             </div>
           </div>
         ) : (
@@ -942,18 +1089,23 @@ export default function GatekeeperModal({
         )}
 
         {selectedConnection && (
-          <div ref={footerRef} className="shrink-0 flex items-center justify-between gap-3 border-t border-kumo-line px-5 py-3">
-            <div />
-            <div className="flex shrink-0 items-center gap-2">
-              <WorkshopButton onClick={() => setSelectedConnectionId(null)} disabled={creating} className="!h-9">
-                Back
+          <div ref={footerRef} className="shrink-0 flex flex-wrap items-center justify-end gap-3 border-t border-kumo-line px-5 py-3">
+            {selectedConnection.resourceUrlPattern && <WorkshopButton onClick={handleClose} disabled={creating} className="!h-9">Cancel</WorkshopButton>}
+            <div className="flex flex-wrap items-center gap-2">
+              <WorkshopButton onClick={() => {
+                if (reviewedSelection) {
+                  setResourceEditSeed(reviewedSelection)
+                  invalidateResourceReview()
+                } else setSelectedConnectionId(null)
+              }} disabled={creating || collectingResource} className="!h-9">
+                {reviewedSelection ? 'Edit selection' : 'Back'}
               </WorkshopButton>
               <WorkshopButton
                 tone="primary"
                 onClick={handleCreate}
-                disabled={!canCreate || creating}
+                disabled={!canCreate || creating || collectingResource}
               >
-                {creating ? 'Creating...' : createLabel}
+                {creating ? 'Creating...' : collectingResource ? 'Preparing review...' : createLabel}
               </WorkshopButton>
             </div>
           </div>

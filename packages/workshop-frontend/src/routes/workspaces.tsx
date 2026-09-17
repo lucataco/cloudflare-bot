@@ -21,11 +21,12 @@ function WorkspacesPage() {
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Workspaces</h1>
           <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-            Each workspace is an isolated environment with its own conversations, gatekeepers, and outputs.
+            Each workspace is an isolated environment with its own conversations, connections, and outputs.
           </p>
         </div>
         <Link
           to={agentShell ? '/agents' : '/'}
+          search={agentShell ? { create: 'bot' } : {}}
           className="press inline-flex h-11 shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[14px] font-medium text-white transition-colors hover:bg-kumo-brand-hover sm:h-9 sm:text-[13px]"
         >
           <Plus size={14} weight="bold" />

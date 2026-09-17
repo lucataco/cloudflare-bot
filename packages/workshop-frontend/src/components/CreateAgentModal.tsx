@@ -1,3 +1,5 @@
+import ImportGrokBot from './ImportGrokBot'
+import ImportAgentSeeds from './ImportAgentSeeds'
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Textarea, Select, useKumoToastManager, Checkbox } from '@cloudflare/kumo'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
@@ -6,6 +8,7 @@ import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { AccountsSubscriberAdapter, AccountEvent } from '../accountsSubscriber'
 import { logRpcFailure } from '../rpcErrors'
 import { openOAuthPopup } from '../openOAuthPopup'
+import { FIRST_BOT_SUGGESTIONS } from './botRolePresets'
 
 interface CreateAgentModalProps {
   visible: boolean
@@ -87,11 +90,11 @@ export default function CreateAgentModal({
     const newErrors: Record<string, string> = {}
 
     if (!name.trim()) {
-      newErrors.name = 'Agent name is required'
+      newErrors.name = 'Bot name is required'
     }
 
     if (!title.trim()) {
-      newErrors.title = 'Agent title is required'
+      newErrors.title = 'Bot job is required'
     }
 
     setErrors(newErrors)
@@ -114,7 +117,7 @@ export default function CreateAgentModal({
       )
 
       toasts.add({
-        title: 'Agent created',
+        title: 'Bot created',
         description: `${agent.name} is ready to chat`,
         variant: 'success',
       })
@@ -123,7 +126,7 @@ export default function CreateAgentModal({
     } catch (err) {
       console.error('Failed to create agent:', err)
       toasts.add({
-        title: 'Failed to create agent',
+        title: 'Failed to create bot',
         description: err instanceof Error ? err.message : 'An error occurred',
         variant: 'error',
       })
@@ -132,9 +135,9 @@ export default function CreateAgentModal({
     }
   }
 
-  // Build model options: include "Human only" and all configured models
+  // An unset profile default allows the chat composer to choose an available model.
   const modelOptions = [
-    { value: '', label: 'Human only (no AI)' },
+    { value: '', label: 'Automatic: use an available model' },
     ...models.map((model) => ({
       value: model.id,
       label: model.name,
@@ -143,17 +146,45 @@ export default function CreateAgentModal({
 
   return (
     <Dialog.Root open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
-      <Dialog className="responsive-dialog !w-[min(520px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="sm">
-        <div className="flex flex-col border-b border-kumo-line px-5 py-4">
+      <Dialog className="responsive-dialog !top-[clamp(28px,10vh,96px)] !flex !max-h-[min(80vh,calc(var(--app-height)-32px))] !w-[min(520px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0" size="sm">
+        <div className="flex shrink-0 flex-col border-b border-kumo-line px-5 py-4">
           <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
-            Create Agent
+            Create bot
           </Dialog.Title>
           <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-            Create a new AI teammate with its own personality and chat history
+            Give your bot a job, with its own instructions and chat history.
           </Dialog.Description>
         </div>
-        <div className="px-5 py-4">
+        <div className="min-h-0 overflow-y-auto px-5 py-4">
       <div className="flex flex-col gap-4">
+        <div>
+          <p className="mb-1.5 text-sm font-medium text-kumo-default">Start with a job</p>
+          <div className="flex flex-wrap gap-2">
+            {FIRST_BOT_SUGGESTIONS.map((suggestion) => (
+              <Button
+                key={suggestion.title}
+                type="button"
+                variant="secondary"
+                size="sm"
+                title={suggestion.description}
+                disabled={loading}
+                onClick={() => {
+                  setName(suggestion.name)
+                  setTitle(suggestion.title)
+                  setDescription(suggestion.description)
+                  setErrors({})
+                }}
+              >
+                {suggestion.title}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <ImportGrokBot api={authenticatedApi} disabled={loading || !visible} onPreview={bot => {
+          setName(bot.name); setTitle(bot.title); setDescription(bot.description)
+        }} />
+        <ImportAgentSeeds api={authenticatedApi} disabled={loading || !visible} onSuccess={onSuccess} onBusyChange={setLoading} />
         {/* Name */}
         <div>
           <label htmlFor="agent-name" className="block text-sm font-medium text-kumo-default mb-1.5">
@@ -161,12 +192,13 @@ export default function CreateAgentModal({
           </label>
           <Input
             id="agent-name"
+            className="w-full"
             value={name}
             onChange={(e) => {
               setName(e.target.value)
               setErrors((prev) => ({ ...prev, name: '' }))
             }}
-            placeholder="e.g., Research Assistant"
+            placeholder="e.g., Riley"
             disabled={loading}
             error={errors.name}
           />
@@ -175,21 +207,22 @@ export default function CreateAgentModal({
         {/* Title */}
         <div>
           <label htmlFor="agent-title" className="block text-sm font-medium text-kumo-default mb-1.5">
-            Title *
+            Job *
           </label>
           <Input
             id="agent-title"
+            className="w-full"
             value={title}
             onChange={(e) => {
               setTitle(e.target.value)
               setErrors((prev) => ({ ...prev, title: '' }))
             }}
-            placeholder="e.g., Code & Documentation Expert"
+            placeholder="e.g., Research assistant"
             disabled={loading}
             error={errors.title}
           />
           <p className="mt-1 text-xs text-kumo-subtle">
-            A short subtitle shown beneath the name
+            What this bot helps you do, shown beneath its name
           </p>
         </div>
 
@@ -200,9 +233,10 @@ export default function CreateAgentModal({
           </label>
           <Textarea
             id="agent-description"
+            className="w-full"
             value={description}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)}
-            placeholder="What does this agent do? What's its personality?"
+            placeholder="What should this bot help you get done?"
             disabled={loading}
             rows={3}
           />
@@ -237,7 +271,7 @@ export default function CreateAgentModal({
               </label>
               <Select
                 className="w-full text-sm"
-                placeholder="Select a model"
+                placeholder="Automatic: use an available model"
                 value={defaultModelId ?? ''}
                 onValueChange={(value) => setDefaultModelId(value || null)}
                 disabled={loading}
@@ -250,7 +284,7 @@ export default function CreateAgentModal({
                 ))}
               </Select>
               <p className="mt-1 text-xs text-kumo-subtle">
-                The AI model this agent uses by default. You can override it per message.
+                Automatic lets chat choose a recent or available model. To send without AI, choose No AI responses in Chat settings. Routines need a specific default model.
               </p>
             </div>
 
@@ -258,10 +292,10 @@ export default function CreateAgentModal({
             {connectedAccounts.length > 0 && (
               <div>
                 <label className="block text-sm font-medium text-kumo-default mb-1.5">
-                  Connected Accounts
+                  Connected accounts
                 </label>
                 <p className="text-xs text-kumo-subtle mb-2">
-                  Select which connected accounts this agent can access. Empty means no accounts.
+                  Select which connected accounts this bot can access. Empty means no accounts.
                 </p>
                 <div className="flex flex-col gap-2 max-h-48 overflow-y-auto mb-2">
                   {connectedAccounts.map((account) => {
@@ -332,12 +366,12 @@ export default function CreateAgentModal({
       </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-kumo-line bg-kumo-base px-5 py-3">
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-kumo-line bg-kumo-base px-5 py-3">
           <Button variant="secondary" onClick={onCancel} disabled={loading}>
             Cancel
           </Button>
           <Button type="submit" loading={loading} onClick={handleCreate}>
-            Create Agent
+            Create bot
           </Button>
         </div>
       </Dialog>

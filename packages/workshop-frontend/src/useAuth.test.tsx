@@ -8,6 +8,14 @@ import type { RpcStub } from 'capnweb'
 import type { PublicApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
 import { useAuth } from './useAuth'
+import { disableBrowserPush, invalidatePushEnrollment, PUSH_DISABLED_MESSAGE, reconcilePushOwner } from './browserPush'
+
+vi.mock('./browserPush', () => ({
+  disableBrowserPush: vi.fn<typeof disableBrowserPush>(async () => 'Notifications are off in this browser.'),
+  invalidatePushEnrollment: vi.fn<typeof invalidatePushEnrollment>(),
+  PUSH_DISABLED_MESSAGE: 'Notifications are off in this browser.',
+  reconcilePushOwner: vi.fn<typeof reconcilePushOwner>(async () => {}),
+}))
 
 vi.mock('./errorReporting', () => ({
   setReportedUserId: vi.fn<(reportedUserId: string | undefined) => void>(),
@@ -65,7 +73,7 @@ function deferredPublicApi(): {
   }
 }
 
-type Controls = { login: (token: string) => void; logout: () => void }
+type Controls = Pick<ReturnType<typeof useAuth>, 'login' | 'logout' | 'isAuthenticated' | 'pushCleanupNotice'>
 
 describe('useAuth error reporting identity', () => {
   const roots: Root[] = []
@@ -85,11 +93,11 @@ describe('useAuth error reporting identity', () => {
   async function mount(
     publicApi: RpcStub<PublicApi>,
     hook: typeof useAuth = useAuth,
-  ): Promise<{ controls: Controls; root: Root }> {
+  ): Promise<{ controls: Controls; getControls: () => Controls; root: Root }> {
     const captured: { controls?: Controls } = {}
     function Consumer() {
-      const { login, logout } = hook(publicApi)
-      captured.controls = { login, logout }
+      const { login, logout, isAuthenticated, pushCleanupNotice } = hook(publicApi)
+      captured.controls = { login, logout, isAuthenticated, pushCleanupNotice }
       return null
     }
 
@@ -99,7 +107,7 @@ describe('useAuth error reporting identity', () => {
     const root = createRoot(container)
     roots.push(root)
     await act(async () => root.render(<Consumer />))
-    return { controls: captured.controls!, root }
+    return { controls: captured.controls!, getControls: () => captured.controls!, root }
   }
 
   it('names the user when a stored token authenticates on mount', async () => {
@@ -151,9 +159,17 @@ describe('useAuth error reporting identity', () => {
     localStorage.setItem('authToken', 'stored-token')
     const { controls } = await mount(stubPublicApi(person))
 
-    act(() => controls.logout())
+    await act(async () => { await controls.logout() })
 
     expect(setReportedUserId).toHaveBeenLastCalledWith(undefined)
+    expect(disableBrowserPush).toHaveBeenCalledWith(expect.objectContaining({ whoami: expect.any(Function) }))
+  })
+
+  it('reconciles push ownership without disabling the same owner on a reconnect or unmount', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    await mount(stubPublicApi(person))
+    expect(reconcilePushOwner).toHaveBeenCalledWith(person.id, expect.anything(), expect.any(Function))
+    expect(disableBrowserPush).not.toHaveBeenCalled()
   })
 
   it('ignores a lookup that resolves after logout', async () => {
@@ -161,7 +177,7 @@ describe('useAuth error reporting identity', () => {
     const { api, release } = deferredPublicApi()
     const { controls } = await mount(api)
 
-    act(() => controls.logout())
+    await act(async () => { await controls.logout() })
     expect(setReportedUserId).toHaveBeenLastCalledWith(undefined)
 
     // Disposing the stub is not a defence: capnweb does not guarantee that disposal rejects a call
@@ -192,6 +208,70 @@ describe('useAuth error reporting identity', () => {
     await mount(stubPublicApi({ type: 'agent', id: 'gpt-5.1-pro', name: 'GPT' }))
 
     expect(setReportedUserId).not.toHaveBeenCalled()
+  })
+
+  it('immediately clears auth/enrollment authority, ignores identity during cleanup, and preserves a newer login', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    const { api, release } = deferredPublicApi()
+    const { controls, getControls } = await mount(api)
+    let finish!: (message: string) => void
+    vi.mocked(disableBrowserPush).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    let pending: unknown
+    await act(async () => { pending = controls.logout() })
+    expect(getControls().isAuthenticated).toBe(false)
+    expect(invalidatePushEnrollment).toHaveBeenCalledWith(expect.objectContaining({ whoami: expect.any(Function) }))
+    await act(async () => { release(0, { ...person, id: 'old-person' }) })
+    expect(setReportedUserId).not.toHaveBeenCalledWith('old-person')
+    await act(async () => controls.login('new-token'))
+    localStorage.setItem('authToken', 'new-token')
+    await act(async () => { release(1, person) })
+    await act(async () => { finish('Notifications are off.'); await pending })
+    expect(localStorage.getItem('authToken')).toBe('new-token')
+    expect(getControls().isAuthenticated).toBe(true)
+    expect(setReportedUserId).toHaveBeenLastCalledWith(person.id)
+    expect(getControls().pushCleanupNotice).toBeNull()
+  })
+
+  it('preserves an asynchronous cleanup warning after auth has been cleared', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    const { controls, getControls } = await mount(stubPublicApi(person))
+    let finish!: (message: string) => void
+    vi.mocked(disableBrowserPush).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    let pending: Promise<void> | undefined
+    await act(async () => { pending = controls.logout() })
+    expect(getControls().isAuthenticated).toBe(false)
+    const warning = 'Notifications are off locally. Browser unsubscribe could not be confirmed; block notifications in browser settings.'
+    await act(async () => { finish(warning); await pending })
+    expect(getControls().pushCleanupNotice).toBe(warning)
+  })
+
+  it('does not discard cleanup failures on account change or let an older warning overwrite newer cleanup', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    const { controls, getControls } = await mount(stubPublicApi(person))
+    let finish!: (message: string) => void
+    vi.mocked(disableBrowserPush).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    await act(async () => controls.login('second-token'))
+    expect(invalidatePushEnrollment).toHaveBeenCalled()
+    await act(async () => { finish('Browser unsubscribe could not be confirmed.') })
+    expect(getControls().pushCleanupNotice).toContain('unsubscribe')
+    await act(async () => controls.login('third-token'))
+    expect(getControls().pushCleanupNotice).toBeNull()
+    vi.mocked(disableBrowserPush).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    await act(async () => controls.login('fourth-token'))
+    vi.mocked(disableBrowserPush).mockResolvedValueOnce(PUSH_DISABLED_MESSAGE)
+    await act(async () => controls.login('fifth-token'))
+    await act(async () => { finish('Old cleanup warning') })
+    expect(getControls().pushCleanupNotice).toBeNull()
+  })
+
+  it('warns without retaining authentication if cleanup unexpectedly rejects', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    const { controls, getControls } = await mount(stubPublicApi(person))
+    vi.mocked(disableBrowserPush).mockRejectedValueOnce(new Error('secret endpoint'))
+    await act(async () => { await controls.logout() })
+    expect(getControls().isAuthenticated).toBe(false)
+    expect(getControls().pushCleanupNotice).toContain('Block notifications in browser settings')
+    expect(getControls().pushCleanupNotice).not.toContain('secret endpoint')
   })
 
   it('names nobody when the identity lookup fails', async () => {

@@ -15,6 +15,7 @@ import { useUiFeatureFlag } from '../FeatureFlagsContext'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { AttentionProvider } from '../AttentionContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -22,8 +23,17 @@ export const Route = createRootRoute({
 
 function RootComponent() {
   const rpcStub = useRpcStub()
+  const auth = useAuth(rpcStub)
+  return <div className="flex h-full min-h-0 flex-col">
+    {auth.pushCleanupNotice && <p role="alert" className="shrink-0 border-b border-kumo-line bg-kumo-elevated px-4 py-3 text-sm text-kumo-danger">{auth.pushCleanupNotice}</p>}
+    <div className="min-h-0 flex-1"><RootContent auth={auth} /></div>
+  </div>
+}
+
+function RootContent({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const rpcStub = useRpcStub()
   const connectionLost = useConnectionLost()
-  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
+  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login, isSigningOut } = auth
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
   // Routes that don't require auth (public routes)
@@ -76,7 +86,7 @@ function RootComponent() {
     return (
       <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">Authenticating...</p>
+        <p className="text-sm text-kumo-subtle">{isSigningOut ? 'Signing out...' : 'Authenticating...'}</p>
       </div>
     )
   }
@@ -112,17 +122,19 @@ function RootComponent() {
   if (!authenticatedApi) return null
   return (
     <AuthProvider authenticatedApi={authenticatedApi} onLogout={logout}>
-      <FeatureFlagsProvider>
-        <TooltipProvider>
-          <Toasty>
-            <AuthenticatedShell
-              authenticatedApi={authenticatedApi}
-              isWorkspaceEditor={isWorkspaceEditor}
-              onAuthInvalid={logout}
-            />
-          </Toasty>
-        </TooltipProvider>
-      </FeatureFlagsProvider>
+      <AttentionProvider api={authenticatedApi}>
+        <FeatureFlagsProvider>
+          <TooltipProvider>
+            <Toasty>
+              <AuthenticatedShell
+                authenticatedApi={authenticatedApi}
+                isWorkspaceEditor={isWorkspaceEditor}
+                onAuthInvalid={logout}
+              />
+            </Toasty>
+          </TooltipProvider>
+        </FeatureFlagsProvider>
+      </AttentionProvider>
     </AuthProvider>
   )
 }

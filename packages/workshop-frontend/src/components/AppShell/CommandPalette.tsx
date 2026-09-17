@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useNavigate } from '@tanstack/react-router'
 import {
   Blueprint,
+  Compass,
   MagnifyingGlass,
   Plus,
   SquaresFour,
+  Stack,
 } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../../AuthContext'
+import { useUiFeatureFlag } from '../../FeatureFlagsContext'
 import type { GadgetMetadataWithTimestamps, OutputFormatOffer } from '@gadgets/workshop-shared/api'
 import { FormatGlyph } from '../format/FormatVisuals'
 import { createFromFormat } from '../format/useOutputFormats'
@@ -49,7 +52,7 @@ function mergeBlueprints(
   for (const b of library) {
     map.set(b.id, {
       id: b.id,
-      title: b.metadata.title || 'Untitled blueprint',
+      title: b.metadata.title || 'Untitled template',
       recency: b.addedAt.getTime(),
     })
   }
@@ -57,7 +60,7 @@ function mergeBlueprints(
     const prev = map.get(b.id)
     map.set(b.id, {
       id: b.id,
-      title: b.title || prev?.title || 'Untitled blueprint',
+      title: b.title || prev?.title || 'Untitled template',
       recency: Math.max(prev?.recency ?? 0, b.lastUpdated.getTime()),
     })
   }
@@ -142,6 +145,7 @@ export default function CommandPalette({
   onClose: () => void
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { enabled: agentShell } = useUiFeatureFlag('agentShell')
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
 
@@ -224,7 +228,7 @@ export default function CommandPalette({
     const needle = query.trim()
     const searching = needle.length > 0
 
-    // One entry per standard format. "New workspace" remains the first action because it is the
+    // One entry per standard format. Bot/workspace creation stays first because it is the
     // general starting point; the format shortcuts follow it in the admin's configured order.
     const formatCommands: Command[] = formats.map((format) => ({
       id: `format-${format.blueprintId}`,
@@ -237,9 +241,11 @@ export default function CommandPalette({
     const nav: Command[] = [
       {
         id: 'nav-new',
-        label: 'New workspace',
+        label: agentShell ? 'Create bot' : 'New workspace',
         icon: <Plus size={15} weight="bold" />,
-        run: () => navigate({ to: '/' }),
+        run: () => agentShell
+          ? navigate({ to: '/agents', search: { create: 'bot' } })
+          : navigate({ to: '/' }),
       },
       ...formatCommands,
       {
@@ -250,9 +256,21 @@ export default function CommandPalette({
       },
       {
         id: 'nav-blueprints',
-        label: 'Blueprints',
+        label: 'Templates',
         icon: <Blueprint size={15} />,
+        run: () => navigate({ to: '/blueprints' }),
+      },
+      {
+        id: 'nav-explore',
+        label: 'Explore templates',
+        icon: <Compass size={15} />,
         run: () => navigate({ to: '/explore' }),
+      },
+      {
+        id: 'nav-outputs',
+        label: 'Apps & documents',
+        icon: <Stack size={15} />,
+        run: () => navigate({ to: '/outputs' }),
       },
     ]
 
@@ -271,7 +289,7 @@ export default function CommandPalette({
       .map((b) => ({
         id: `bp-${b.id}`,
         label: b.title,
-        hint: 'Blueprint',
+        hint: 'Template',
         icon: <Blueprint size={15} className="text-kumo-inactive" />,
         run: () => navigate({ to: '/blueprint/$id', params: { id: b.id } }),
       }))
@@ -293,7 +311,7 @@ export default function CommandPalette({
       ? [
           { heading: 'Actions', items: refine(nav, nav.length) },
           { heading: 'Workspaces', items: refine(wsBase, 8) },
-          { heading: 'Blueprints', items: refine(bpBase, 8) },
+          { heading: 'Templates', items: refine(bpBase, 8) },
         ]
       : [
           { heading: 'Actions', items: refine(nav, nav.length) },
@@ -303,7 +321,7 @@ export default function CommandPalette({
     const groups = built.filter((g) => g.items.length > 0)
     const flat = groups.flatMap((g) => g.items)
     return { groups, flat }
-  }, [query, gadgets, blueprints, formats, navigate, createFormat])
+  }, [query, gadgets, blueprints, formats, navigate, createFormat, agentShell])
 
   // Keep the active index in range as the result set changes.
   useEffect(() => {

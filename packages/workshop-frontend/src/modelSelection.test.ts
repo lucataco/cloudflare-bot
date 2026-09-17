@@ -65,6 +65,22 @@ describe("resolveComposerModel", () => {
     })).toBe("model-a");
   });
 
+  it("automatically chooses a recent or available model for an unset bot default", () => {
+    const agentProfile = agent({ defaultModelId: null });
+    expect(resolveComposerModel({ models, agentProfile, inferredFromMessages: "model-b" })).toBe("model-b");
+    expect(resolveComposerModel({ models, agentProfile })).toBe("model-a");
+    expect(resolveComposerModel({ models: [], agentProfile })).toBeNull();
+  });
+
+  it("keeps explicit No AI responses distinct from an automatic bot default", () => {
+    persistBotComposerModel("bot-1", null);
+    expect(resolveComposerModel({
+      models,
+      agentProfile: agent({ defaultModelId: null }),
+      inferredFromMessages: "model-b",
+    })).toBeNull();
+  });
+
   it("honors an explicit per-bot No agent override", () => {
     persistBotComposerModel("bot-1", null);
     expect(resolveComposerModel({

@@ -3,6 +3,7 @@ import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
 import { classifyRpcError } from './rpcErrors'
+import { disableBrowserPush, invalidatePushEnrollment, PUSH_DISABLED_MESSAGE, reconcilePushOwner } from './browserPush'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
@@ -27,6 +28,21 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   // State closures go stale in cleanup functions, so we use a ref.
   const authenticatedApiRef = useRef<RpcStub<AuthenticatedApi> | null>(null)
   authenticatedApiRef.current = authState.authenticatedApi
+  const signingOutRef = useRef<object | null>(null)
+  const pushCleanupRef = useRef<object | null>(null)
+  const [pushCleanupNotice, setPushCleanupNotice] = useState<string | null>(null)
+
+  function cleanupPush(api?: RpcStub<AuthenticatedApi>) {
+    const request = {}
+    pushCleanupRef.current = request
+    setPushCleanupNotice(null)
+    // disableBrowserPush duplicates the API before its first await; the auth reference can go now.
+    return disableBrowserPush(api).then(message => {
+      if (pushCleanupRef.current === request && message !== PUSH_DISABLED_MESSAGE) setPushCleanupNotice(message)
+    }, () => {
+      if (pushCleanupRef.current === request) setPushCleanupNotice('Notification cleanup could not be completed. Block notifications in browser settings on this shared device.')
+    })
+  }
 
   /**
    * Names the signed-in user on error reports, for as long as this stub is the current one.
@@ -51,7 +67,14 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     let cancelled = false
     authenticatedApi.whoami().then((info) => {
       // Only a real user account names a person: for a gadget author `id` is its owner's id.
-      if (!cancelled && info.type === 'user') setReportedUserId(info.id)
+      if (!cancelled && !signingOutRef.current && info.type === 'user') {
+        setReportedUserId(info.id)
+        void reconcilePushOwner(info.id, authenticatedApi, () => !cancelled && !signingOutRef.current).then(message => {
+          if (!cancelled && !signingOutRef.current && message && message !== PUSH_DISABLED_MESSAGE) setPushCleanupNotice(message)
+        }).catch(() => {
+          if (!cancelled && !signingOutRef.current) setPushCleanupNotice('Could not confirm notification cleanup for the previous account. Block notifications in browser settings on this shared device.')
+        })
+      }
     }).catch((err: unknown) => {
       if (cancelled) return
       if (classifyRpcError(err) === 'auth') logout()
@@ -60,6 +83,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }, [authState.authenticatedApi])
 
   useEffect(() => {
+    if (signingOutRef.current) return
     if (CF_ACCESS_MODE) {
       authenticateWithCfAccess()
     } else {
@@ -67,13 +91,17 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       if (storedToken) {
         authenticateWithToken(storedToken)
       } else {
+        void cleanupPush()
         setAuthState(prev => ({ ...prev, isLoading: false }))
       }
     }
     return () => {
       // The authenticateWithXxx functions also dispose the old stub via their setAuthState
       // updater, so this may double-dispose on reconnect. That's fine — dispose is idempotent.
-      authenticatedApiRef.current?.[Symbol.dispose]()
+      if (authenticatedApiRef.current) {
+        invalidatePushEnrollment(authenticatedApiRef.current)
+        authenticatedApiRef.current[Symbol.dispose]()
+      }
     }
   }, [publicApi])
 
@@ -123,37 +151,37 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const login = (token: string) => {
+    signingOutRef.current = null
+    if (authenticatedApiRef.current) invalidatePushEnrollment(authenticatedApiRef.current)
+    void cleanupPush(authenticatedApiRef.current ?? undefined)
     authenticateWithToken(token)
   }
 
-  const logout = () => {
+  const logout = async () => {
+    if (signingOutRef.current) return
+    const request = {}
+    signingOutRef.current = request
     setReportedUserId(undefined)
+    if (!CF_ACCESS_MODE) localStorage.removeItem('authToken')
+    const api = authenticatedApiRef.current
+    if (api) invalidatePushEnrollment(api)
+    const cleanup = cleanupPush(api ?? undefined)
+    authenticatedApiRef.current = null
+    setAuthState({ token: null, authenticatedApi: null, isLoading: false, error: null })
+    api?.[Symbol.dispose]()
 
-    if (CF_ACCESS_MODE) {
-      window.location.assign('/cdn-cgi/access/logout')
-      return
-    }
-
-    // Use functional updater to read current state (avoids stale closure).
-    setAuthState(prev => {
-      if (prev.authenticatedApi) {
-        prev.authenticatedApi[Symbol.dispose]()
-      }
-      return {
-        token: null,
-        authenticatedApi: null,
-        isLoading: false,
-        error: null
-      }
-    })
-
-    localStorage.removeItem('authToken')
+    // Only the Access navigation waits. The authenticated UI and enrollment authority are gone.
+    await cleanup
+    if (signingOutRef.current !== request) return // A newer explicit login superseded this logout.
+    if (CF_ACCESS_MODE) window.location.assign('/cdn-cgi/access/logout')
   }
 
   return {
     ...authState,
     login,
     logout,
+    pushCleanupNotice,
+    isSigningOut: !!signingOutRef.current,
     isAuthenticated: !!authState.authenticatedApi
   }
 }

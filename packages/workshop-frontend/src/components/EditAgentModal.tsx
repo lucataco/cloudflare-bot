@@ -1,3 +1,4 @@
+import { notifyAgentsChanged } from '../agentsChanged'
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Textarea, Select, useKumoToastManager, Checkbox } from '@cloudflare/kumo'
 import { AgentProfile, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
@@ -6,6 +7,7 @@ import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { AccountsSubscriberAdapter, AccountEvent } from '../accountsSubscriber'
 import { logRpcFailure } from '../rpcErrors'
 import { openOAuthPopup } from '../openOAuthPopup'
+import BotProfileActions from './BotProfileActions'
 
 interface EditAgentModalProps {
   visible: boolean
@@ -91,11 +93,11 @@ export default function EditAgentModal({
     const newErrors: Record<string, string> = {}
 
     if (!name.trim()) {
-      newErrors.name = 'Agent name is required'
+      newErrors.name = 'Bot name is required'
     }
 
     if (!title.trim()) {
-      newErrors.title = 'Agent title is required'
+      newErrors.title = 'Bot job is required'
     }
 
     setErrors(newErrors)
@@ -117,16 +119,17 @@ export default function EditAgentModal({
       })
 
       toasts.add({
-        title: 'Agent updated',
+        title: 'Bot updated',
         description: `${name} has been updated`,
         variant: 'success',
       })
 
+      notifyAgentsChanged()
       onSuccess(updatedAgent)
     } catch (err) {
       console.error('Failed to update agent:', err)
       toasts.add({
-        title: 'Failed to update agent',
+        title: 'Failed to update bot',
         description: err instanceof Error ? err.message : 'An error occurred',
         variant: 'error',
       })
@@ -136,7 +139,7 @@ export default function EditAgentModal({
   }
 
   const handleDelete = async () => {
-    if (!confirm(`Delete ${agent.name}? This will permanently delete the agent and all its chat history.`)) {
+    if (!confirm(`Delete ${agent.name}? This will permanently delete the bot and all its chat history.`)) {
       return
     }
 
@@ -145,7 +148,7 @@ export default function EditAgentModal({
       await authenticatedApi.deleteAgent(agent.id)
 
       toasts.add({
-        title: 'Agent deleted',
+        title: 'Bot deleted',
         description: `${agent.name} has been deleted`,
         variant: 'success',
       })
@@ -154,7 +157,7 @@ export default function EditAgentModal({
     } catch (err) {
       console.error('Failed to delete agent:', err)
       toasts.add({
-        title: 'Failed to delete agent',
+        title: 'Failed to delete bot',
         description: err instanceof Error ? err.message : 'An error occurred',
         variant: 'error',
       })
@@ -163,9 +166,9 @@ export default function EditAgentModal({
     }
   }
 
-  // Build model options: include "Human only" and all configured models
+  // An unset profile default allows the chat composer to choose an available model.
   const modelOptions = [
-    { value: '', label: 'Human only (no AI)' },
+    { value: '', label: 'Automatic: use an available model' },
     ...models.map((model) => ({
       value: model.id,
       label: model.name,
@@ -174,24 +177,28 @@ export default function EditAgentModal({
 
   return (
     <Dialog.Root open={visible} onOpenChange={(open: boolean) => { if (!open && !loading) onCancel() }}>
-      <Dialog className="responsive-dialog !w-[min(520px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="sm">
-        <div className="flex flex-col border-b border-kumo-line px-5 py-4">
+      <Dialog className="responsive-dialog !top-[clamp(28px,10vh,96px)] !flex !max-h-[min(80vh,calc(var(--app-height)-32px))] !w-[min(520px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0" size="sm">
+        <div className="flex shrink-0 flex-col border-b border-kumo-line px-5 py-4">
           <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
-            Edit Agent
+            Edit bot
           </Dialog.Title>
           <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
             Update {agent.name}'s settings
           </Dialog.Description>
         </div>
-        <div className="px-5 py-4">
+        <div className="min-h-0 overflow-y-auto px-5 py-4">
       <div className="flex flex-col gap-4">
+        {visible && <BotProfileActions agent={agent} api={authenticatedApi} disabled={loading}
+          onBusyChange={setLoading} onUpdated={onSuccess} onDuplicated={onCancel} />}
         {/* Name */}
         <div>
-          <label htmlFor="edit-agent-name" className="block text-sm font-medium text-kumo-default mb-1.5">
+          <label id="edit-agent-name-label" htmlFor="edit-agent-name" className="block text-sm font-medium text-kumo-default mb-1.5">
             Name *
           </label>
           <Input
             id="edit-agent-name"
+            aria-labelledby="edit-agent-name-label"
+            className="w-full"
             value={name}
             onChange={(e) => {
               setName(e.target.value)
@@ -204,11 +211,13 @@ export default function EditAgentModal({
 
         {/* Title */}
         <div>
-          <label htmlFor="edit-agent-title" className="block text-sm font-medium text-kumo-default mb-1.5">
-            Title *
+          <label id="edit-agent-title-label" htmlFor="edit-agent-title" className="block text-sm font-medium text-kumo-default mb-1.5">
+            Job *
           </label>
           <Input
             id="edit-agent-title"
+            aria-labelledby="edit-agent-title-label"
+            className="w-full"
             value={title}
             onChange={(e) => {
               setTitle(e.target.value)
@@ -218,7 +227,7 @@ export default function EditAgentModal({
             error={errors.title}
           />
           <p className="mt-1 text-xs text-kumo-subtle">
-            A short subtitle shown beneath the name
+            What this bot helps you do, shown beneath its name
           </p>
         </div>
 
@@ -228,6 +237,7 @@ export default function EditAgentModal({
           </label>
           <Textarea
             id="edit-agent-description"
+            className="w-full"
             value={description}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)}
             disabled={loading}
@@ -236,19 +246,20 @@ export default function EditAgentModal({
         </div>
 
         <div>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <Checkbox
-              checked={notifyOnUpdates}
-              onCheckedChange={(checked) => setNotifyOnUpdates(checked === true)}
-              disabled={loading}
-            />
-            <span className="text-sm text-kumo-default">Notify me about this bot</span>
-          </label>
+          <Checkbox
+            label="Notify me about this bot"
+            checked={notifyOnUpdates}
+            onCheckedChange={(checked) => setNotifyOnUpdates(checked === true)}
+            disabled={loading}
+          />
         </div>
 
         <div>
           <button
             type="button"
+            aria-expanded={advancedOpen}
+            aria-controls="edit-agent-advanced"
+            disabled={loading}
             onClick={() => setAdvancedOpen(!advancedOpen)}
             className="text-sm font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
           >
@@ -256,15 +267,17 @@ export default function EditAgentModal({
           </button>
         </div>
         {advancedOpen && (
-          <div className="mt-4 flex flex-col gap-4 rounded-lg border border-kumo-border bg-kumo-well p-4">
+          <div id="edit-agent-advanced" className="flex flex-col gap-4 rounded-lg border border-kumo-line bg-kumo-elevated p-4">
             {/* Default Model */}
             <div>
-              <label htmlFor="edit-agent-model" className="block text-sm font-medium text-kumo-default mb-1.5">
+              <label id="edit-agent-model-label" htmlFor="edit-agent-model" className="block text-sm font-medium text-kumo-default mb-1.5">
                 Default Model
               </label>
               <Select
+                id="edit-agent-model"
+                aria-labelledby="edit-agent-model-label"
                 className="w-full text-sm"
-                placeholder="Select a model"
+                placeholder="Automatic: use an available model"
                 value={defaultModelId ?? ''}
                 onValueChange={(value) => setDefaultModelId(value || null)}
                 disabled={loading}
@@ -277,7 +290,7 @@ export default function EditAgentModal({
                 ))}
               </Select>
               <p className="mt-1 text-xs text-kumo-subtle">
-                The AI model this agent uses by default. You can override it per message.
+                Automatic lets chat choose a recent or available model. To send without AI, choose No AI responses in Chat settings. Routines need a specific default model.
               </p>
             </div>
 
@@ -285,10 +298,10 @@ export default function EditAgentModal({
             {connectedAccounts.length > 0 && (
               <div>
                 <label className="block text-sm font-medium text-kumo-default mb-1.5">
-                  Connected Accounts
+                  Connected accounts
                 </label>
                 <p className="text-xs text-kumo-subtle mb-2">
-                  Select which connected accounts this agent can access. Empty means no accounts.
+                  Select which connected accounts this bot can access. Empty means no accounts.
                 </p>
                 <div className="flex flex-col gap-2 max-h-48 overflow-y-auto mb-2">
                   {connectedAccounts.map((account) => {
@@ -303,6 +316,7 @@ export default function EditAgentModal({
                     return (
                       <label key={account.id} className="flex items-center gap-2 p-2 rounded hover:bg-kumo-border/20 cursor-pointer">
                         <Checkbox
+                          aria-labelledby={`edit-agent-account-${account.id}`}
                           checked={selectedAccountIds.includes(account.id)}
                           onCheckedChange={(checked) => {
                             if (checked) {
@@ -313,7 +327,7 @@ export default function EditAgentModal({
                           }}
                           disabled={loading}
                         />
-                        <span className="text-sm text-kumo-default">{accountLabel}</span>
+                        <span id={`edit-agent-account-${account.id}`} className="text-sm text-kumo-default">{accountLabel}</span>
                       </label>
                     )
                   })}
@@ -359,16 +373,16 @@ export default function EditAgentModal({
       </div>
         </div>
 
-        <div className="flex items-center justify-between border-t border-kumo-line bg-kumo-base px-5 py-3">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-kumo-line bg-kumo-base px-5 py-3">
           <Button
             variant="secondary"
             onClick={handleDelete}
             disabled={loading}
             className="!text-kumo-danger hover:!bg-kumo-danger/10"
           >
-            Delete Agent
+            Delete bot
           </Button>
-          <div className="flex gap-2">
+          <div className="ml-auto flex gap-2">
             <Button variant="secondary" onClick={onCancel} disabled={loading}>
               Cancel
             </Button>

@@ -1,4 +1,6 @@
 import { isTransientRpcError, logRpcFailure } from "./rpcErrors";
+import SecretRequestInput from './components/SecretRequestInput';
+import { MAX_CHAT_ATTACHMENTS, MAX_CHAT_ATTACHMENT_BYTES as MAX_FILE_BYTES, MAX_CHAT_ATTACHMENT_TOTAL_BYTES, attachmentMimeType } from '@gadgets/workshop-shared/attachments';
 import {
   Fragment,
   isValidElement,
@@ -48,6 +50,8 @@ import {
   File as FileIcon,
   PencilSimple,
   Brain,
+  Gear,
+  Clock,
   ShieldCheck,
   Terminal,
   Globe,
@@ -62,6 +66,13 @@ import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
 import { ComputerView } from "./components/ComputerView";
 import ChatQueueTray from "./components/ChatQueueTray";
+import CreateRoutineModal from "./components/CreateRoutineModal";
+import AgentProposalCard from "./components/AgentProposalCard";
+import TaskHistory from "./components/TaskHistory";
+import NamedDelegationCard from "./components/NamedDelegationCard";
+import { Link } from "@tanstack/react-router";
+import { RoutineCard } from "./components/RoutinesList";
+import { useConnectionLost } from "./RpcContext";
 import { useUiFeatureFlag } from "./FeatureFlagsContext";
 import {
   persistBotComposerModel,
@@ -78,6 +89,7 @@ import {
   ActionLogEntry,
   AiChatAuthorInfo,
   AgentProfile,
+  AgentRoutine,
   Group,
   CapsuleSpecifier,
   AiChatStreamEvent,
@@ -95,6 +107,8 @@ import {
   OutputFormatOffer,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
+import type { WorkflowStarter } from "@gadgets/workshop-shared/workflow-starters";
+import { WorkflowStarterCards, WorkflowStarterMenu } from "./components/workflows/WorkflowStarters";
 import type { ChatChangeRow } from "./otClient";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -131,6 +145,7 @@ import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
+import { usePublishBotInboxSummary } from "./botInboxSummary";
 import { useVendorBranding } from "./useVendorBranding";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
@@ -260,11 +275,14 @@ function CreatedGadgetChatCard({
   gadget: CreatedGadgetCardInfo;
   onOpen: () => void;
 }) {
+  const format = formatOf(gadget.output);
+  const action = `${gadget.isPending ? "Preview" : "Open"} ${format.noun.toLowerCase()}`;
   return (
     <div className="group/createdApp relative w-full max-w-[440px]">
       <button
         type="button"
         onClick={onOpen}
+        aria-label={`${action}: ${gadget.title}`}
         className="group flex w-full cursor-pointer items-stretch overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left shadow-[0_1px_2px_rgba(82,16,0,0.04)] transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-[0_10px_28px_rgba(82,16,0,0.10)]"
       >
         <span
@@ -282,17 +300,12 @@ function CreatedGadgetChatCard({
               {gadget.title}
             </span>
             <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-kumo-subtle">
-              {gadget.isPending && (
-                <span className="rounded-full bg-kumo-fill px-1.5 py-0.5 text-[10px] font-medium leading-none">
-                  Draft
-                </span>
-              )}
-              <span>
-                {gadget.isPending
-                    ? `New ${formatOf(gadget.output).noun.toLowerCase()} · Click to preview`
-                    : `${formatOf(gadget.output).noun} · Click to open`}
+              <span>{format.noun}</span>
+              <span className="rounded-full bg-kumo-fill px-2 py-0.5 text-[11px] font-medium leading-4">
+                {gadget.isPending ? "Draft ready" : "Saved"}
               </span>
             </span>
+            <span className="mt-2 block text-[13px] font-medium text-kumo-default">{action}</span>
           </span>
           <span className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-full text-kumo-inactive transition-all duration-150 group-hover:bg-kumo-tint group-hover:text-kumo-default">
             <ArrowUpRight size={15} weight="bold" />
@@ -301,6 +314,23 @@ function CreatedGadgetChatCard({
       </button>
     </div>
   );
+}
+
+/** Seed a repeat from the last plain user task, never from an answer or expanded slash command. */
+export function getRepeatableTask(messages: readonly AiChatMessage[]): { prompt: string; sequence: number } | null {
+  if (messages.some((message) =>
+    (message.type === "agentProposal" && (message.state === "pending" || message.state === "accepting")) ||
+    ((message.type === "connectionRequest" || message.type === "computerHumanTakeover") && message.state === "pending") ||
+    (message.type === "action" && message.actionLog?.type === "action" && message.actionLog.state === "pending"))) return null;
+  const request = messages.findLast((message) =>
+    message.type === "slashCommand" || (message.type === "message" && message.author.type === "user"));
+  if (request?.type !== "message" || !request.message.trim() || request.generatedBySlashCommandSequence !== undefined) return null;
+  const response = messages.findLast((message) =>
+    message.type === "message" && message.author.type === "agent" && message.message.trim() &&
+    message.generatedBySlashCommandSequence === undefined);
+  if (!response || response.sequence <= request.sequence ||
+      messages.some((message) => message.type === "error" && message.sequence > response.sequence)) return null;
+  return { prompt: request.message, sequence: response.sequence };
 }
 
 /**
@@ -468,9 +498,8 @@ type PendingAttachment = {
   error?: string;
 };
 
-const MAX_PENDING_ATTACHMENTS = 5;
+const MAX_PENDING_ATTACHMENTS = MAX_CHAT_ATTACHMENTS;
 const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
-const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024;
 const CHAT_ATTACHMENT_IMAGE_MAX_EDGE = 1568;
 
@@ -482,10 +511,10 @@ function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number)
 
 async function prepareChatAttachment(file: File): Promise<{blob: Blob, mimeType: string}> {
   if (!file.type.startsWith("image/")) {
-    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-      throw new Error(`Attachments must be ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_BYTES)} or smaller.`);
+    if (file.size > MAX_FILE_BYTES) {
+      throw new Error(`Attachments must be ${formatAttachmentSize(MAX_FILE_BYTES)} or smaller.`);
     }
-    return { blob: file, mimeType: file.type || "application/octet-stream" };
+    return { blob: file, mimeType: attachmentMimeType(file.name, file.type) || "application/octet-stream" };
   }
   if (file.size > MAX_CHAT_ATTACHMENT_SOURCE_IMAGE_BYTES) {
     throw new Error(`Images must be ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_SOURCE_IMAGE_BYTES)} or smaller before resizing.`);
@@ -801,6 +830,23 @@ function getToolCallSummary(
       return { verb: "Listed connectable resources", target: tc.input.vendorId };
     case "requestConnection":
       return { verb: "Requested connection", target: tc.input.vendorId };
+    case "proposeRoutine": return { verb: "Proposed a routine" };
+    case "proposeSkill": return { verb: "Proposed reusable instructions" };
+    case "delegateToBot": return { verb: "Staged a delegated task" };
+    case "getDelegationResult": return { verb: "Read delegated task state" };
+    // Browser inputs and memory facts are not transcript-summary labels.
+    case "computerNavigate": return { verb: "Navigated browser" };
+    case "computerScreenshot": return { verb: "Captured browser screenshot" };
+    case "computerClick": return { verb: "Clicked in browser" };
+    case "computerType": return { verb: "Typed in browser" };
+    case "computerScroll": return { verb: "Scrolled browser" };
+    case "computerKey": return { verb: "Pressed a browser key" };
+    case "computerWait": return { verb: "Waited for browser" };
+    case "computerRequestHuman": return { verb: "Requested human control" };
+    case "computerGetState": return { verb: "Read browser state" };
+    case "computerWorkspace": return { verb: "Used computer workspace" };
+    case "memoryWrite":
+    case "memoryForget": return { verb: "Updated memory" };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -880,6 +926,22 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Listed connectable resources`;
     case "requestConnection":
       return count === 1 ? "Requested a connection" : `Requested ${count} connections`;
+    case "proposeRoutine": return `Proposed ${pluralize(count, "routine")}`;
+    case "proposeSkill": return `Proposed reusable instructions ${formatTimes(count)}`;
+    case "delegateToBot": return `Staged ${pluralize(count, "delegated task")}`;
+    case "getDelegationResult": return `Read delegated task state ${formatTimes(count)}`;
+    case "computerNavigate":
+    case "computerScreenshot":
+    case "computerClick":
+    case "computerType":
+    case "computerScroll":
+    case "computerKey":
+    case "computerWait":
+    case "computerRequestHuman":
+    case "computerGetState": return `Used browser ${formatTimes(count)}`;
+    case "computerWorkspace": return `Used workspace ${formatTimes(count)}`;
+    case "memoryWrite":
+    case "memoryForget": return `Updated memory ${formatTimes(count)}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -915,6 +977,22 @@ function getToolIcon(
       return MagnifyingGlass;
     case "giveUp":
       return Question;
+    case "computerNavigate":
+    case "computerScreenshot":
+    case "computerClick":
+    case "computerType":
+    case "computerScroll":
+    case "computerKey":
+    case "computerWait":
+    case "computerRequestHuman":
+    case "computerGetState": return Globe;
+    case "computerWorkspace": return Globe;
+    case "memoryWrite":
+    case "memoryForget": return Brain;
+    case "proposeRoutine": return Clock;
+    case "proposeSkill": return Brain;
+    case "delegateToBot": return ArrowUpRight;
+    case "getDelegationResult": return MagnifyingGlass;
     default:
       return Question;
   }
@@ -946,6 +1024,22 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Observing user changes";
     case "giveUp":
       return "Stopping";
+    case "proposeRoutine": return "Proposing a routine";
+    case "proposeSkill": return "Proposing reusable instructions";
+    case "delegateToBot": return "Staging a delegated task";
+    case "getDelegationResult": return "Reading delegated task state";
+    case "computerNavigate":
+    case "computerScreenshot":
+    case "computerClick":
+    case "computerType":
+    case "computerScroll":
+    case "computerKey":
+    case "computerWait":
+    case "computerRequestHuman":
+    case "computerGetState": return "Using browser";
+    case "computerWorkspace": return "Using workspace";
+    case "memoryWrite":
+    case "memoryForget": return "Updating memory";
     default:
       return "Using tool";
   }
@@ -973,6 +1067,22 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return "Requesting a connection";
+    case "proposeRoutine": return "Proposing a routine";
+    case "proposeSkill": return "Proposing reusable instructions";
+    case "delegateToBot": return "Staging a delegated task";
+    case "getDelegationResult": return "Reading delegated task state";
+    case "computerNavigate":
+    case "computerScreenshot":
+    case "computerClick":
+    case "computerType":
+    case "computerScroll":
+    case "computerKey":
+    case "computerWait":
+    case "computerRequestHuman":
+    case "computerGetState": return "Using browser";
+    case "computerWorkspace": return "Using workspace";
+    case "memoryWrite":
+    case "memoryForget": return "Updating memory";
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -997,6 +1107,22 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
+    case "proposeRoutine": return `Proposing ${pluralize(count, "routine")}`;
+    case "proposeSkill": return `Proposing reusable instructions ${formatTimes(count)}`;
+    case "delegateToBot": return `Staging ${pluralize(count, "delegated task")}`;
+    case "getDelegationResult": return `Reading delegated task state ${formatTimes(count)}`;
+    case "computerNavigate":
+    case "computerScreenshot":
+    case "computerClick":
+    case "computerType":
+    case "computerScroll":
+    case "computerKey":
+    case "computerWait":
+    case "computerRequestHuman":
+    case "computerGetState": return `Using browser ${formatTimes(count)}`;
+    case "computerWorkspace": return `Using workspace ${formatTimes(count)}`;
+    case "memoryWrite":
+    case "memoryForget": return `Updating memory ${formatTimes(count)}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -1271,8 +1397,10 @@ function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
 
 function getMarkdownComponents(
   mentionsByToken?: Map<string, Mention>,
+  allowImages = true,
 ): Components {
   return {
+    img: allowImages ? "img" : ({ alt }) => <span>[Image omitted{alt ? `: ${alt}` : ""}]</span>,
     pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
     table: ({ node: _node, children, ...props }) => (
       <div className={styles.markdownTableWrapper}>
@@ -1318,10 +1446,12 @@ const MARKDOWN_COMPONENTS_NO_CAPSULES = getMarkdownComponents();
  * `whitespace-pre-wrap` wrapper at the user-message render site renders it as a hard break.
  */
 export const MarkdownMessage = memo(function MarkdownMessage(
-  { message, capsules, formats }: {
+  { message, capsules, formats, allowImages = true }: {
     message: string;
     capsules?: CapsuleSpecifier[];
     formats?: MessageFormatRef[];
+    /** Disable in action review so image URLs cannot fetch or preload before approval. */
+    allowImages?: boolean;
   },
 ): ReactNode {
   const tokenizedMessage = useMemo(
@@ -1331,10 +1461,10 @@ export const MarkdownMessage = memo(function MarkdownMessage(
     [capsules, formats, message],
   );
   const components = useMemo(
-    () => tokenizedMessage
-      ? getMarkdownComponents(tokenizedMessage.mentionsByToken)
+    () => tokenizedMessage || !allowImages
+      ? getMarkdownComponents(tokenizedMessage?.mentionsByToken, allowImages)
       : MARKDOWN_COMPONENTS_NO_CAPSULES,
-    [tokenizedMessage],
+    [tokenizedMessage, allowImages],
   );
   const remarkPlugins = useMemo(
     () => tokenizedMessage
@@ -1655,7 +1785,7 @@ const ObservationDetails = memo(function ObservationDetails(
             </p>
           )}
           <div className="mt-1.5 text-[12px] leading-[18px] tracking-[-0.2px] text-kumo-subtle">
-            <MarkdownMessage message={log.description.description} />
+            <MarkdownMessage message={log.description.description} allowImages={false} />
           </div>
         </div>
       </div>
@@ -1760,12 +1890,20 @@ const ThinkingTraceRow = memo(function ThinkingTraceRow({
 }: {
   reasoning: string;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="min-w-0 py-1 text-kumo-subtle">
-      <div className={`min-w-0 text-[13px] leading-[19px] ${styles.markdownContent}`}>
-        <MarkdownMessage message={reasoning} />
-      </div>
-    </div>
+    <details className={styles.activityDisclosure} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <Brain size={14} aria-hidden="true" />
+        Thinking details
+        <CaretRight size={12} aria-hidden="true" className={styles.disclosureCaret} />
+      </summary>
+      {open && (
+        <div className={`mt-2 rounded-xl bg-kumo-elevated p-3 text-[13px] leading-5 ${styles.markdownContent}`}>
+          <MarkdownMessage message={reasoning} />
+        </div>
+      )}
+    </details>
   );
 });
 
@@ -1802,15 +1940,16 @@ const ToolGroupRow = memo(function ToolGroupRow({
       <button
         type="button"
         onClick={() => onToggle(group.key)}
-        className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+        aria-label={`${group.observations.length > 0 ? "View activity & sources" : "View activity"}${group.hasError ? ": error" : ""}`}
+        className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-2 text-left text-kumo-subtle transition-colors hover:bg-kumo-elevated hover:text-kumo-default focus-visible:outline-2 focus-visible:outline-kumo-ring"
         aria-expanded={open}
       >
         <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
           <WorkIcon Icon={group.Icon} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">
-            <span className="min-w-0 truncate">{group.label}</span>
+          <span className="flex min-w-0 items-center gap-2 text-[12px] leading-5">
+            <span>{group.observations.length > 0 ? "View activity & sources" : "View activity"}</span>
             {group.hasError && (
               <span className="flex-shrink-0 rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
                 Error
@@ -1822,9 +1961,10 @@ const ToolGroupRow = memo(function ToolGroupRow({
               className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
             />
           </span>
-          {group.detailLines.length > 1 && (
-            <span className="mt-1 block truncate font-mono text-[12px] leading-4 text-kumo-inactive">
-              {group.detailLines.join(" · ")}
+          {open && (
+            <span className="mt-1 block text-[12px] leading-5 text-kumo-subtle [overflow-wrap:anywhere]">
+              {group.label}
+              {group.detailLines.length > 1 && ` · ${group.detailLines.join(" · ")}`}
             </span>
           )}
         </span>
@@ -1912,6 +2052,7 @@ export const ChatInput = ({
   minRows = 2,
   seedText,
   seedNonce,
+  seedMode = "replace",
   draftStorageKey,
   attachLabel,
   draftUpdateBanner,
@@ -1922,6 +2063,8 @@ export const ChatInput = ({
   onToggleThinkingTraces,
   workspaceId,
   agentId,
+  botName,
+  usage,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1962,6 +2105,8 @@ export const ChatInput = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
+  /** Append task suggestions without replacing existing text, tokens, or attachments. */
+  seedMode?: "replace" | "append";
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
   /** Optional label for the attach menu item. */
@@ -1983,6 +2128,10 @@ export const ChatInput = ({
    * If set, use this specific agent profile to filter bindings (overrides workspace lookup).
    */
   agentId?: string;
+  /** Display name of the bot being messaged, not the selected AI model. */
+  botName?: string;
+  /** Conversation usage, disclosed alongside the model settings. */
+  usage?: Pick<AiChatMetadata, "totalTokens" | "totalCost">;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
   /** Open the pre-approval dialog (owned by the parent). */
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
@@ -2044,6 +2193,7 @@ export const ChatInput = ({
 
   // Attach modal state
   const [attachModalOpen, setAttachModalOpen] = useState(false);
+  const attachAfterMenuCloseRef = useRef(false);
   // Save the cursor position when the attach modal opens, so we can insert the capsule there.
   const attachCursorPosRef = useRef(0);
 
@@ -2195,23 +2345,36 @@ export const ChatInput = ({
     ));
   }, [capsules, draftStorageKey, formatTokens, inputValue, selectedSlashCommand]);
 
-  // Seed the composer from an external suggestion (Home task cards). Re-runs whenever the nonce
-  // changes so picking the same suggestion twice still works. Focus + move the cursor to the end.
-  useEffect(() => {
-    if (seedNonce === undefined) return;
-    draftRestoreGenerationRef.current++;
-    const text = seedText ?? "";
-    setSelectedSlashCommand(null);
-    setCapsules([]);
-    setFormatTokens([]);
+  const seedComposer = (prompt: string, mode: "replace" | "append") => {
+    const generation = ++draftRestoreGenerationRef.current;
+    draftEditedRef.current = true;
+    // Appending leaves every existing token's coordinates and pending attachment intact.
+    const text = mode === "append" && inputValueRef.current.length > 0
+      ? `${inputValueRef.current}\n\n${prompt}`
+      : prompt;
+    if (mode === "replace") {
+      setSelectedSlashCommand(null);
+      setCapsules([]);
+      setFormatTokens([]);
+    }
+    inputValueRef.current = text;
     setInputValue(text);
+    setCursorPosition(text.length);
+    setActiveUrl(null);
     requestAnimationFrame(() => {
+      if (draftRestoreGenerationRef.current !== generation) return;
       const ta = composerTextareaRef.current;
       if (!ta) return;
       ta.focus();
       ta.setSelectionRange(text.length, text.length);
       autoResizeTextarea(ta, minRows, newChat ? 10 : 4);
     });
+  };
+
+  // A nonce allows the same suggestion to be selected again without changing Home's replace mode.
+  useEffect(() => {
+    if (seedNonce === undefined) return;
+    seedComposer(seedText ?? "", seedMode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedNonce]);
   const capsulesRef = useRef(capsules);
@@ -3292,9 +3455,9 @@ export const ChatInput = ({
       ? "warning"
       : "log";
   const selectedModelLabel = models.length === 0
-    ? "Add a model"
+    ? "No model available"
     : selectedModel == null
-      ? "No agent"
+      ? "No AI responses"
       : models.find((model) => model.id === selectedModel)?.name ?? selectedModel;
 
   const hasReadyAttachment = pendingAttachments.some(
@@ -3382,7 +3545,7 @@ export const ChatInput = ({
               <span className={`grid h-7 w-7 place-items-center rounded-full ${canAttachMore ? "bg-kumo-brand/12 text-kumo-brand" : "bg-kumo-warning/15 text-kumo-warning"}`}>
                 <FileIcon size={16} weight="duotone" />
               </span>
-              {canAttachMore ? "Drop files to attach" : "Messages are limited to 5 attachments"}
+              {canAttachMore ? "Drop files to attach · Office, PDF, images; audio/video with Gemini" : "Messages are limited to 6 attachments"}
             </div>
           </div>
         )}
@@ -3477,9 +3640,11 @@ export const ChatInput = ({
                   ? blockedReason
                   : isAgentActive
                     ? "Send to queue…"
-                    : newChat
-                      ? "Start a new conversation…"
-                      : "Ask a follow-up…"
+                    : botName
+                      ? `Message ${botName}...`
+                      : newChat
+                        ? "Start a new conversation…"
+                        : "Write a message..."
               }
               autoFocus={autoFocus}
               rows={minRows}
@@ -3612,18 +3777,29 @@ export const ChatInput = ({
           </div>
         )}
 
-        {/* Footer row: connection/options left, model + send right */}
-        <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-            <DropdownMenu>
+        {/* Attachments on the left; settings and send on the right. */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 px-3 pb-1.5">
+          <div className="flex shrink-0 items-center gap-1.5">
+            <DropdownMenu
+              onOpenChangeComplete={(open) => {
+                if (!open && attachAfterMenuCloseRef.current) {
+                  attachAfterMenuCloseRef.current = false;
+                  // Let the menu unmount and restore focus before the dialog's autofocus runs.
+                  queueMicrotask(() => {
+                    if (mountedRef.current) handleAttachOpen();
+                  });
+                }
+              }}
+            >
               <DropdownMenu.Trigger
                 render={
                   <button
                     type="button"
-                    className="group flex h-10 w-10 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-subtle focus-visible:bg-kumo-tint focus-visible:text-kumo-subtle focus-visible:outline-none active:scale-[0.96] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-subtle sm:h-8 sm:w-8"
-                    aria-label="Open chat options"
+                    className="inline-flex h-10 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[13px] text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-2 focus-visible:outline-kumo-ring data-[popup-open]:bg-kumo-tint"
+                    aria-label="Add"
                   >
                     <Plus size={18} />
+                    Add
                   </button>
                 }
               />
@@ -3632,19 +3808,6 @@ export const ChatInput = ({
                     the caret; the agent is told what to build from it. */}
                 {canChooseFormat && (
                   <ComposerFormatMenuItems onSelect={(format) => void chooseFormat(format)} />
-                )}
-                {onToggleThinkingTraces && (
-                  <DropdownMenu.Item
-                    onClick={onToggleThinkingTraces}
-                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
-                  >
-                    <span className="mr-2 inline-flex h-4 w-4 items-center justify-center text-kumo-inactive">
-                      <Brain size={14} />
-                    </span>
-                    <span className="flex-1">
-                      {showThinkingTraces ? "Hide thinking" : "Show thinking"}
-                    </span>
-                  </DropdownMenu.Item>
                 )}
                 <DropdownMenu.Item
                   onClick={() => attachmentInputRef.current?.click()}
@@ -3655,16 +3818,21 @@ export const ChatInput = ({
                   </span>
                   <span className="flex-1">Upload file</span>
                 </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  onClick={() => { attachAfterMenuCloseRef.current = true; }}
+                  className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                >
+                  <Plug size={14} className="mr-2 shrink-0" />
+                  {attachLabel ?? "Choose connected resource"}
+                </DropdownMenu.Item>
               </DropdownMenu.Content>
             </DropdownMenu>
-            <button
-              type="button"
-              onClick={handleAttachOpen}
-              className="inline-flex h-10 flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[14px] leading-none text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-subtle focus-visible:bg-kumo-tint focus-visible:text-kumo-subtle focus-visible:outline-none active:scale-[0.97] sm:h-8 sm:text-[13px]"
-            >
-              <Plug size={15} className="flex-shrink-0" />
-              <span className={`leading-none ${styles.attachLabelText}`}>{attachLabel ?? "Add resource"}</span>
-            </button>
+            {botName && (
+              <WorkflowStarterMenu
+                disabled={isBlocked || isSending}
+                onSelect={(starter) => seedComposer(starter.prompt, "append")}
+              />
+            )}
           </div>
 
           {/* Right actions */}
@@ -3674,27 +3842,31 @@ export const ChatInput = ({
                   render={
                     <button
                       type="button"
-                      className="group inline-flex h-10 min-w-0 max-w-[110px] cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[14px] leading-5 text-kumo-subtle transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-default focus-visible:bg-kumo-tint focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.97] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default sm:h-8 sm:max-w-[180px] sm:text-[13px]"
-                      aria-label="Select model"
+                      className="inline-flex h-10 min-w-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[13px] text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-2 focus-visible:outline-kumo-ring data-[popup-open]:bg-kumo-tint"
+                      aria-label="Chat settings"
                     >
-                      <span className="min-w-0 truncate">{selectedModelLabel}</span>
-                      <CaretDown
-                        size={12}
-                        weight="bold"
-                        className="flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out group-data-[popup-open]:rotate-180"
-                      />
+                      <Gear size={16} className="shrink-0" />
+                      <span className="min-w-0 truncate">
+                        {models.length === 0 ? "Set up AI" : selectedModel == null ? "No AI responses" : "Chat settings"}
+                      </span>
                     </button>
                   }
                 />
-                <DropdownMenu.Content className="themed-floating-shadow-lg !z-[1100] !min-w-[190px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1">
-                  {models.length === 0 && (
-                    <DropdownMenu.Item
-                      onClick={() => setAddModelModalOpen(true)}
-                      className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
-                    >
-                      <span className="min-w-0 flex-1 truncate">Add a model</span>
-                    </DropdownMenu.Item>
-                  )}
+                <DropdownMenu.Content collisionPadding={16} className="themed-floating-shadow-lg !z-[1100] w-72 max-w-[calc(100vw-32px)] max-h-[min(420px,70dvh)] overflow-y-auto rounded-2xl border border-kumo-line/70 bg-kumo-base p-1">
+                  <DropdownMenu.Group>
+                  <DropdownMenu.Label className="space-y-1 border-b border-kumo-line px-3 py-2.5 text-[12px] font-normal leading-5 text-kumo-subtle">
+                    <p className="font-medium text-kumo-default">Model &amp; usage</p>
+                    <p className="break-words">{selectedModelLabel}</p>
+                    {(usage?.totalTokens != null || usage?.totalCost != null) && (
+                      <div>
+                        <p>This conversation</p>
+                        <p className="flex flex-wrap gap-x-3 tabular-nums">
+                          {usage.totalTokens != null && <span>{usage.totalTokens.toLocaleString()} tokens</span>}
+                          {usage.totalCost != null && <span>${usage.totalCost.toFixed(4)}</span>}
+                        </p>
+                      </div>
+                    )}
+                  </DropdownMenu.Label>
                   {models.map((model) => {
                     const active = selectedModel === model.id;
                     return (
@@ -3717,19 +3889,29 @@ export const ChatInput = ({
                         onClick={() => onModelChange(null)}
                         className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
                       >
-                        <span className="min-w-0 flex-1 truncate">No agent</span>
+                        <span className="min-w-0 flex-1 truncate">No AI responses</span>
                         {selectedModel == null && (
                           <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
                         )}
                       </DropdownMenu.Item>
                     </>
                   )}
+                  </DropdownMenu.Group>
                   <div className="my-1 border-t border-kumo-line/70" />
+                  {onToggleThinkingTraces && (
+                    <DropdownMenu.Item
+                      onClick={onToggleThinkingTraces}
+                      className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                    >
+                      <Brain size={14} className="mr-2 shrink-0" />
+                      {showThinkingTraces ? "Hide thinking details" : "Show thinking details"}
+                    </DropdownMenu.Item>
+                  )}
                   <DropdownMenu.Item
                     onClick={() => setAddModelModalOpen(true)}
                     className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
                   >
-                    <span className="min-w-0 flex-1 truncate">Advanced...</span>
+                    <span className="min-w-0 flex-1 truncate">Add a model</span>
                   </DropdownMenu.Item>
                 </DropdownMenu.Content>
               </DropdownMenu>
@@ -4305,7 +4487,7 @@ function rhythmTopClass(
   if (!prev) return "";
   if (curr.type === "modelChange") return "mt-4";
   if (prev.type === "modelChange") return "mt-2";
-  if (isUserMessageEntry(prev) || isUserMessageEntry(curr)) return "mt-5";
+  if (isUserMessageEntry(prev) || isUserMessageEntry(curr)) return "mt-6";
   if (entryEndsInWorkRow(prev) && entryStartsWithWorkRow(curr)) return "mt-2";
   return "mt-4";
 }
@@ -4455,6 +4637,9 @@ function inferSelectedModelFromMessages(messages: AiChatMessage[]): string | nul
 interface ChatInterfaceProps {
   workspaceId: string | undefined;
   overseer: RpcStub<Overseer>;
+  automationPaused?: boolean;
+  // Owner-only display hint, not authority to decide a proposal.
+  canDecideProposals?: boolean;
   selectedChatId: number | null;
   onNavigateToChat: (
     chatId: number | null,
@@ -4655,6 +4840,8 @@ function getOrCreateProvisionalToolCall(
 function ChatInterface({
   workspaceId,
   overseer,
+  automationPaused = false,
+  canDecideProposals = false,
   selectedChatId,
   onNavigateToChat,
   onChatChangesChange,
@@ -4686,6 +4873,7 @@ function ChatInterface({
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser, authenticatedApi } = useAuthenticatedApi();
+  const connectionLost = useConnectionLost();
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -4767,15 +4955,12 @@ function ChatInterface({
   );
   // Connection-request (agent requestConnection) accept flow. When set, the GatekeeperModal opens
   // pre-seeded with the agent's vendor/resource; on creation we finalize acceptConnectionRequest.
-  const [connectionAccept, setConnectionAccept] = useState<{
-    requestId: string;
-    vendorId: string;
-    resourceUrl?: string;
-    resourceUrlPattern?: string;
-  } | null>(null);
-  // Read via this ref inside handleConnectionCreated to avoid a stale closure: that callback is
-  // passed as the `onCreated` prop to GatekeeperModal, so it would otherwise capture an outdated
-  // `connectionAccept`.
+  const [connectionAccept, setConnectionAccept] = useState<Pick<
+    Extract<AiChatMessage, { type: "connectionRequest" }>,
+    "requestId" | "vendorId" | "vendorName" | "resourceTitle" | "resourceUrl" | "resourceUrlPattern" | "reason"
+  > | null>(null);
+  // Only a freshness check. Completion must use the request captured by its callback, not the
+  // current request, which may belong to a different modal opening.
   const connectionAcceptRef = useRef<typeof connectionAccept>(null);
   connectionAcceptRef.current = connectionAccept;
   const [processingConnections, setProcessingConnections] = useState<Set<string>>(
@@ -4790,6 +4975,22 @@ function ChatInterface({
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const userPickedModelRef = useRef(false);
   const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
+  const [workflowSeed, setWorkflowSeed] = useState<{
+    workspaceId: string | undefined; chatId: number | null; starter: WorkflowStarter; nonce: number;
+  } | null>(null);
+  useEffect(() => setWorkflowSeed(null), [workspaceId, selectedChatId]);
+  const selectWorkflowStarter = (starter: WorkflowStarter) => setWorkflowSeed((previous) => ({
+    workspaceId, chatId: selectedChatId, starter, nonce: (previous?.nonce ?? 0) + 1,
+  }));
+  const activeWorkflowSeed = workflowSeed?.workspaceId === workspaceId && workflowSeed?.chatId === selectedChatId
+    ? workflowSeed : null;
+  const [repeatTask, setRepeatTask] = useState<{
+    agent: AgentProfile; chatId: number; sequence: number; name: string; prompt: string;
+  } | null>(null);
+  const [routineReceipts, setRoutineReceipts] = useState<{
+    chatId: number; sequence: number; routine: AgentRoutine;
+  }[]>([]);
+  useEffect(() => setRepeatTask(null), [workspaceId, selectedChatId]);
   const [currentGroup, setCurrentGroup] = useState<Group | null>(null);
   const [groupMemberAgents, setGroupMemberAgents] = useState<AgentProfile[]>([]);
   const [selectedMemberAgentId, setSelectedMemberAgentId] = useState<string | null>(null);
@@ -4994,6 +5195,11 @@ function ChatInterface({
     };
   }, [chatList, chatListScope]);
 
+  usePublishBotInboxSummary(
+    authenticatedApi, workspaceId, overseer, chatList, cacheRef.current.messages,
+    _isSubscribed && chatListReady, updateCounter,
+  );
+
   // Notify parent when chat list changes. Gated on chatListReady so that we
   // don't report 0 from the empty initial cache before listChats() has completed.
   const onChatCountChangeRef = useRef(onChatCountChange);
@@ -5145,6 +5351,7 @@ function ChatInterface({
   // Get metadata for selected chat
   const currentChatMetadata =
     selectedChatId !== null ? cacheRef.current.chats.get(selectedChatId) : null;
+  const namedChild = currentChatMetadata?.namedDelegation;
 
   // Download a committed chat attachment. Image bytes are already inlined on the message; other
   // attachments are fetched on demand over the authenticated RPC connection.
@@ -5370,6 +5577,11 @@ function ChatInterface({
   // Update currentAgentProfile when selected member changes in a group
   useEffect(() => {
     if (currentGroup && groupMemberAgents.length > 0) {
+      if (currentGroup.multiAuthor) {
+        setSelectedMemberAgentId(null);
+        setCurrentAgentProfile(null);
+        return;
+      }
       if (selectedMemberAgentId) {
         const selectedMember = groupMemberAgents.find(a => a.id === selectedMemberAgentId);
         if (selectedMember) {
@@ -6048,6 +6260,7 @@ function ChatInterface({
     attachments?: ChatAttachmentHandle[],
     formats?: MessageFormatRef[],
   ) => {
+    if (namedChild) return;
     const message = typeof messageText === "string" ? messageText.trim() : messageText ?? "";
     if (!message && (!attachments || attachments.length === 0)) return;
 
@@ -6429,7 +6642,7 @@ function ChatInterface({
   // Pending "always approve this type" confirmation, opened from a pending action card.
   const [autoApproveConfirm, setAutoApproveConfirm] = useState<
     { actionId: number; gatekeeperId: number; resourceTitle: string;
-      actionKind: ActionKind; actionLabel: string } | null
+      resourceUrl?: string; actionKind: ActionKind } | null
   >(null);
 
   // Enable auto-approval of an action tag on its connection (gated by the confirm dialog). The
@@ -6473,6 +6686,9 @@ function ChatInterface({
       vendorId: msg.vendorId,
       resourceUrl: msg.resourceUrl,
       resourceUrlPattern: msg.resourceUrlPattern,
+      vendorName: msg.vendorName,
+      resourceTitle: msg.resourceTitle,
+      reason: msg.reason,
     });
   };
 
@@ -6481,19 +6697,21 @@ function ChatInterface({
   // binding in the chat's env, under the name the agent chose when it made the request (the agent
   // wires it into a gadget itself if that gadget's code needs it).
   const handleConnectionCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
-    const accept = connectionAcceptRef.current;
-    if (!accept) {
+    const accept = connectionAccept;
+    if (!accept || connectionAcceptRef.current !== accept) {
       gk[Symbol.dispose]();
       return;
     }
     setProcessingConnections((prev) => new Set(prev).add(accept.requestId));
     try {
       const id = await gk.getId();
+      if (connectionAcceptRef.current !== accept) return;
       await overseer.acceptConnectionRequest(accept.requestId, {
         gatekeeperId: id,
       });
-      setConnectionAccept(null);
+      setConnectionAccept((current) => current === accept ? null : current);
     } catch (err) {
+      if (connectionAcceptRef.current !== accept) return;
       console.error("Failed to finalize connection:", err);
       toasts.add({ title: "Failed to add connection", variant: "error" });
     } finally {
@@ -6602,6 +6820,7 @@ function ChatInterface({
   // Handle retrying the agent after an error
   const handleRetry = async () => {
     if (
+      namedChild ||
       selectedChatId === null ||
       selectedModel === null
     ) {
@@ -6671,6 +6890,12 @@ function ChatInterface({
     }
     return latest;
   }, [completedAgentTurnMessageSeqs]);
+
+  const repeatableTask = !namedChild && !connectionLost && _isSubscribed && chatListReady && !isLoading &&
+      !isAgentActive && currentChatMetadata && !(currentChatMetadata.queue?.length) &&
+      !currentGroup && currentAgentProfile?.workspaceId === workspaceId && currentAgentProfile?.defaultModelId
+    ? getRepeatableTask(currentMessages)
+    : null;
 
   // The current epoch's opening sequence (see ChatCodeBase.epoch), zero when the epoch spans the
   // whole chat. A *pending* changes message before it exists only in chats converted from
@@ -6838,46 +7063,46 @@ function ChatInterface({
 
     const stateLabel = isAccepted ? "Connected" : isDenied ? "Denied" : null;
     const stateLabelCls = isDenied ? "text-kumo-danger" : "text-kumo-success";
-    const scope = msg.resourceTitle ?? msg.resourceUrl;
 
     return (
       <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
         <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
-          <div className="flex items-start gap-3">
+          <div className="flex flex-wrap items-start gap-3">
             <GatekeeperIcon
               vendorId={msg.vendorId}
               logoUrl={msg.vendorLogoUrl}
               className="h-9 w-9 flex-shrink-0 rounded-lg"
             />
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                <span className="font-medium text-kumo-default">
-                  Connect {msg.vendorName}
+              <p className="text-[12px] font-medium text-kumo-subtle">Requested for (bot's stated purpose)</p>
+              <p className="mt-1 whitespace-pre-wrap font-medium text-kumo-default [overflow-wrap:anywhere]">
+                {msg.reason || "No purpose supplied."}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="text-[13px] text-kumo-subtle">
+                  Service: {msg.vendorName}
                 </span>
-                {scope && (
-                  <span className="rounded-full bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 text-kumo-subtle">
-                    {scope}
-                  </span>
-                )}
                 {stateLabel && (
                   <span className={`text-[12px] font-medium ${stateLabelCls}`}>
                     {stateLabel}
                   </span>
                 )}
               </div>
-              {msg.reason && (
-                <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
-                  {msg.reason}
+              {msg.resourceTitle && <p className="mt-1 text-[12px] [overflow-wrap:anywhere]">Resource type: {msg.resourceTitle}</p>}
+              {msg.resourceUrl && (
+                <p className="mt-1 text-[12px] [overflow-wrap:anywhere]">
+                  Suggested resource URL: {msg.resourceUrl}
                 </p>
               )}
+              {isPending && <p className="mt-2 text-[12px]">Account and resource are chosen in setup. The stated purpose is not an enforced access limit.</p>}
             </div>
             {isPending && (
-              <div className="ml-3 flex flex-shrink-0 items-center gap-2 self-center text-[13px] leading-4">
+              <div className="flex w-full flex-wrap justify-end gap-2 text-[13px] leading-4">
                 <button
                   type="button"
                   onClick={() => handleDenyConnection(msg.requestId)}
                   disabled={isProc}
-                  className="cursor-pointer rounded-md px-2 py-1 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+                  className="cursor-pointer rounded-md px-2 py-1 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-2 focus-visible:outline-kumo-ring disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Deny
                 </button>
@@ -6885,9 +7110,9 @@ function ChatInterface({
                   type="button"
                   onClick={() => handleAcceptConnection(msg)}
                   disabled={isProc}
-                  className="cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Set up
+                  className="cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-2 focus-visible:outline-kumo-ring active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                 >
+                  Review connection
                 </button>
               </div>
             )}
@@ -6933,6 +7158,8 @@ function ChatInterface({
               <p className="mt-1 text-[12px] leading-[16px] text-kumo-inactive">
                 URL: {msg.currentUrl}
               </p>
+              {isPending && msg.secretInput && overseer && <SecretRequestInput key={msg.requestId}
+                overseer={overseer} requestId={msg.requestId} submitted={msg.secretInput.submitted} />}
             </div>
             {isPending && (
               <div className="ml-3 flex flex-shrink-0 items-center gap-2 self-center text-[13px] leading-4">
@@ -6994,7 +7221,7 @@ function ChatInterface({
                 </div>
                 {log.description.description && (
                   <div className={`mt-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
-                    <MarkdownMessage message={log.description.description} />
+                    <MarkdownMessage message={log.description.description} allowImages={false} />
                   </div>
                 )}
                 {log.resourceTitle && (
@@ -7064,7 +7291,7 @@ function ChatInterface({
           </button>
           {open && (
             <div className="themed-surface-inset ml-8 mt-1 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] text-kumo-subtle">
-              <MarkdownMessage message={log.description.description} />
+              <MarkdownMessage message={log.description.description} allowImages={false} />
             </div>
           )}
         </div>
@@ -7074,8 +7301,7 @@ function ChatInterface({
     const isPending = state === "pending";
     const isApproved = state === "approved";
     const isRejected = state === "rejected";
-    // A blocking (awaitDecision) pending action suspends the agent turn and blocks the composer, so
-    // present it as a prominent callout with its details expanded by default.
+    // Blocking actions retain their prominent callout; all pending actions show full details.
     const isBlocking = isPending && log.description.awaitDecision === true;
     const metadata = log.resourceTitle;
     const stateLabel = isApproved
@@ -7097,8 +7323,8 @@ function ChatInterface({
             actionId: msg.actionId,
             gatekeeperId: log.gatekeeperId,
             resourceTitle: log.resourceTitle,
+            resourceUrl: log.resourceUrl,
             actionKind: log.description.actionKind,
-            actionLabel: log.description.title,
           }
         : undefined;
 
@@ -7125,8 +7351,7 @@ function ChatInterface({
       </>
     ) : null;
 
-    // Resource label, shown at the top of the blocking callout and at the bottom of the subtle
-    // inline row.
+    // Compact connection metadata for resolved actions; pending requests show explicit rows below.
     const resourceMeta = metadata ? (
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
         {log.resourceTitle && (
@@ -7149,31 +7374,39 @@ function ChatInterface({
       </div>
     ) : null;
 
-    // A blocking (awaitDecision) action suspends the agent turn, so present it as a prominent
-    // callout laid out like the connection-request card: a permissions icon, title + resource +
-    // details, and the approve/deny actions.
-    if (isBlocking) {
+    if (isPending) {
       return (
         <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-          <div className="rounded-2xl border border-kumo-brand/40 bg-kumo-brand/10 px-4 py-3">
+          <div className={`rounded-2xl border px-4 py-3 ${isBlocking ? "border-kumo-brand/40 bg-kumo-brand/10" : "border-kumo-line bg-kumo-base"}`}>
             <div className="flex items-start gap-3">
               <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-tint text-kumo-brand" aria-hidden="true">
                 <ShieldCheck size={20} weight="fill" />
               </span>
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                  <span className="min-w-0 truncate font-medium text-kumo-default">
-                    {log.description.title}
-                  </span>
-                  {resourceMeta}
-                </div>
-                <div className={`chat-panel mt-1 max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
-                  <MarkdownMessage message={log.description.description} />
+                <h3 className="m-0 font-medium text-kumo-default">Allow this action?</h3>
+                <dl className="my-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px] leading-[19px]">
+                  <dt>Action</dt>
+                  <dd className="m-0 break-words font-medium text-kumo-default">{log.description.title}</dd>
+                  <dt>Connection</dt>
+                  <dd className="m-0 min-w-0 break-words text-kumo-default">
+                    {log.resourceTitle || "Connection title unavailable"}
+                    {log.gatekeeperId !== undefined && <span className="block text-kumo-subtle">Connection #{log.gatekeeperId}</span>}
+                    {safeResourceUrl && (
+                      <a href={safeResourceUrl} target="_blank" rel="noopener noreferrer" className="block break-all underline">
+                        {safeResourceUrl}
+                      </a>
+                    )}
+                  </dd>
+                </dl>
+                <div className={`mt-2 break-words text-[13px] leading-[19px] text-kumo-subtle ${styles.markdownContent}`}>
+                  {log.description.description
+                    ? <MarkdownMessage message={log.description.description} allowImages={false} />
+                    : <p>No additional details provided.</p>}
                 </div>
               </div>
-              <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
-                {actionControls}
-              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-end gap-2 [&>button]:min-h-11 [&>button]:min-w-11">
+              {actionControls}
             </div>
           </div>
         </div>
@@ -7182,60 +7415,37 @@ function ChatInterface({
 
     return (
       <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-        {isPending ? (
-          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
-            <div className="flex items-start gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
-                  <h3 className="m-0 min-w-[8rem] flex-1 text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-                    {log.description.title}
-                  </h3>
-                  <div className="flex flex-shrink-0 items-center gap-0.5">
-                    {actionControls}
-                  </div>
+        <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
+          <div className="flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <button
+                type="button"
+                onClick={() => toggleActionExpansion(msg.actionId)}
+                className="flex w-full cursor-pointer items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
+                aria-expanded={open}
+              >
+                <h3 className="m-0 min-w-0 flex-1 truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+                  {log.description.title}
+                </h3>
+                {stateLabel && (
+                  <span className={`flex-shrink-0 text-[12px] font-medium ${stateLabelCls}`}>
+                    {stateLabel}
+                  </span>
+                )}
+                <CaretRight
+                  size={12}
+                  className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+                />
+              </button>
+              {open && log.description.description && (
+                <div className={`mt-1.5 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                  <MarkdownMessage message={log.description.description} allowImages={false} />
                 </div>
-                {log.description.description && (
-                  <div className={`mt-1.5 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
-                    <MarkdownMessage message={log.description.description} />
-                  </div>
-                )}
-                {resourceMeta && <div className="mt-1.5">{resourceMeta}</div>}
-              </div>
+              )}
+              {resourceMeta && <div className="mt-1.5">{resourceMeta}</div>}
             </div>
           </div>
-        ) : (
-          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
-            <div className="flex items-start gap-3">
-              <div className="min-w-0 flex-1">
-                <button
-                  type="button"
-                  onClick={() => toggleActionExpansion(msg.actionId)}
-                  className="flex w-full cursor-pointer items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
-                  aria-expanded={open}
-                >
-                  <h3 className="m-0 min-w-0 flex-1 truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-                    {log.description.title}
-                  </h3>
-                  {stateLabel && (
-                    <span className={`flex-shrink-0 text-[12px] font-medium ${stateLabelCls}`}>
-                      {stateLabel}
-                    </span>
-                  )}
-                  <CaretRight
-                    size={12}
-                    className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ${open ? "rotate-90" : ""}`}
-                  />
-                </button>
-                {open && log.description.description && (
-                  <div className={`mt-1.5 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
-                    <MarkdownMessage message={log.description.description} />
-                  </div>
-                )}
-                {resourceMeta && <div className="mt-1.5">{resourceMeta}</div>}
-              </div>
-            </div>
-          </div>
-        )}
+        </div>
       </div>
     );
   };
@@ -7452,7 +7662,7 @@ function ChatInterface({
           horizontal padding, so the wrapper just adds the top divider; no
           extra p-4 (which would shrink the input vs. the in-chat composer). */}
       <div className="flex-shrink-0 border-t border-kumo-line">
-        <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
+        <div className={useConstrainedChatWidth ? styles.chatColumn : ""}>
           {/* Attachments and pending resource operations belong to this workspace's composer. */}
           <ChatInput
             key={workspaceId}
@@ -7461,6 +7671,7 @@ function ChatInterface({
             }
             getOverseer={getOverseer}
             onSend={handleNewChatSend}
+            blockedReason={automationPaused ? "Automation is paused. The workspace owner must resume it before sending." : undefined}
             isAgentActive={false}
             models={availableModels}
             selectedModel={selectedModel}
@@ -7468,6 +7679,7 @@ function ChatInterface({
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
+            botName={currentAgentProfile?.name}
             newChat
             draftStorageKey={currentUser && workspaceId
               ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
@@ -7475,8 +7687,6 @@ function ChatInterface({
             workspaceId={workspaceId}
             agentId={selectedMemberAgentId || undefined}
           />
-          {/* Reserve the same height as the token/cost row to avoid layout shift. */}
-          <div aria-hidden className="min-h-[1rem]" />
         </div>
       </div>
     </div>
@@ -7518,13 +7728,18 @@ function ChatInterface({
             </div>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6">
-                <p className="text-center text-[22px] font-semibold tracking-[-0.4px] text-kumo-default">
-                  What can I help you with?
-                </p>
+              <div className="min-h-0 flex-1 overflow-y-auto px-6">
+                <div className="mx-auto flex min-h-full w-full max-w-[860px] flex-col justify-center py-6">
+                  <p className="text-center text-[22px] font-semibold tracking-[-0.4px] text-kumo-default">
+                    What can I help you with?
+                  </p>
+                  {currentAgentProfile?.workspaceId === workspaceId && !currentGroup && (
+                    <WorkflowStarterCards onSelect={selectWorkflowStarter} />
+                  )}
+                </div>
               </div>
               <div className="flex-shrink-0">
-                <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
+                <div className={useConstrainedChatWidth ? styles.chatColumn : ""}>
                   <ChatInput
                     key={workspaceId}
                     createCapsuleGatekeeper={(accountId, url) =>
@@ -7533,12 +7748,17 @@ function ChatInterface({
                     getOverseer={getOverseer}
                     onSend={handleSend}
                     isAgentActive={false}
+                    blockedReason={automationPaused ? "Automation is paused. The workspace owner must resume it before sending." : undefined}
                     models={availableModels}
                     selectedModel={selectedModel}
                     onModelChange={handleModelChange}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
                     minRows={2}
+                    botName={currentAgentProfile?.name}
+                    seedText={activeWorkflowSeed?.starter.prompt}
+                    seedNonce={activeWorkflowSeed?.nonce}
+                    seedMode="append"
                     newChat
                     draftStorageKey={currentUser && workspaceId
                       ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
@@ -7651,7 +7871,7 @@ function ChatInterface({
                     </>
                   )}
 
-                  {agentShellEnabled && (currentAgentProfile?.id || selectedMemberAgentId) && (
+                  {!namedChild && agentShellEnabled && (currentAgentProfile?.id || selectedMemberAgentId) && (
                     <WorkshopIconButton
                       onClick={() => setShowComputer(true)}
                       className="!h-8 !w-8 flex-shrink-0 text-kumo-inactive hover:text-kumo-subtle"
@@ -7674,6 +7894,18 @@ function ChatInterface({
                 </div>
               )}
 
+              {namedChild && <div className="shrink-0 space-y-1 border-b border-kumo-line px-3 py-2 text-xs text-kumo-subtle sm:px-4">
+                <p>Isolated delegated task for {namedChild.targetName}. Send follow-up instructions in parent conversation</p>
+                {workspaceId && <Link to="/workspace/$id" params={{ id: workspaceId }} search={{ chat: namedChild.parentChatId }} className="underline">Parent conversation</Link>}
+              </div>}
+              <TaskHistory
+                overseer={overseer}
+                workspaceId={workspaceId}
+                chatId={selectedChatId}
+                lastActive={currentChatMetadata?.lastActive}
+                currentRunId={currentChatMetadata?.currentRunId}
+              />
+
               {/* Messages */}
               <div
                 ref={messagesContainerRef}
@@ -7686,10 +7918,13 @@ function ChatInterface({
                   </div>
                 ) : (
                   <div
-                    className={`flex flex-col px-3 pt-5 sm:px-6 sm:pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
+                    className={`flex flex-col px-3 pt-5 sm:px-6 sm:pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? styles.chatColumn : ""}`}
                   >
                     {/* Member picker for groups */}
-                    {currentGroup && groupMemberAgents.length > 0 && (
+                    {currentGroup?.multiAuthor && <p className="px-4 py-2 text-xs text-kumo-subtle" role="status">
+                      {currentChatMetadata?.activeAuthors?.length ? `Working: ${currentChatMetadata.activeAuthors.map(author => author.name).join(', ')}` : 'Group conversation · @everyone or @Name · asynchronous teammate handoffs'}
+                    </p>}
+                    {currentGroup && !currentGroup.multiAuthor && groupMemberAgents.length > 0 && (
                       <div className="mb-4 flex items-center gap-3 rounded-lg border border-kumo-border bg-kumo-elevated px-4 py-2.5">
                         <span className="text-sm font-medium text-kumo-default">Respond as:</span>
                         <select
@@ -7711,6 +7946,11 @@ function ChatInterface({
                       <div className="mx-auto mb-6 text-[12px] leading-4 font-medium text-kumo-inactive">
                         Loading earlier messages…
                       </div>
+                    )}
+
+                    {currentMessages.length === 0 && !isAgentActive && !namedChild &&
+                      currentAgentProfile?.workspaceId === workspaceId && !currentGroup && (
+                      <WorkflowStarterCards onSelect={selectWorkflowStarter} />
                     )}
 
                     {displayEntries.map((entry, entryIndex) => {
@@ -8056,7 +8296,7 @@ function ChatInterface({
                               )}
 
                               {hasMessageText && (
-                                <div className={`text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
+                                <div className={`${styles.assistantMessage} ${styles.markdownContent}`}>
                                   <MarkdownMessage
                                     message={msg.message}
                                     capsules={msg.capsules}
@@ -8156,6 +8396,34 @@ function ChatInterface({
                                 ))}
                               </div>
                             )}
+                            {repeatableTask?.sequence === msg.sequence && currentAgentProfile && selectedChatId !== null && (
+                              <WorkshopButton
+                                className="mt-2 gap-1.5"
+                                onClick={() => setRepeatTask({
+                                  agent: currentAgentProfile,
+                                  chatId: selectedChatId,
+                                  sequence: msg.sequence,
+                                  name: currentChatMetadata?.title ?? "Repeated task",
+                                  prompt: repeatableTask.prompt,
+                                })}
+                              >
+                                <Clock size={14} aria-hidden="true" />
+                                Repeat this...
+                              </WorkshopButton>
+                            )}
+                            {currentAgentProfile && currentAgentProfile.workspaceId === workspaceId && routineReceipts
+                              .filter((receipt) => receipt.chatId === selectedChatId && receipt.sequence === msg.sequence)
+                              .map((receipt) => (
+                                <div key={receipt.routine.id} className="mt-3 max-w-[440px]">
+                                  <p className="mb-2 text-xs text-kumo-subtle">Routine saved. Manage it here or in Routines.</p>
+                                  <RoutineCard
+                                    agent={currentAgentProfile}
+                                    routine={receipt.routine}
+                                    onUpdated={(saved) => setRoutineReceipts((current) => current.map((item) =>
+                                      item.routine.id === saved.id ? { ...item, routine: saved } : item))}
+                                  />
+                                </div>
+                              ))}
                           </div>
                             );
                           })()
@@ -8175,7 +8443,7 @@ function ChatInterface({
                                   content={
                                     isMerge
                                       ? `Accepted draft changes${ts ? ` through ${formatFullTimestamp(ts)}` : ""}.`
-                                      : `Returned to the gadget state before the prompt sent ${ts ? `at ${ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "earlier"}.`
+                                      : `Returned to the app state before the prompt sent ${ts ? `at ${ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "earlier"}.`
                                   }
                                   asChild
                                 >
@@ -8199,16 +8467,27 @@ function ChatInterface({
 
                         {msg.type === "connectionRequest" && renderConnectionRequestCard(msg)}
 
+                        {msg.type === "namedDelegation" && <NamedDelegationCard
+                          delegation={msg.delegation} result={msg.result} overseer={overseer} workspaceId={workspaceId}
+                        />}
+
+                        {msg.type === "agentProposal" && <AgentProposalCard
+                          proposal={msg}
+                          overseer={overseer}
+                          chatId={msg.chatId}
+                          canDecideProposals={canDecideProposals}
+                        />}
+
                         {msg.type === "computerHumanTakeover" && renderComputerHumanTakeoverCard(msg)}
 
                         {msg.type === "useGadget" && (
                           <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-                            <Tooltip content={`Used the gadget at ${formatFullTimestamp(msg.timestamp)}`} asChild>
+                            <Tooltip content={`Used the app at ${formatFullTimestamp(msg.timestamp)}`} asChild>
                               <span className="inline-flex items-center gap-3 px-1.5 py-1">
                                 <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
                                   <Plug size={16} />
                                 </span>
-                                <span>Used the gadget</span>
+                                <span>Used the app</span>
                               </span>
                             </Tooltip>
                           </div>
@@ -8249,7 +8528,7 @@ function ChatInterface({
                                       </span>
                                     </Tooltip>
                                   </button>
-                                  {isLast && msg.code === "usage_limit" && (
+                                  {isLast && !namedChild && msg.code === "usage_limit" && (
                                     <Tooltip content="Add credits to continue." asChild>
                                       <button
                                         type="button"
@@ -8261,7 +8540,7 @@ function ChatInterface({
                                       </button>
                                     </Tooltip>
                                   )}
-                                  {isLast && msg.code !== "usage_limit" && (
+                                  {isLast && !namedChild && msg.code !== "usage_limit" && (
                                     <Tooltip content="Retry the last action." asChild>
                                       <button
                                         type="button"
@@ -8287,15 +8566,13 @@ function ChatInterface({
                           })()}
 
                         {msg.type === "agentCallback" && (
-                          <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-                            <div className="flex items-center gap-3 px-1.5 py-1">
-                              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
-                                <Code size={16} />
-                              </span>
-                              <span className="min-w-0 truncate font-mono text-[13px]">
-                                self.{msg.methodName}()
-                              </span>
-                            </div>
+                          <details className={styles.activityDisclosure}>
+                            <summary>
+                              <Code size={14} aria-hidden="true" />
+                              Bot task started
+                              <CaretRight size={12} aria-hidden="true" className={styles.disclosureCaret} />
+                            </summary>
+                            <p className="mt-2 font-mono text-[12px]">self.{msg.methodName}()</p>
                             {msg.argsSummary && (
                               <div className="ml-8 mt-1">
                                 <pre className="max-h-24 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
@@ -8303,7 +8580,7 @@ function ChatInterface({
                                 </pre>
                               </div>
                             )}
-                          </div>
+                          </details>
                         )}
                         </div>
                       );
@@ -8344,7 +8621,7 @@ function ChatInterface({
                                   Discard
                                 </button>
                               </Tooltip>
-                              <Tooltip content="Save these edits as a draft version. They won't affect the gadget until you accept changes." asChild>
+                              <Tooltip content="Save these edits as a draft version. They won't affect the app until you accept changes." asChild>
                                 <button
                                   type="button"
                                   disabled={isAgentActive}
@@ -8394,20 +8671,20 @@ function ChatInterface({
                         : lastEntry.type === "modelChange"
                           ? "mt-2"
                           : isUserMessageEntry(lastEntry)
-                            ? "mt-5"
+                            ? "mt-6"
                             : "mt-4";
 
                       return (
                         <div className={`group/agent min-w-0 w-full max-w-[860px] space-y-2 ${provisionalTopClass}`}>
                           {isCompacting && (
                             <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
-                              Compacting…
+                              Organizing conversation context...
                             </div>
                           )}
 
                           {showThinking && (
                             <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
-                              Thinking
+                              Working...
                             </div>
                           )}
 
@@ -8416,7 +8693,7 @@ function ChatInterface({
                           )}
 
                           {currentProvisionalState?.text && (
-                            <div className={`text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
+                            <div className={`${styles.assistantMessage} ${styles.markdownContent}`}>
                               <MarkdownMessage message={currentProvisionalState.text} />
                             </div>
                           )}
@@ -8436,24 +8713,26 @@ function ChatInterface({
                                   <button
                                     type="button"
                                     onClick={() => toggleToolCallExpansion(expansionKey)}
-                                    className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+                                    className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-2 text-left text-kumo-subtle transition-colors hover:bg-kumo-elevated hover:text-kumo-default focus-visible:outline-2 focus-visible:outline-kumo-ring"
                                     aria-expanded={isExpanded}
                                   >
                                     <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
                                       <WorkIcon Icon={getToolIcon(first.toolName, first.outputFormat)} />
                                     </span>
                                     <span className="min-w-0 flex-1">
-                                      <span className="flex min-w-0 items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">
-                                        <span className="min-w-0 truncate">{label}</span>
+                                      <span className="flex min-w-0 items-center gap-2 text-[12px] leading-5">
+                                        <span>View activity</span>
+                                        <span className={styles.thinkingShimmer}>Working...</span>
                                         <CaretRight
                                           size={13}
                                           weight="bold"
                                           className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${isExpanded ? "rotate-90" : ""}`}
                                         />
                                       </span>
-                                      {detailLines.length > 1 && (
-                                        <span className="mt-1 block truncate font-mono text-[12px] leading-4 text-kumo-inactive">
-                                          {detailLines.join(" · ")}
+                                      {isExpanded && (
+                                        <span className="mt-1 block text-[12px] leading-5 text-kumo-subtle [overflow-wrap:anywhere]">
+                                          {label}
+                                          {detailLines.length > 1 && ` · ${detailLines.join(" · ")}`}
                                         </span>
                                       )}
                                     </span>
@@ -8496,10 +8775,10 @@ function ChatInterface({
                 )}
               </div>
 
-              {/* ── Bottom: input, update state, and cost ──────────────── */}
-              <div className={`flex-shrink-0 bg-kumo-base ${sidebarMode ? "" : "border-t border-kumo-line"}`}>
-                <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
-                  {selectedChatId !== null &&
+              {/* Composer and pending changes stay visible while the conversation scrolls. */}
+              <div className="flex-shrink-0 bg-kumo-base">
+                <div className={useConstrainedChatWidth ? styles.chatColumn : ""}>
+                  {selectedChatId !== null && !namedChild &&
                     ((currentChatMetadata?.queue?.length ?? 0) > 0 || currentChatMetadata?.queuePaused) && (
                     <ChatQueueTray
                       items={currentChatMetadata?.queue ?? []}
@@ -8544,6 +8823,11 @@ function ChatInterface({
                     models={availableModels}
                     selectedModel={selectedModel}
                     onModelChange={handleModelChange}
+                    botName={currentAgentProfile?.name}
+                    usage={currentChatMetadata ?? undefined}
+                    seedText={activeWorkflowSeed?.starter.prompt}
+                    seedNonce={activeWorkflowSeed?.nonce}
+                    seedMode="append"
                     pendingConsoleLogCount={pendingConsoleLogCount}
                     consoleLogPreview={consoleLogPreview}
                     consoleLogSeverity={consoleLogSeverity}
@@ -8559,7 +8843,13 @@ function ChatInterface({
                         )
                       : undefined}
                     blockedReason={
-                      hasPendingConnectionRequest
+                      namedChild
+                        ? "Send follow-up instructions in parent conversation"
+                        : !currentChatMetadata
+                        ? "Loading conversation..."
+                        : automationPaused
+                        ? "Automation is paused. The workspace owner must resume it before sending."
+                        : hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."
                         : hasPendingComputerHumanTakeover
                           ? "Complete the step in the browser and approve the request above to continue."
@@ -8600,7 +8890,7 @@ function ChatInterface({
                             ? "Wait for the agent to finish before accepting changes."
                             : isDiscardingChanges
                               ? "Wait for pending changes to finish discarding."
-                              : "Keep this draft and make it the gadget's current version."} asChild>
+                              : "Keep this draft and make it the app's current version."} asChild>
                             <WorkshopButton
                               disabled={changesActionsDisabled}
                               onClick={() => handleMergeChanges()}
@@ -8618,23 +8908,27 @@ function ChatInterface({
                     agentId={selectedMemberAgentId || undefined}
                   />
 
-                  {/* Token / cost summary. */}
-                  <div className="-mt-1 flex min-h-[1.25rem] items-start justify-end gap-4 px-4 pb-1 font-mono text-[11px] leading-4 text-kumo-inactive">
-                    {currentChatMetadata?.totalTokens != null && (
-                      <span>
-                        {currentChatMetadata.totalTokens.toLocaleString()} tokens
-                      </span>
-                    )}
-                    {currentChatMetadata?.totalCost != null && (
-                      <span>${currentChatMetadata.totalCost.toFixed(4)}</span>
-                    )}
-                  </div>
                 </div>
               </div>
             </>
           )}
         </div>
       ) : null}
+
+      {!namedChild && repeatTask && repeatTask.chatId === selectedChatId && repeatTask.agent.workspaceId === workspaceId && (
+        <CreateRoutineModal
+          agent={repeatTask.agent}
+          initialName={repeatTask.name}
+          initialPrompt={repeatTask.prompt}
+          onClose={() => setRepeatTask((current) => current === repeatTask ? null : current)}
+          onCreated={(routine) => {
+            setRoutineReceipts((current) => [...current, {
+              chatId: repeatTask.chatId, sequence: repeatTask.sequence, routine,
+            }]);
+            setRepeatTask((current) => current === repeatTask ? null : current);
+          }}
+        />
+      )}
 
       {/* An accept came back stale: mainline advanced past this chat's pins, so the changes can
           only land after merging the gadget's current version into the chat first. */}
@@ -8651,7 +8945,7 @@ function ChatInterface({
           <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
             <div className="min-w-0">
               <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
-                The gadget changed since this draft started
+                The app changed since this draft started
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
                 Someone else&apos;s changes were accepted in the meantime, so this draft&apos;s
@@ -8712,8 +9006,10 @@ function ChatInterface({
       {autoApproveConfirm && (
         <AutoApproveConfirmDialog
           open
-          actionLabel={autoApproveConfirm.actionLabel}
+          actionKind={autoApproveConfirm.actionKind}
+          gatekeeperId={autoApproveConfirm.gatekeeperId}
           resourceTitle={autoApproveConfirm.resourceTitle}
+          resourceUrl={autoApproveConfirm.resourceUrl}
           isProcessing={processingActions.has(autoApproveConfirm.actionId)}
           onOpenChange={(open) => {
             if (!open) setAutoApproveConfirm(null);
@@ -8731,7 +9027,7 @@ function ChatInterface({
           creation, finalizes the request so the agent resumes. */}
       <GatekeeperModal
         open={connectionAccept !== null}
-        onClose={() => setConnectionAccept(null)}
+        onClose={() => setConnectionAccept((current) => current === connectionAccept ? null : current)}
         getOverseer={getOverseer}
         onCreated={handleConnectionCreated}
         workspaceId={workspaceId}
@@ -8739,12 +9035,13 @@ function ChatInterface({
         initialVendorId={connectionAccept?.vendorId}
         initialResourceUrl={connectionAccept?.resourceUrl}
         initialResourceUrlPattern={connectionAccept?.resourceUrlPattern}
+        connectionRequest={connectionAccept ?? undefined}
       />
       <OutOfCreditsModal
         open={usageModalOpen}
         onClose={() => setUsageModalOpen(false)}
       />
-      {!hideComputerOverlay && showComputer && (currentAgentProfile?.id || selectedMemberAgentId) && (
+      {!namedChild && !hideComputerOverlay && showComputer && (currentAgentProfile?.id || selectedMemberAgentId) && (
         <ComputerView
           agentId={selectedMemberAgentId || currentAgentProfile?.id || ''}
           overseer={getOverseer()}

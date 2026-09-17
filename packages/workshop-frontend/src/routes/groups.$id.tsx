@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import type { Group } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
 import GadgetEditor from '../GadgetEditor'
 import { persistLastThread } from '../lastThread'
 import { logRpcFailure } from '../rpcErrors'
 import { useDocumentTitle } from '../useDocumentTitle'
+import { WorkshopButton } from '../components/WorkshopControls'
 
 type ThreadSearch = {
   chat?: number
@@ -36,43 +37,66 @@ export const Route = createFileRoute('/groups/$id')({
 function GroupThreadPage() {
   const { id } = Route.useParams()
   const { authenticatedApi } = useAuthenticatedApi()
-  const [group, setGroup] = useState<Group | null>(null)
-  const [missing, setMissing] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const [load, setLoad] = useState({
+    api: authenticatedApi, id, group: null as Group | null,
+    status: 'loading' as 'loading' | 'ready' | 'error',
+  })
+  const sameIdentity = load.api === authenticatedApi && load.id === id
+  if (!sameIdentity) {
+    setLoad({ api: authenticatedApi, id, group: null, status: 'loading' })
+  }
+  const group = sameIdentity ? load.group : null
 
   useDocumentTitle(group?.name)
 
   useEffect(() => {
-    let cancelled = false
+    let request = 0
     persistLastThread({ kind: 'group', id })
-    authenticatedApi.listGroups()
-      .then((groups: Group[]) => {
-        if (cancelled) return
-        const found = groups.find((item) => item.id === id) ?? null
-        setGroup(found)
-        setMissing(found === null)
-      })
-      .catch((err: unknown) => {
-        logRpcFailure('Failed to load group:', err)
-        if (!cancelled) setMissing(true)
-      })
-    return () => { cancelled = true }
-  }, [authenticatedApi, id])
-
-  if (missing) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-kumo-subtle">Group not found</p>
-      </div>
-    )
-  }
+    const refresh = () => {
+      const current = ++request
+      setLoad(previous => ({ ...previous, status: 'loading' }))
+      authenticatedApi.listGroups()
+        .then((groups: Group[]) => {
+          if (current !== request) return
+          setLoad({ api: authenticatedApi, id, group: groups.find(item => item.id === id) ?? null, status: 'ready' })
+        })
+        .catch((err: unknown) => {
+          if (current !== request) return
+          logRpcFailure('Failed to load group:', err)
+          setLoad(previous => ({ ...previous, status: 'error' }))
+        })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => { ++request; window.removeEventListener('focus', refresh) }
+  }, [authenticatedApi, id, attempt])
 
   if (!group) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
+        {load.status === 'loading' ? (
+          <p role="status" className="text-sm text-kumo-subtle">Loading group...</p>
+        ) : load.status === 'error' ? (
+          <p role="alert" className="text-sm text-kumo-subtle">Could not load group.</p>
+        ) : <p className="text-sm text-kumo-subtle">Group not found</p>}
+        {load.status === 'error' && <WorkshopButton onClick={() => setAttempt(value => value + 1)}>Retry</WorkshopButton>}
+        <Link to="/agents" search={{}} className="text-sm text-kumo-link">Back to bots</Link>
       </div>
     )
   }
 
-  return <GadgetEditor workspaceId={group.workspaceId} messenger={{ group }} />
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {load.status !== 'ready' && <div className="flex items-center gap-3 px-4 py-2 text-sm text-kumo-subtle">
+        <p role={load.status === 'error' ? 'alert' : 'status'}>
+          {load.status === 'error' ? 'Could not refresh group. Showing previously loaded details.' : 'Refreshing group...'}
+        </p>
+        <WorkshopButton disabled={load.status === 'loading'} onClick={() => setAttempt(value => value + 1)}>Retry</WorkshopButton>
+      </div>}
+      <div className="min-h-0 flex-1">
+        <GadgetEditor workspaceId={group.workspaceId} messenger={{ group }} />
+      </div>
+    </div>
+  )
 }

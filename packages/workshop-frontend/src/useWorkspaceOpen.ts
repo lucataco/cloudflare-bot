@@ -47,6 +47,9 @@ export function useWorkspaceOpen({
 }: Options) {
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
+  const [metadataSource, setMetadataSource] = useState<{ id: string; authenticatedApi: RpcStub<AuthenticatedApi> } | null>(null)
+  // Owner flags from the previous session/workspace cannot authorize controls while opening anew.
+  const currentMetadata = metadataSource?.id === id && metadataSource?.authenticatedApi === authenticatedApi ? metadata : null
   const [error, setError] = useState<WorkspaceLoadError | null>(null)
   const [connectionLost, setConnectionLost] = useState(false)
   const [observerConfig, setObserverConfig] = useState<ObserverConfigState | null>(null)
@@ -56,7 +59,7 @@ export function useWorkspaceOpen({
   const callbacksRef = useRef({ onMetadata, onShareKeyConsumed, onInvalidShareKey })
   callbacksRef.current = { onMetadata, onShareKeyConsumed, onInvalidShareKey }
 
-  useDocumentTitle(skipDocumentTitle ? null : (error ? '' : metadata?.title))
+  useDocumentTitle(skipDocumentTitle ? null : (error ? '' : currentMetadata?.title))
 
   useEffect(() => {
     let overseerStub: RpcStub<Overseer> | null = null
@@ -124,6 +127,7 @@ export function useWorkspaceOpen({
 
         const resolvedSubscription = await overseerStub.subscribeToMetadata((nextMetadata) => {
           if (cancelled) return
+          setMetadataSource({ id, authenticatedApi })
           setMetadata(nextMetadata)
           callbacksRef.current.onMetadata(nextMetadata)
         })
@@ -183,7 +187,7 @@ export function useWorkspaceOpen({
 
   return {
     overseer,
-    metadata,
+    metadata: currentMetadata,
     error,
     connectionLost,
     observerConfig,

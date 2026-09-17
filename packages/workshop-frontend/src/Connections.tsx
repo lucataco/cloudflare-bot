@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
   Pencil,
@@ -47,6 +47,8 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [hooks, setHooks] = useState<BoundHookInfo[]>([])
   const vendorBranding = useVendorBranding(authenticatedApi)
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState(false)
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
@@ -55,8 +57,42 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
   const toasts = useKumoToastManager()
+  const [scope, setScope] = useState({ gadget, overseer, authenticatedApi, chatId })
+  const activeScope = useRef<typeof scope | null>(scope)
+  const loadSequence = useRef(0)
+
+  if (scope.gadget !== gadget || scope.chatId !== chatId) {
+    // A replacement gadget establishes the new session pair; a chat change alone cannot.
+    setScope(scope.gadget !== gadget ? { gadget, overseer, authenticatedApi, chatId } : { ...scope, chatId })
+    setBindings([])
+    setGadgetInfo(null)
+    setHooks([])
+    setLoaded(false)
+    setLoading(true)
+    setLoadError(false)
+    setEditingBinding(null)
+    setEditValue('')
+    setDeleteTarget(null)
+    setDeleteHookTarget(null)
+    setTogglingHooks(new Set())
+    setAnnotationTarget(null)
+    setIsNewConnectionModalVisible(false)
+  }
+  const ready = scope.gadget === gadget && scope.chatId === chatId
+    && scope.overseer === overseer && scope.authenticatedApi === authenticatedApi
+  const controlsDisabled = !ready || loading || loadError
+
+  // Invalidate reads and mutation continuations even during the intermediate reconnect render.
+  useLayoutEffect(() => {
+    activeScope.current = ready ? scope : null
+    return () => { activeScope.current = null; ++loadSequence.current }
+  }, [scope, ready])
 
   const loadGatekeepers = async () => {
+    if (activeScope.current !== scope) return
+    const sequence = ++loadSequence.current
+    const current = () => activeScope.current === scope && sequence === loadSequence.current
+    setLoading(true)
     try {
       const [id, gadgetTitle, bindingList, hookList] = await Promise.all([
         gadget.getId(),
@@ -66,24 +102,27 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         // Workspace-wide; filtered to this gadget below.
         overseer.listHooks(),
       ])
+      if (!current()) return
       setGadgetInfo({ id, title: gadgetTitle })
       setBindings(bindingList)
       // This tab shows one gadget, so drop hooks that wake a different one -- otherwise its
       // toggle/delete controls would operate on another gadget's hooks.
       setHooks(hookList.filter((hook) => hook.gadgetId === id))
+      setLoaded(true)
+      setLoadError(false)
       onHasGatekeepersChange?.(bindingList.length > 0)
     } catch (err) {
-      // Loud on purpose: this panel has no retry path, so a quieted transient failure would
-      // silently render "no connected resources".
+      if (!current()) return
       console.error('Failed to load gatekeepers:', err)
       reportIssue('connections.load', err)
-      toasts.add({ title: 'Failed to load connections', variant: 'error' })
+      setLoadError(true)
     } finally {
-      setLoading(false)
+      if (current()) setLoading(false)
     }
   }
 
   const handleToggleHook = async (id: number, enabled: boolean) => {
+    if (controlsDisabled || activeScope.current !== scope) return
     // Optimistically reflect the new state.
     setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled } : h)))
     setTogglingHooks((prev) => new Set(prev).add(id))
@@ -95,12 +134,13 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       }
       await loadGatekeepers()
     } catch (err) {
+      if (activeScope.current !== scope) return
       console.error('Failed to toggle hook:', err)
       toasts.add({ title: `Failed to ${enabled ? 'enable' : 'disable'} hook`, variant: 'error' })
       // Revert optimistic update.
       setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled: !enabled } : h)))
     } finally {
-      setTogglingHooks((prev) => {
+      if (activeScope.current === scope) setTogglingHooks((prev) => {
         const next = new Set(prev)
         next.delete(id)
         return next
@@ -109,15 +149,16 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   }
 
   const handleDeleteHookConfirm = async () => {
-    if (!deleteHookTarget) return
+    if (!deleteHookTarget || controlsDisabled || activeScope.current !== scope) return
     try {
       await overseer.deleteHook(deleteHookTarget.id)
       await loadGatekeepers()
     } catch (err) {
+      if (activeScope.current !== scope) return
       console.error('Failed to delete hook:', err)
       toasts.add({ title: 'Failed to delete hook', variant: 'error' })
     } finally {
-      setDeleteHookTarget(null)
+      if (activeScope.current === scope) setDeleteHookTarget(null)
     }
   }
 
@@ -128,15 +169,14 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   // again once the live stub showed up, leaving the panel showing pre-disconnect state. Keying on
   // the derived stub can't observe that intermediate render, and a new overseer always yields a
   // new gadget stub, so reconnects are still covered.
-  useEffect(() => {
-    loadGatekeepers()
-  }, [gadget, chatId])
-
   // Re-load when the tab becomes visible, so hooks enabled elsewhere (e.g. from the Activity log)
-  // show up without a full page reload.
+  // show up without a full page reload. Keep rows and drafts mounted during these read-only loads.
   useEffect(() => {
-    if (isVisible) loadGatekeepers()
-  }, [isVisible])
+    void loadGatekeepers()
+    const onFocus = () => { if (isVisible !== false) void loadGatekeepers() }
+    window.addEventListener('focus', onFocus)
+    return () => { ++loadSequence.current; window.removeEventListener('focus', onFocus) }
+  }, [gadget, chatId, isVisible])
 
 
   // What an agent spawner created here may offer its agents: this gadget itself (under the same
@@ -161,6 +201,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   }
 
   const handleEditSave = async (name: string) => {
+    if (controlsDisabled || activeScope.current !== scope) return
     const newName = editValue.trim()
     if (!newName) {
       toasts.add({ title: 'Binding name cannot be empty', variant: 'error' })
@@ -174,12 +215,13 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     try {
       await gadget.renameBinding(name, newName)
       await loadGatekeepers()
-      onConnectionsChange?.()
+      if (activeScope.current === scope) onConnectionsChange?.()
     } catch (err) {
+      if (activeScope.current !== scope) return
       console.error('Failed to rename binding:', err)
       toasts.add({ title: 'Failed to update binding name', variant: 'error' })
     } finally {
-      setEditingBinding(null)
+      if (activeScope.current === scope) setEditingBinding(null)
     }
   }
 
@@ -189,17 +231,22 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   }
 
   const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return
+    if (!deleteTarget || controlsDisabled || activeScope.current !== scope) return
     try {
       await gadget.unbind(deleteTarget.name)
       await loadGatekeepers()
-      onConnectionsChange?.()
+      if (activeScope.current === scope) onConnectionsChange?.()
     } catch (err) {
+      if (activeScope.current !== scope) return
       console.error('Failed to remove binding:', err)
       toasts.add({ title: 'Failed to remove connection', variant: 'error' })
     } finally {
-      setDeleteTarget(null)
+      if (activeScope.current === scope) setDeleteTarget(null)
     }
+  }
+
+  if (!ready) {
+    return <p role="status" className="p-4 text-sm text-kumo-subtle">Waiting for connections to reconnect...</p>
   }
 
   return (
@@ -215,27 +262,36 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                 External resources this gadget can use.
               </p>
             </div>
-            <WorkshopButton
-              tone="primary"
-              onClick={() => setIsNewConnectionModalVisible(true)}
-              className="self-start"
-            >
-              Connect resource
-            </WorkshopButton>
+            <div className="flex gap-2 self-start">
+              <WorkshopButton onClick={() => void loadGatekeepers()} disabled={loading}>
+                {loading ? 'Refreshing...' : loadError ? 'Retry' : 'Refresh'}
+              </WorkshopButton>
+              <WorkshopButton
+                tone="primary"
+                disabled={controlsDisabled}
+                onClick={() => setIsNewConnectionModalVisible(true)}
+              >
+                Connect resource
+              </WorkshopButton>
+            </div>
           </div>
 
-          {loading ? (
-            <div className="rounded-xl border border-kumo-line bg-kumo-base px-4 py-6 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+          {loadError && <p role="alert" className="mb-3 text-sm text-kumo-danger">
+            {loaded ? 'Could not refresh connections. Showing previously loaded connections; these may be out of date.' : 'Could not load connections.'}
+          </p>}
+          {loading && loaded && <p role="status" className="mb-3 text-sm text-kumo-subtle">Refreshing connections...</p>}
+          {loading && !loaded ? (
+            <div role="status" className="rounded-xl border border-kumo-line bg-kumo-base px-4 py-6 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
               Loading connections...
             </div>
-          ) : bindings.length === 0 ? (
+          ) : !loaded ? null : bindings.length === 0 ? (loadError || loading ? null : (
             <EmptyState
               title="No connected resources"
               description="Connect Google Docs, GitHub, Google Sheets, and other services so this gadget can safely use external data."
               actionLabel="Connect resource"
               onAction={() => setIsNewConnectionModalVisible(true)}
             />
-          ) : (
+          )) : (
             <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
               {bindings.map((gk, index) => {
                 const isEditing = editingBinding === gk.name
@@ -263,6 +319,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           tone="danger"
                           className="min-w-[68px]"
                           onClick={handleDeleteConfirm}
+                          disabled={controlsDisabled}
                         >
                           Delete
                         </WorkshopButton>
@@ -291,7 +348,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           tone="primary"
                           className="!h-8"
                           onClick={() => handleEditSave(gk.name)}
-                          disabled={!editValue.trim()}
+                          disabled={controlsDisabled || !editValue.trim()}
                         >
                           Save
                         </WorkshopButton>
@@ -327,6 +384,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           <Tooltip content="Edit name used in code" asChild>
                             <WorkshopIconButton
                               onClick={() => handleEditStart(gk.name)}
+                              disabled={controlsDisabled}
                               aria-label="Edit name used in code"
                             >
                               <Pencil size={14} />
@@ -336,6 +394,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                             <Tooltip content="Edit blueprint settings" asChild>
                               <WorkshopIconButton
                                 onClick={() => setAnnotationTarget(gk)}
+                                disabled={controlsDisabled}
                                 aria-label="Edit blueprint settings"
                               >
                                 <Blueprint size={14} />
@@ -346,6 +405,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                             <WorkshopIconButton
                               danger
                               onClick={() => setDeleteTarget({ name: gk.name, resourceTitle: gk.resourceTitle })}
+                              disabled={controlsDisabled}
                               aria-label="Delete connection"
                             >
                               <Trash size={14} />
@@ -361,7 +421,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
           )}
         </section>
 
-        {!loading && hooks.length > 0 && (
+        {loaded && hooks.length > 0 && (
           <section className="mt-8">
             <div className="mb-3">
               <h2 className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
@@ -396,6 +456,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           tone="danger"
                           className="min-w-[68px]"
                           onClick={handleDeleteHookConfirm}
+                          disabled={controlsDisabled}
                         >
                           Delete
                         </WorkshopButton>
@@ -430,13 +491,14 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         <div className="ml-auto flex shrink-0 items-center gap-2">
                           <HookToggle
                             enabled={hook.enabled}
-                            disabled={togglingHooks.has(hook.id)}
+                            disabled={controlsDisabled || togglingHooks.has(hook.id)}
                             onToggle={(enabled) => handleToggleHook(hook.id, enabled)}
                           />
                           <Tooltip content="Delete hook" asChild>
                             <WorkshopIconButton
                               danger
                               onClick={() => setDeleteHookTarget({ id: hook.id, title: hook.description.title })}
+                              disabled={controlsDisabled}
                               aria-label="Delete hook"
                             >
                               <Trash size={14} />
@@ -462,7 +524,9 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         onCreated={async (gk) => {
           try {
             const gatekeeperId = await gk.getId()
+            if (activeScope.current !== scope) return
             await gadget.bindWithSuggestedName(gatekeeperId, chatId)
+            if (activeScope.current !== scope) return
             toasts.add({
               title: chatId === undefined
                 ? 'Connection created successfully'
@@ -470,7 +534,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
               variant: 'success',
             })
             await loadGatekeepers()
-            onConnectionsChange?.()
+            if (activeScope.current === scope) onConnectionsChange?.()
           } finally {
             gk[Symbol.dispose]()
           }
@@ -480,8 +544,10 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       <BlueprintAnnotationModal
         target={annotationTarget}
         gadget={gadget}
+        disabled={controlsDisabled}
         onClose={() => setAnnotationTarget(null)}
         onSaved={() => {
+          if (activeScope.current !== scope) return
           toasts.add({ title: 'Blueprint settings saved.', variant: 'success' })
           setAnnotationTarget(null)
         }}
@@ -494,11 +560,13 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
 function BlueprintAnnotationModal({
   target,
   gadget,
+  disabled,
   onClose,
   onSaved,
 }: {
   target: GadgetBindingInfo | null
   gadget: RpcStub<GadgetClient>
+  disabled: boolean
   onClose: () => void
   onSaved: () => void
 }) {
@@ -538,7 +606,7 @@ function BlueprintAnnotationModal({
   }, [target, gadget])
 
   const handleSave = async () => {
-    if (!data || !target) return
+    if (!data || !target || disabled) return
     setSaving(true)
     setSaveError(null)
     try {
@@ -610,7 +678,7 @@ function BlueprintAnnotationModal({
               <WorkshopButton
                 tone="primary"
                 onClick={handleSave}
-                disabled={saving || !data}
+                disabled={disabled || saving || !data}
               >
                 {saving ? 'Saving...' : 'Save'}
               </WorkshopButton>

@@ -9,6 +9,7 @@
     "test:run": "vitest run"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
     "@cloudflare/kumo": "^2.9.2",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-cpp": "^6.0.3",

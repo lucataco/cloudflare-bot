@@ -1,158 +1,160 @@
-import { useState, useEffect } from 'react'
-import { useAuthenticatedApi } from '../AuthContext'
-import { AgentRoutine, AgentProfile } from '@gadgets/workshop-shared/api'
-import { Plus, Pause, Play, Trash, Clock } from '@phosphor-icons/react'
+import { useState, useEffect, useEffectEvent } from 'react'
+import type { AgentRoutine, AgentProfile } from '@gadgets/workshop-shared/api'
+import { Plus, Pause, Play, Trash, Clock, PencilSimple } from '@phosphor-icons/react'
 import CreateRoutineModal from './CreateRoutineModal'
+import DeleteConfirmationDialog from './DeleteConfirmationDialog'
+import { WorkshopButton, WorkshopIconButton } from './WorkshopControls'
+import { formatRoutineSchedule } from './routineFormat'
+import { useRoutineState } from './routineState'
 
-export default function RoutinesList({ agent }: { agent: AgentProfile }) {
-  const { authenticatedApi } = useAuthenticatedApi()
-  const [routines, setRoutines] = useState<AgentRoutine[]>([])
-  const [loading, setLoading] = useState(true)
-  const [createModalVisible, setCreateModalVisible] = useState(false)
+/** Controlled routine display, shared by the list and the conversation's creation receipt. */
+export function RoutineCard({ agent, routine: receipt, onUpdated, onDeleted, verifyOnMount = true }: {
+  agent: AgentProfile
+  routine: AgentRoutine
+  onUpdated: (routine: AgentRoutine) => void
+  onDeleted?: (routine: AgentRoutine) => void
+  /** Receipts verify by default; the list supplies its already-shared list read. */
+  verifyOnMount?: boolean
+}) {
+  const { store, state } = useRoutineState(agent.id)
+  const current = state.routines.find((entry) => entry.id === receipt.id)
+  const routine = current ?? receipt
+  const [editing, setEditing] = useState(false)
+  const [confirmEnable, setConfirmEnable] = useState<AgentRoutine | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [acting, setActing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const busy = acting || state.busy
+  const statusUnverified = !state.verified
+  const removed = state.verified && !current
+  const timePassed = routine.schedule.kind === 'once' && routine.schedule.fireAt <= Date.now()
+  const status = statusUnverified ? 'Status unverified' : removed ? 'Removed' : routine.paused ? 'Paused' : timePassed ? 'Time passed' : 'Active'
 
-  const loadRoutines = () => {
-    authenticatedApi
-      .listRoutines(agent.id)
-      .then((routineList: AgentRoutine[]) => {
-        setRoutines(routineList)
-        setLoading(false)
-      })
-      .catch((err: unknown) => {
-        console.error('Failed to load routines:', err)
-        setLoading(false)
-      })
-  }
-
+  const notifyUpdated = useEffectEvent(() => {
+    if (current && current !== receipt) onUpdated(current)
+  })
+  useEffect(() => { if (state.verified) notifyUpdated() }, [current, state.verified])
   useEffect(() => {
-    loadRoutines()
-  }, [agent.id])
+    if (verifyOnMount) void store.refresh().catch(() => {})
+  }, [store, receipt.id, verifyOnMount])
 
-  const handleTogglePause = async (routine: AgentRoutine) => {
+  const checkStatus = async (openEditor = false) => {
+    if (busy) return
+    setActing(true)
+    setError(null)
+    setConfirmEnable(null)
     try {
-      await authenticatedApi.updateRoutine(agent.id, routine.id, {
-        paused: !routine.paused,
-      })
-      loadRoutines()
+      const found = (await store.refresh()).find((entry) => entry.id === routine.id)
+      if (!found) throw new Error('This routine no longer exists.')
+      if (openEditor) setEditing(true)
     } catch (err) {
-      console.error('Failed to toggle routine:', err)
+      setError(err instanceof Error ? err.message : 'Could not verify the routine. Try again.')
+    } finally {
+      setActing(false)
     }
   }
 
-  const handleDelete = async (routine: AgentRoutine) => {
-    if (!confirm(`Delete routine "${routine.name}"?`)) return
+  const changePaused = async (paused: boolean, expected: AgentRoutine) => {
+    if (busy || statusUnverified || removed) return
+    if (!paused && expected.schedule.kind === 'once' && expected.schedule.fireAt <= Date.now()) {
+      setError('Choose a future date and time in Edit before enabling this routine.')
+      setConfirmEnable(null)
+      return
+    }
+    setActing(true)
+    setError(null)
     try {
-      await authenticatedApi.deleteRoutine(agent.id, routine.id)
-      loadRoutines()
+      await store.update(expected, { paused })
     } catch (err) {
-      console.error('Failed to delete routine:', err)
+      setError(err instanceof Error ? err.message : 'Could not change the routine status. Try again.')
+    } finally {
+      setConfirmEnable(null)
+      setActing(false)
     }
   }
 
-  const handleRoutineCreated = () => {
-    setCreateModalVisible(false)
-    loadRoutines()
-  }
-
-  const formatSchedule = (routine: AgentRoutine): string => {
-    const { schedule } = routine
-    if (schedule.kind === 'interval') {
-      const minutes = Math.floor(schedule.everyMs / 60000)
-      const hours = Math.floor(minutes / 60)
-      const days = Math.floor(hours / 24)
-      if (days > 0) return `Every ${days} day${days > 1 ? 's' : ''}`
-      if (hours > 0) return `Every ${hours} hour${hours > 1 ? 's' : ''}`
-      return `Every ${minutes} minute${minutes > 1 ? 's' : ''}`
+  const deleteRoutine = async () => {
+    if (busy) return
+    setActing(true)
+    setError(null)
+    try {
+      await store.delete(routine)
+      onDeleted?.(routine)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the routine. Try again.')
+    } finally {
+      setConfirmDelete(false)
+      setActing(false)
     }
-    if (schedule.kind === 'calendar') {
-      const { freq, hour, minute } = schedule
-      const time = hour !== undefined ? `${hour}:${minute.toString().padStart(2, '0')}` : `:${minute.toString().padStart(2, '0')}`
-      if (freq === 'hourly') return `Hourly at ${time}`
-      if (freq === 'daily') return `Daily at ${time}`
-      if (freq === 'weekly') return `Weekly at ${time}`
-    }
-    if (schedule.kind === 'once') {
-      return `Once at ${new Date(schedule.fireAt).toLocaleString()}`
-    }
-    if (schedule.kind === 'slack') {
-      let trigger = 'Slack: '
-      if (schedule.matchKind === 'mention') trigger += 'mention'
-      else if (schedule.matchKind === 'keyword') trigger += `keyword "${schedule.keyword}"`
-      else trigger += 'any message'
-      return `${trigger} in ${schedule.channelId}`
-    }
-    if (schedule.kind === 'github') {
-      return `GitHub: ${schedule.owner}/${schedule.repo} - ${schedule.events.join(', ')}`
-    }
-    return 'Unknown schedule'
-  }
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center p-8">
-        <div className="w-6 h-6 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-      </div>
-    )
   }
 
   return (
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-kumo-default">Routines</h2>
-        <button
-          onClick={() => setCreateModalVisible(true)}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-kumo-on-brand bg-kumo-brand rounded hover:opacity-90"
-        >
-          <Plus size={16} weight="bold" />
-          Create Routine
-        </button>
+    <article aria-label={routine.name} className="min-w-0 rounded-lg border border-kumo-line bg-kumo-base p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <h3 className="break-words text-sm font-medium text-kumo-default">{routine.name}</h3>
+          <p className="mt-0.5 break-words text-xs text-kumo-subtle">{agent.name}</p>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${status === 'Active' ? 'bg-kumo-success-tint text-kumo-success' : 'bg-kumo-tint text-kumo-subtle'}`}>{status}</span>
       </div>
+      <p className="mt-2 break-words text-xs leading-5 text-kumo-subtle">{formatRoutineSchedule(routine.schedule)}</p>
+      <p className="mt-2 line-clamp-3 whitespace-pre-wrap break-words text-sm text-kumo-default">{routine.prompt}</p>
+      {timePassed && <p className="mt-2 text-xs text-kumo-subtle">The scheduled time has passed. Edit to choose a future run; this is not a completion receipt.</p>}
+      {!removed && <div className="mt-3 flex flex-wrap items-center gap-2">
+        <WorkshopButton disabled={busy || !!confirmEnable} onClick={() => checkStatus(true)} className="gap-1.5"><PencilSimple size={14} />Edit</WorkshopButton>
+        {statusUnverified ? <WorkshopButton disabled={busy || editing} onClick={() => checkStatus()}>{busy ? 'Checking status...' : 'Retry status check'}</WorkshopButton> : !timePassed && <WorkshopButton disabled={busy || !!confirmEnable} onClick={() => {
+          if (routine.paused) { setError(null); setConfirmEnable(routine) }
+          else void changePaused(true, routine)
+        }} className="gap-1.5">{routine.paused ? <Play size={14} /> : <Pause size={14} />}{routine.paused ? 'Resume' : 'Pause'}</WorkshopButton>}
+        {onDeleted && <WorkshopIconButton aria-label={`Delete ${routine.name}`} danger disabled={busy || !!confirmEnable || statusUnverified} onClick={() => setConfirmDelete(true)}><Trash size={16} /></WorkshopIconButton>}
+      </div>}
+      {confirmEnable && (
+        <div className="mt-3 rounded-lg bg-kumo-tint p-3 text-sm">
+          <p className="font-medium">Enable this routine?</p>
+          <p className="mt-1 text-xs leading-5 text-kumo-subtle">{agent.name} will run this task automatically on the schedule above. Actions follow this workspace&apos;s existing approval rules, not blanket approval.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <WorkshopButton disabled={busy} onClick={() => { setConfirmEnable(null); setError(null) }}>Cancel</WorkshopButton>
+            <WorkshopButton tone="primary" disabled={busy || statusUnverified || removed} onClick={() => changePaused(false, confirmEnable)}>{busy ? 'Enabling...' : 'Confirm and enable'}</WorkshopButton>
+          </div>
+        </div>
+      )}
+      {error && <p role="alert" className="mt-3 rounded-lg bg-kumo-danger-tint p-3 text-sm text-kumo-danger">{error}</p>}
+      {statusUnverified && <p role="alert" className="mt-3 text-sm text-kumo-danger">This routine may be paused, and its details may have changed. Retry the status check or edit the draft; pause/resume is unavailable until its status is verified.</p>}
+      {editing && <CreateRoutineModal agent={agent} routine={routine} onClose={() => setEditing(false)} onCreated={() => setEditing(false)} />}
+      {confirmDelete && <DeleteConfirmationDialog open title={`Delete "${routine.name}"?`} description="This routine will stop running and be removed. Existing conversations are kept." isDeleting={busy} onOpenChange={setConfirmDelete} onConfirm={deleteRoutine} />}
+    </article>
+  )
+}
 
-      {routines.length === 0 ? (
-        <div className="text-center py-8 text-kumo-subtle">
-          <Clock size={48} className="mx-auto mb-2 opacity-50" />
-          <p>No routines yet</p>
-          <p className="text-sm mt-1">Create a routine to run tasks on a schedule</p>
+export default function RoutinesList({ agent }: { agent: AgentProfile }) {
+  const { store, state } = useRoutineState(agent.id)
+  const { routines, error } = state
+  const [createModalVisible, setCreateModalVisible] = useState(false)
+
+  useEffect(() => {
+    setCreateModalVisible(false)
+    void store.refresh().catch(() => {})
+  }, [store])
+
+  return (
+    <div className="p-4">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-medium text-kumo-default">Routines</h2>
+        <WorkshopButton tone="primary" disabled={state.busy || !state.verified} onClick={() => setCreateModalVisible(true)} className="gap-1.5"><Plus size={16} />Create routine</WorkshopButton>
+      </div>
+      {error && <div><p role="alert" className="mb-3 text-sm text-kumo-danger">{error}</p><WorkshopButton disabled={state.busy} onClick={() => { void store.refresh().catch(() => {}) }}>Try again</WorkshopButton></div>}
+      {state.busy && routines.length === 0 ? <p role="status" className="py-8 text-center text-sm text-kumo-subtle">Loading routines...</p> : state.verified && routines.length === 0 ? (
+        <div className="py-8 text-center text-kumo-subtle">
+          <Clock size={32} className="mx-auto mb-2" />
+          <p className="text-sm font-medium">No routines yet</p>
+          <p className="mt-1 text-xs">Give {agent.name} a task to run on a schedule.</p>
         </div>
       ) : (
-        <div className="space-y-2">
-          {routines.map((routine) => (
-            <div
-              key={routine.id}
-              className="flex items-center gap-3 p-3 border border-kumo-border rounded hover:bg-kumo-surface-hover"
-            >
-              <div className="flex-1">
-                <div className="font-medium text-kumo-default">{routine.name}</div>
-                <div className="text-sm text-kumo-subtle mt-0.5">{formatSchedule(routine)}</div>
-                <div className="text-sm text-kumo-subtle mt-1 line-clamp-1">{routine.prompt}</div>
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => handleTogglePause(routine)}
-                  className="p-2 text-kumo-subtle hover:text-kumo-default hover:bg-kumo-surface-hover rounded"
-                  title={routine.paused ? 'Resume' : 'Pause'}
-                >
-                  {routine.paused ? <Play size={18} weight="fill" /> : <Pause size={18} weight="fill" />}
-                </button>
-                <button
-                  onClick={() => handleDelete(routine)}
-                  className="p-2 text-kumo-subtle hover:text-kumo-danger-default hover:bg-kumo-surface-hover rounded"
-                  title="Delete"
-                >
-                  <Trash size={18} />
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="space-y-3">
+          {routines.map((routine) => <RoutineCard key={routine.id} agent={agent} routine={routine} verifyOnMount={false} onUpdated={() => {}} onDeleted={() => {}} />)}
         </div>
       )}
-
-      {createModalVisible && (
-        <CreateRoutineModal
-          agent={agent}
-          onClose={() => setCreateModalVisible(false)}
-          onCreated={handleRoutineCreated}
-        />
-      )}
+      {createModalVisible && <CreateRoutineModal agent={agent} onClose={() => setCreateModalVisible(false)} onCreated={() => setCreateModalVisible(false)} />}
     </div>
   )
 }

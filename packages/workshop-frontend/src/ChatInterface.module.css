@@ -21,7 +21,7 @@
 
 .markdownContent code {
   background-color: var(--color-kumo-tint);
-  color: var(--color-kumo-brand);
+  color: var(--text-color-kumo-default);
   padding: 0.15em 0.4em;
   border-radius: 4px;
   font-family: var(--font-mono, monospace);
@@ -106,7 +106,7 @@
 }
 
 .markdownContent a {
-  color: var(--color-kumo-brand);
+  color: var(--text-color-kumo-link);
   text-decoration: none;
 }
 .markdownContent a:hover { text-decoration: underline; }
@@ -145,14 +145,58 @@
   container-type: inline-size;
 }
 
-.attachLabelText {
-  display: inline;
+.chatColumn {
+  width: 100%;
+  max-width: 48rem;
+  margin-inline: auto;
 }
 
-@container (max-width: 460px) {
-  .attachLabelText {
-    display: none;
-  }
+.assistantMessage {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 1rem;
+  border-top-left-radius: 0.375rem;
+  padding: 0.875rem 1rem;
+  background: var(--color-kumo-elevated);
+  color: var(--text-color-kumo-default);
+  font-size: 0.875rem;
+  line-height: 1.65;
+}
+
+.activityDisclosure {
+  min-width: 0;
+  color: var(--text-color-kumo-subtle);
+}
+
+.activityDisclosure > summary {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.375rem;
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  list-style: none;
+  cursor: pointer;
+}
+
+.activityDisclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.activityDisclosure > summary:hover {
+  background: var(--color-kumo-elevated);
+  color: var(--text-color-kumo-default);
+}
+
+.activityDisclosure > summary:focus-visible {
+  outline: 2px solid var(--color-kumo-ring);
+  outline-offset: 2px;
+}
+
+.activityDisclosure[open] > summary .disclosureCaret {
+  transform: rotate(90deg);
 }
 
 /* ── Streaming placeholder ────────────────────────────────────────────────── */

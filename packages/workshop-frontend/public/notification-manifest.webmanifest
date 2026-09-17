@@ -1,0 +1,43 @@
+{
+  "name": "Cloudflare OS",
+  "short_name": "Bots",
+  "description": "Your bots, inbox, approvals and computers.",
+  "id": "/attention",
+  "start_url": "/agents",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ff4801",
+  "categories": [
+    "productivity",
+    "utilities"
+  ],
+  "icons": [
+    {
+      "src": "/app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Inbox & approvals",
+      "url": "/attention"
+    },
+    {
+      "name": "My bots",
+      "url": "/agents"
+    },
+    {
+      "name": "Computers",
+      "url": "/computers"
+    }
+  ]
+}

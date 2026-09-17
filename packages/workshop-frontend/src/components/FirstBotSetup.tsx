@@ -1,3 +1,4 @@
+import ImportGrokBot from './ImportGrokBot'
 import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Button, Input, Textarea, Select, useKumoToastManager } from '@cloudflare/kumo'
@@ -6,24 +7,7 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { notifyAgentsChanged } from '../agentsChanged'
 import { persistLastThread } from '../lastThread'
 import { logRpcFailure } from '../rpcErrors'
-
-export const FIRST_BOT_SUGGESTIONS = [
-  {
-    name: 'Alex',
-    title: 'Builder',
-    description: 'Turns prompts into working gadgets and iterates until they ship.',
-  },
-  {
-    name: 'Riley',
-    title: 'Researcher',
-    description: 'Reads, summarizes, and keeps a trail of sources.',
-  },
-  {
-    name: 'Sam',
-    title: 'Operator',
-    description: 'Runs routines, watches inboxes, and follows up without being asked.',
-  },
-] as const
+import { FIRST_BOT_SUGGESTIONS, TOOL_SURVEY, suggestedTeammates } from './botRolePresets'
 
 export default function FirstBotSetup({
   onCreated,
@@ -39,6 +23,7 @@ export default function FirstBotSetup({
   const [title, setTitle] = useState<string>(FIRST_BOT_SUGGESTIONS[0].title)
   const [description, setDescription] = useState<string>(FIRST_BOT_SUGGESTIONS[0].description)
   const [defaultModelId, setDefaultModelId] = useState<string>('')
+  const [tools, setTools] = useState<string[]>([])
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
@@ -98,7 +83,7 @@ export default function FirstBotSetup({
   }
 
   const modelOptions = [
-    { value: '', label: 'Human only (no AI)' },
+    { value: '', label: 'Automatic: use an available model' },
     ...models.map((model) => ({ value: model.id, label: model.name })),
   ]
 
@@ -109,11 +94,26 @@ export default function FirstBotSetup({
           Create your first bot
         </h1>
         <p className="mt-2 text-[13px] leading-[18px] text-kumo-subtle">
-          A bot is a persistent teammate — not a chat session. Pick a role or name your own.
+          Give your bot a job. It keeps its instructions and chat history so you can keep working together.
         </p>
 
+        <ImportGrokBot api={authenticatedApi} disabled={submitting} onPreview={bot => {
+          setName(bot.name); setTitle(bot.title); setDescription(bot.description)
+          setCustom(true); setSelectedIndex(-1)
+        }} />
+        <fieldset className="mt-6 rounded-xl border border-kumo-line p-4">
+          <legend className="px-1 text-sm font-medium">Which tools do you work with?</legend>
+          <p className="mb-3 text-xs text-kumo-subtle">Optional: choose tools to suggest teammates. You can connect accounts after creating your bot.</p>
+          <div className="flex flex-wrap gap-3">
+            {TOOL_SURVEY.map(tool => <label key={tool.id} className="flex min-h-10 items-center gap-2 text-sm">
+              <input type="checkbox" checked={tools.includes(tool.id)} onChange={e => setTools(current => e.target.checked ? [...current, tool.id] : current.filter(id => id !== tool.id))} />
+              {tool.label}
+            </label>)}
+          </div>
+        </fieldset>
         <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-3">
-          {FIRST_BOT_SUGGESTIONS.map((suggestion, index) => {
+          {suggestedTeammates(tools).map((suggestion) => {
+            const index = suggestion.index
             const selected = !custom && selectedIndex === index
             return (
               <button
@@ -128,6 +128,7 @@ export default function FirstBotSetup({
               >
                 <p className="text-[13px] font-medium text-kumo-default">{suggestion.name}</p>
                 <p className="mt-0.5 text-[12px] text-kumo-subtle">{suggestion.title}</p>
+                {suggestion.matches.length > 0 && <p className="mt-2 text-xs text-kumo-brand">Suggested for {suggestion.matches.map(tool => tool.label).join(', ')}. {suggestion.matches[0].reason}</p>}
               </button>
             )
           })}
@@ -152,10 +153,10 @@ export default function FirstBotSetup({
             placeholder="Alex"
           />
           <Input
-            label="Title"
+            label="Job"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Builder"
+            placeholder="App builder"
           />
           <Textarea
             aria-label="Description"
@@ -182,17 +183,20 @@ export default function FirstBotSetup({
               <span className="text-[12px] font-medium text-kumo-default">Default model</span>
               <Select
                 className="w-full text-sm"
-                placeholder="Select a model"
+                placeholder="Automatic: use an available model"
                 value={defaultModelId}
                 onValueChange={(value) => setDefaultModelId(value ?? '')}
                 renderValue={(id) => modelOptions.find((opt) => opt.value === id)?.label || 'Select a model'}
               >
                 {modelOptions.map((option) => (
-                  <Select.Option key={option.value || 'human'} value={option.value}>
+                  <Select.Option key={option.value || 'automatic'} value={option.value}>
                     {option.label}
                   </Select.Option>
                 ))}
               </Select>
+              <span className="text-xs leading-5 text-kumo-subtle">
+                Automatic lets chat choose a recent or available model. To send without AI, choose No AI responses in Chat settings. Routines need a specific default model.
+              </span>
             </label>
           )}
         </div>

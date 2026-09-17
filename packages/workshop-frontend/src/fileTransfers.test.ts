@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { makeExportFilename, saveStreamToFile } from './fileTransfers'
+import { BLUEPRINT_ARCHIVE_EXTENSION, makeBlueprintFilename, makeExportFilename, saveStreamToFile } from './fileTransfers'
 
 afterEach(() => {
   delete (window as Window & { showSaveFilePicker?: unknown }).showSaveFilePicker
@@ -11,6 +11,14 @@ describe('export file transfers', () => {
   it('builds a safe filename with the advertised extension', () => {
     expect(makeExportFilename('Quarterly report / 2026', '.csv'))
       .toBe('Quarterly-report-2026.csv')
+  })
+
+  it('uses template and output filename fallbacks without changing archive extensions or authored names', () => {
+    expect(BLUEPRINT_ARCHIVE_EXTENSION).toBe('.gadget')
+    expect(makeBlueprintFilename('', 2)).toBe('template-v2.gadget')
+    expect(makeBlueprintFilename('Gadget Blueprint', 3)).toBe('Gadget-Blueprint-v3.gadget')
+    expect(makeExportFilename('', '.pdf')).toBe('output.pdf')
+    expect(makeExportFilename('Gadget Blueprint', '.gadget')).toBe('Gadget-Blueprint.gadget')
   })
 
   it('opens the picker before starting the export stream', async () => {

@@ -388,7 +388,7 @@ function RenameOutputDialog({
 type TypeFilter = 'all' | string
 
 function OutputsPage() {
-  useDocumentTitle('Outputs')
+  useDocumentTitle('Apps & documents')
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
@@ -445,7 +445,7 @@ function OutputsPage() {
       // A failed *refresh* must not discard a page already showing something: it is still the last
       // good answer, and the next focus retries. The error state is for having nothing to show.
       if (loadedOnce.current) {
-        toastsRef.current.add({ title: "Couldn't refresh outputs", variant: 'error' })
+        toastsRef.current.add({ title: "Couldn't refresh apps and documents", variant: 'error' })
       } else {
         setLoadError(true)
       }
@@ -576,7 +576,7 @@ function OutputsPage() {
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-3 sm:px-10">
       <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6 sm:pt-10">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Outputs</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Apps &amp; documents</h1>
           <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
             Everything your workspaces have produced, in one place.
           </p>
@@ -623,7 +623,8 @@ function OutputsPage() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search outputs…"
+              aria-label="Search apps and documents"
+              placeholder="Search..."
               className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
             />
           </div>
@@ -639,7 +640,7 @@ function OutputsPage() {
           </div>
         ) : loadError ? (
           <div className="py-12 text-center text-sm">
-            <p className="text-kumo-danger">Something went wrong loading your outputs.</p>
+            <p className="text-kumo-danger">Could not load your apps and documents.</p>
             <button onClick={() => setReloadToken((n) => n + 1)} className="mt-1 text-kumo-brand underline">
               Try again
             </button>
@@ -651,7 +652,7 @@ function OutputsPage() {
             </div>
             <div>
               <p className="text-sm font-medium text-kumo-default">
-                {isFiltered ? 'No outputs match' : 'No outputs yet'}
+                {isFiltered ? 'No matching apps or documents' : 'No apps or documents yet'}
               </p>
               <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
                 {isFiltered

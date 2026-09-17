@@ -1,3 +1,5 @@
+import { notifyAgentsChanged } from './agentsChanged'
+import { persistLastThread } from './lastThread'
 import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
@@ -23,6 +25,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 import { openOAuthPopup } from './openOAuthPopup'
+import { formatOf } from './components/format/formats'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -51,6 +54,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const [draftAssignments, setDraftAssignments] = useState<Record<string, BlueprintBindingAssignment>>({})
   const [models, setModels] = useState<AiChatAuthorInfo[]>([])
   const [creating, setCreating] = useState(false)
+  const [botModel, setBotModel] = useState('')
   const [downloading, setDownloading] = useState(false)
   const [showLogin, setShowLogin] = useState(false)
 
@@ -91,6 +95,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   )
   // Fetch blueprint metadata.
   useEffect(() => {
+    let cancelled = false
+    setBlueprint(null)
     if (!id) {
       setLoading(false)
       setNotFound(true)
@@ -101,19 +107,23 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     setError(null)
 
     rpcStub.getBlueprint(id).then(result => {
+      if (cancelled) return
       if (result) {
         setBlueprint(result)
       } else {
         setNotFound(true)
       }
     }).catch(err => {
-      setError(err.message || 'Failed to load blueprint.')
+      if (cancelled) return
+      setError(err.message || 'Failed to load template.')
     }).finally(() => {
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     })
+    return () => { cancelled = true }
   }, [id, rpcStub])
 
   useEffect(() => {
+    setBotModel('')
     setActiveBindingName(null)
     setBindingForm({})
     setDraftAssignments({})
@@ -123,13 +133,15 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
   // When authenticated, fetch models for binding assignment.
   useEffect(() => {
+    let cancelled = false
+    setModels([])
+    setBotModel('')
     if (isAuthenticated && authenticatedApi) {
       authenticatedApi.listModels()
-        .then(setModels)
+        .then(list => { if (!cancelled) setModels(list) })
         .catch(err => logRpcFailure('Failed to load models:', err))
-    } else {
-      setModels([])
     }
+    return () => { cancelled = true }
   }, [isAuthenticated, authenticatedApi])
 
   // Load vendors (gatekeeper catalog) for both the summary cards and configure panel.
@@ -386,7 +398,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }, [models])
 
   const getFirstUnresolvedBindingName = useCallback((assignments = draftAssignments) => {
-    if (!blueprint) return null
+    if (!blueprint || blueprint.metadata.bot) return null
     for (let name of Object.keys(blueprint.metadata.bindings)) {
       if (!assignments[name]) return name
     }
@@ -558,6 +570,19 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const handleCreate = async () => {
     if (!authenticatedApi || !blueprint || !id) return
 
+    if (blueprint.metadata.bot) {
+      setCreating(true)
+      setError(null)
+      try {
+        const agent = await authenticatedApi.newAgentFromBlueprint(id, botModel || null)
+        notifyAgentsChanged()
+        persistLastThread({ kind: 'agent', id: agent.id })
+        await navigate({ to: '/agents/$id', params: { id: agent.id }, search: {} })
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not add bot.')
+      } finally { setCreating(false) }
+      return
+    }
     let firstUnresolved = getFirstUnresolvedBindingName()
     if (firstUnresolved) {
       openBindingConfigurator(firstUnresolved)
@@ -571,7 +596,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       let metadata = await overseer.getMetadata()
       window.location.href = `/workspace/${metadata.id}`
     } catch (err: any) {
-      setError(err.message || 'Failed to create gadget from blueprint.')
+      setError(err.message || 'Failed to create output from template.')
     } finally {
       overseer.then(stub => stub[Symbol.dispose]()).catch(() => {})
       setCreating(false)
@@ -588,13 +613,13 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         () => rpcStub.downloadBlueprint(id),
         makeBlueprintFilename(blueprint.metadata.title, blueprint.metadata.version),
         {
-          description: 'Gadget Blueprint',
+          description: 'Template archive',
           contentType: 'application/octet-stream',
           extension: BLUEPRINT_ARCHIVE_EXTENSION,
         },
       )
     } catch (err: any) {
-      setError(err.message || 'Failed to download blueprint.')
+      setError(err.message || 'Failed to download template.')
     } finally {
       setDownloading(false)
     }
@@ -612,7 +637,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     } catch (err: any) {
       console.error('Failed to update featured status:', err)
       toasts.add({
-        title: nextFeatured ? 'Failed to feature blueprint' : 'Failed to unfeature blueprint',
+        title: nextFeatured ? 'Failed to feature template' : 'Failed to unfeature template',
         variant: 'error',
       })
     } finally {
@@ -637,7 +662,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         setIsInLibrary(true)
         setIsUploadedBlueprint(false)
       }
-      toasts.add({ title: nextPinned ? 'Blueprint favorited' : 'Blueprint unfavorited', variant: 'success' })
+      toasts.add({ title: nextPinned ? 'Template favorited' : 'Template unfavorited', variant: 'success' })
     } catch (err) {
       console.error('Failed to update blueprint pin:', err)
       toasts.add({ title: 'Failed to update favorite status', variant: 'error' })
@@ -662,10 +687,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     try {
       await authenticatedApi.addBlueprintToLibrary(id)
       setIsInLibrary(true)
-      toasts.add({ title: 'Blueprint added to library', variant: 'success' })
+      toasts.add({ title: 'Template added to library', variant: 'success' })
     } catch (err) {
       console.error('Failed to add blueprint to library:', err)
-      toasts.add({ title: 'Failed to add blueprint to library', variant: 'error' })
+      toasts.add({ title: 'Failed to add template to library', variant: 'error' })
     } finally {
       setAddingToLibrary(false)
     }
@@ -679,17 +704,17 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       await authenticatedApi.removeBlueprintFromLibrary(id)
       if (isUploadedBlueprint) {
         setShowDeleteConfirm(false)
-        toasts.add({ title: 'Blueprint deleted', variant: 'success' })
+        toasts.add({ title: 'Template deleted', variant: 'success' })
         navigate({ to: '/' })
       } else {
         setIsInLibrary(false)
         setIsPinned(false)
-        toasts.add({ title: 'Blueprint removed from library', variant: 'success' })
+        toasts.add({ title: 'Template removed from library', variant: 'success' })
       }
     } catch (err) {
       console.error('Failed to remove blueprint from library:', err)
       toasts.add({
-        title: isUploadedBlueprint ? 'Failed to delete blueprint' : 'Failed to remove blueprint from library',
+        title: isUploadedBlueprint ? 'Failed to delete template' : 'Failed to remove template from library',
         variant: 'error',
       })
     } finally {
@@ -712,11 +737,11 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         await authenticatedApi.deleteOrphanedBlueprint(id)
       }
       setShowDeleteConfirm(false)
-      toasts.add({ title: 'Blueprint deleted', variant: 'success' })
+      toasts.add({ title: 'Template deleted', variant: 'success' })
       navigate({ to: '/' })
     } catch (err) {
       console.error('Failed to delete blueprint:', err)
-      toasts.add({ title: 'Failed to delete blueprint', variant: 'error' })
+      toasts.add({ title: 'Failed to delete template', variant: 'error' })
     } finally {
       overseer?.then(stub => stub[Symbol.dispose]()).catch(() => {})
       setRemovingFromLibrary(false)
@@ -727,15 +752,15 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
   }
 
-  if (loading || authLoading) {
-    return <BlueprintStatePage title="Loading blueprint..." loading />
+  if (loading || authLoading || (blueprint && blueprint.id !== id)) {
+    return <BlueprintStatePage title="Loading template..." loading />
   }
 
   if (notFound) {
     return (
       <BlueprintStatePage
-        title="Blueprint not found"
-        message="This blueprint may have been removed or the link may be incorrect."
+        title="Template not found"
+        message="This template may have been removed or the link may be incorrect."
         actionLabel="Back to Explore"
         onAction={() => navigate({ to: '/explore' })}
       />
@@ -745,8 +770,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   if (!blueprint) {
     return (
       <BlueprintStatePage
-        title="Couldn’t load blueprint"
-        message={error || 'Failed to load blueprint.'}
+        title="Couldn’t load template"
+        message={error || 'Failed to load template.'}
         actionLabel="Back to Explore"
         onAction={() => navigate({ to: '/explore' })}
       />
@@ -754,6 +779,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }
 
   let meta = blueprint.metadata
+  let outputNoun = formatOf(meta.output).noun.toLowerCase()
+  if (outputNoun === 'doc') outputNoun = 'document'
   let bindingEntries = Object.entries(meta.bindings)
   let activeBinding = activeBindingName ? meta.bindings[activeBindingName] : undefined
   let readyCount = bindingEntries.filter(([name]) => draftAssignments[name]).length
@@ -761,14 +788,15 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let remainingCount = bindingEntries.length - readyCount
   let primaryActionLabel: string
   if (!isAuthenticated) {
-    primaryActionLabel = 'Log in to create a gadget'
+    primaryActionLabel = `Log in to create ${outputNoun}`
   } else if (unresolvedBindingName !== null) {
     primaryActionLabel = remainingCount > 0
       ? `Configure ${remainingCount} remaining ${remainingCount === 1 ? 'connection' : 'connections'}`
       : 'Configure connections'
   } else {
-    primaryActionLabel = 'Create Gadget'
+    primaryActionLabel = `Create ${outputNoun}`
   }
+  if (meta.bot) primaryActionLabel = isAuthenticated ? 'Add to my bots' : 'Log in to add to my bots'
   let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
   // Only set when the workspace this blueprint was published from is still around to open.
@@ -809,6 +837,26 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 {meta.description}
               </p>
             )}
+            {meta.bot && (
+              <section className="mt-5 space-y-3 text-sm text-kumo-default" aria-label="Bot profile">
+                {meta.bot.avatar && <img src={meta.bot.avatar.url} alt="" className="h-16 w-16 rounded-full object-cover" />}
+                <p className="whitespace-pre-wrap">{meta.bot.description}</p>
+                <details><summary>Skills ({meta.bot.skills.length})</summary>
+                  {meta.bot.skills.map((skill, index) => <article key={index} className="my-3"><strong>{skill.name}</strong><p>{skill.description}</p><pre className="whitespace-pre-wrap font-sans">{skill.body}</pre></article>)}
+                </details>
+                <details><summary>Routines ({meta.bot.routines.length}) · installed paused</summary>
+                  {meta.bot.routines.map((routine, index) => <article key={index} className="my-3"><strong>{routine.name}</strong><p className="whitespace-pre-wrap">{routine.prompt}</p></article>)}
+                </details>
+                {meta.bot.pluginIds.length > 0 && <p>Suggested connections: {meta.bot.pluginIds.join(', ')}</p>}
+                <p className="text-kumo-subtle">Your copy starts with an empty history. Choose connections in bot settings and review routines before enabling them.</p>
+                {isAuthenticated && <label className="flex flex-col gap-2">Default model
+                  <select aria-label="Bot default model" value={botModel} onChange={e => setBotModel(e.target.value)} className="rounded border border-kumo-line bg-kumo-base p-2">
+                    <option value="">Choose later</option>
+                    {models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+                  </select>
+                </label>}
+              </section>
+            )}
             <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
               <span>By {meta.author.name}</span>
               <span className="text-kumo-inactive">•</span>
@@ -841,7 +889,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               <Tooltip content={isAuthenticated ? 'Add to library' : 'Log in to add to library'} asChild>
                 <button
                   type="button"
-                  aria-label={isAuthenticated ? 'Add blueprint to library' : 'Log in to add blueprint to library'}
+                  aria-label={isAuthenticated ? 'Add template to library' : 'Log in to add template to library'}
                   onClick={handleAddToLibrary}
                   disabled={addingToLibrary || loadingLibraryState}
                   className="press inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-kumo-line bg-kumo-base p-0 text-kumo-subtle transition-colors duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
@@ -855,7 +903,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               <DropdownMenu.Trigger
                 render={(
                   <WorkshopIconButton
-                    aria-label="More blueprint actions"
+                    aria-label="More template actions"
                     className="!h-10 !w-10 shrink-0 rounded-lg border border-kumo-line bg-kumo-base text-kumo-subtle hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default data-[popup-open]:border-kumo-fill data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
                   >
                     <DotsThree size={18} weight="bold" />
@@ -900,7 +948,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                       onClick={() => setShowDeleteConfirm(true)}
                       className={MENU_ITEM_DANGER}
                     >
-                      Delete blueprint
+                      Delete template
                     </DropdownMenu.Item>
                   </>
                 )}
@@ -915,7 +963,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                         onClick={() => setShowDeleteConfirm(true)}
                         className={MENU_ITEM_DANGER}
                       >
-                        Delete blueprint
+                        Delete template
                       </DropdownMenu.Item>
                     ) : (
                       <DropdownMenu.Item
@@ -940,7 +988,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                       disabled={updatingFeatured}
                       className={MENU_ITEM}
                     >
-                      {updatingFeatured ? 'Updating...' : (isFeatured ? 'Unfeature blueprint' : 'Feature blueprint')}
+                      {updatingFeatured ? 'Updating...' : (isFeatured ? 'Unfeature template' : 'Feature template')}
                     </DropdownMenu.Item>
                   </>
                 )}
@@ -951,7 +999,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         </header>
 
         <main className="space-y-6">
-          {bindingEntries.length > 0 ? (
+          {!meta.bot && (bindingEntries.length > 0 ? (
             <section>
               <div className="mb-2 flex items-center gap-2 px-1">
                 <h2 className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
@@ -963,7 +1011,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               </div>
               <div className="mb-3 px-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
                 {readyCount === bindingEntries.length
-                  ? 'Everything is ready. You can change any connection before creating the Gadget.'
+                  ? 'Everything is ready. You can change any connection before creating the output.'
                   : `${readyCount} of ${bindingEntries.length} ready. Suggestions are used automatically when they match one of your connected accounts.`}
               </div>
               <div className="overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base">
@@ -986,10 +1034,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 No connections required
               </p>
               <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                This blueprint can create a Gadget without configuring external resources.
+                This template can create an output without configuring external resources.
               </p>
             </section>
-          )}
+          ))}
 
           {error && (
             <div className="flex items-center justify-between gap-3 rounded-2xl border border-kumo-danger/30 bg-kumo-danger-tint px-4 py-3 text-[13px] leading-[18px] text-kumo-danger">
@@ -1019,7 +1067,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
                     {activeBinding.type === 'gatekeeper' && activeBinding.description
                       ? activeBinding.description
-                      : 'Choose the resource or model this new Gadget should use.'}
+                      : 'Choose the resource or model this new output should use.'}
                   </Dialog.Description>
                 </div>
                 <Dialog.Close
@@ -1076,12 +1124,12 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       >
         <Dialog className="responsive-dialog overflow-y-auto p-8" size="sm">
           <Dialog.Title className="text-lg font-semibold">
-            Delete blueprint
+            Delete template
           </Dialog.Title>
           <Dialog.Description className="mt-2 text-kumo-subtle">
             Delete "{blueprint?.metadata.title}"? {canDeleteOwnedBlueprint
-              ? 'This blueprint link will stop working, but gadgets already created from it won’t be affected.'
-              : 'This blueprint was uploaded manually and cannot be recovered.'}
+              ? 'This template link will stop working, but outputs already created from it won’t be affected.'
+              : 'This template was uploaded manually and cannot be recovered.'}
           </Dialog.Description>
           <div className="mt-6 flex justify-end gap-2">
             <Dialog.Close
@@ -1657,7 +1705,7 @@ function BlueprintGatekeeperBindingField({
         <div className="space-y-2.5">
           {binding.resourceUrl && (
             <p className="m-0 pl-[2px] text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-              Blueprint recommends: <span className="break-all text-kumo-default">{formatSuggestedResource(binding.resourceUrl)}</span>
+              Template recommends: <span className="break-all text-kumo-default">{formatSuggestedResource(binding.resourceUrl)}</span>
             </p>
           )}
 

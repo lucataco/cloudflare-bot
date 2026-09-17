@@ -141,4 +141,33 @@ describe('useWorkspaceOpen', () => {
     expect(firstSubscriptionDispose).toHaveBeenCalledOnce()
     expect(deniedOverseerDispose).toHaveBeenCalledOnce()
   })
+
+  it('withholds old owner metadata immediately during an authenticated-session change', async () => {
+    let oldCallback!: (metadata: GadgetMetadata) => void
+    let nextCallback!: (metadata: GadgetMetadata) => void
+    const first = disposableStub({
+      async subscribeToMetadata(callback: (metadata: GadgetMetadata) => void) {
+        oldCallback = callback
+        callback(METADATA)
+        return disposableStub({})
+      },
+    }) as unknown as RpcStub<Overseer>
+    const next = disposableStub({
+      async subscribeToMetadata(callback: (metadata: GadgetMetadata) => void) {
+        nextCallback = callback
+        return disposableStub({})
+      },
+    }) as unknown as RpcStub<Overseer>
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<WorkspaceProbe authenticatedApi={api(first)} />))
+    expect(container.textContent).toContain(METADATA.title)
+    await act(async () => root!.render(<WorkspaceProbe authenticatedApi={api(next)} />))
+    expect(container.textContent).toBe('')
+    await act(async () => oldCallback(METADATA))
+    expect(container.textContent).toBe('')
+    await act(async () => nextCallback({ ...METADATA, title: 'Collaborator workspace', owner: { type: 'user', id: 'owner', name: 'Owner' } }))
+    expect(container.textContent).toBe('Collaborator workspace')
+  })
 })

@@ -159,7 +159,7 @@ export default function MessengerShell({ children }: { children: React.ReactNode
       <div className="min-h-0 flex-1 overflow-hidden">
         <AgentRoster variant="rail" collapsed={compact} />
       </div>
-      <SidebarUtilityStrip collapsed={compact} />
+      <SidebarUtilityStrip collapsed={compact} showWorkNavigation onNavigate={() => setMobileOpen(false)} />
     </aside>
   )
 

@@ -12,6 +12,7 @@ import {
   ArrowsOutSimple,
   DotsThree,
   Pulse,
+  ArrowLeft,
   type Icon,
 } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -68,6 +69,7 @@ import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
 import { isImeComposing } from './keyboardEvent'
 import BotThreadHeader from './components/BotThreadHeader'
+import AutomationPauseControl from './components/AutomationPauseControl'
 import { ComputerView } from './components/ComputerView'
 import SkillsList from './components/SkillsList'
 import MemoryList from './components/MemoryList'
@@ -335,7 +337,8 @@ function PaneTab({
     <button
       type="button"
       onClick={onClick}
-      className={`relative flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12.5px] font-medium tracking-[-0.15px] transition-colors duration-150 ${
+      aria-pressed={active}
+      className={`relative flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-1 text-[12.5px] font-medium tracking-[-0.15px] transition-colors duration-150 ${
         active ? 'bg-kumo-tint text-kumo-default' : 'text-kumo-subtle hover:text-kumo-default'
       }`}
     >
@@ -356,15 +359,17 @@ const WORKSPACE_TRANSITION_MS = 200
 
 const isBrowser = typeof window !== 'undefined'
 
-function clampChatWidth(width: number) {
-  if (!isBrowser) return Math.max(MIN_CHAT_WIDTH, Math.min(DEFAULT_CHAT_WIDTH, width))
-  const max = Math.max(MIN_CHAT_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH)
-  return Math.max(MIN_CHAT_WIDTH, Math.min(max, width))
+function clampChatWidth(width: number, containerWidth: number) {
+  const available = Math.max(0, containerWidth - 1) // Exclude the divider.
+  // If both minimums cannot fit, share the shortage rather than push the inspector offscreen.
+  if (available < MIN_CHAT_WIDTH + MIN_WORKSPACE_WIDTH) {
+    return available * MIN_CHAT_WIDTH / (MIN_CHAT_WIDTH + MIN_WORKSPACE_WIDTH)
+  }
+  return Math.max(MIN_CHAT_WIDTH, Math.min(available - MIN_WORKSPACE_WIDTH, width))
 }
 
 function getInitialChatWidth() {
   if (!isBrowser) return DEFAULT_CHAT_WIDTH
-  const fallback = Math.min(DEFAULT_CHAT_WIDTH, Math.floor(window.innerWidth * 0.38))
   let parsed = NaN
   try {
     const stored = window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY)
@@ -372,7 +377,7 @@ function getInitialChatWidth() {
   } catch {
     // private mode / sandboxed iframes
   }
-  return clampChatWidth(Number.isFinite(parsed) ? parsed : fallback)
+  return Math.max(MIN_CHAT_WIDTH, Number.isFinite(parsed) ? parsed : DEFAULT_CHAT_WIDTH)
 }
 
 function workspaceViewStorageKey(gadgetId: string) {
@@ -533,7 +538,23 @@ export default function GadgetEditor({
 
   // ── layout ───────────────────────────────────────────────────────────────────
   const [chatWidth, setChatWidth] = useState(getInitialChatWidth)
-  const chatWidthRef = useRef(chatWidth)
+  const editorContainerRef = useRef<HTMLDivElement>(null)
+  const [editorWidth, setEditorWidth] = useState<number | null>(null)
+  // Keep the preference intact across sidebar/window resizes, including the phone-only layout.
+  const splitChatWidth = editorWidth === null ? chatWidth : clampChatWidth(chatWidth, editorWidth)
+  const chatWidthRef = useRef(splitChatWidth)
+  const resizeOffsetRef = useRef(0)
+  const observeEditorContainer = useCallback((node: HTMLDivElement) => {
+    editorContainerRef.current = node
+    const measure = () => setEditorWidth(node.getBoundingClientRect().width)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => {
+      observer.disconnect()
+      editorContainerRef.current = null
+    }
+  }, [])
   const [isResizing, setIsResizing] = useState(false)
   const [activeTab, setActiveTab] = useState<RightTab>('app')
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(() =>
@@ -553,13 +574,24 @@ export default function GadgetEditor({
     setAgentProfile(messenger?.agent)
   }, [messenger?.agent])
 
-  useEffect(() => {
-    if (isInspectorTab(paneParam)) setInspector(paneParam)
-  }, [paneParam])
   const [workspaceTransitionEnabled, setWorkspaceTransitionEnabled] = useState(false)
   const activityReturnViewRef = useRef<WorkspaceView | null>(null)
   const [activityView, setActivityView] = useState<ActivityView>('history')
   const [activityClosing, setActivityClosing] = useState(false)
+
+  // Activity shares the inspector's space in messenger mode, including selections from chat/URL.
+  const selectInspector = useCallback((next: MessengerInspector) => {
+    setInspector(next)
+    if (!messengerMode) return
+    setWorkspaceView(view => view?.mode === 'activity' ? { mode: 'chat' } : view)
+    setActivityClosing(false)
+    activityReturnViewRef.current = null
+  }, [messengerMode])
+
+  useEffect(() => {
+    if (isInspectorTab(paneParam)) selectInspector(paneParam)
+  }, [paneParam, selectInspector])
+
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
   const [previewMode, _setPreviewMode] = useState(false)
@@ -918,7 +950,7 @@ export default function GadgetEditor({
     setConsoleLogCount(0)
   }, [])
 
-  chatWidthRef.current = chatWidth
+  chatWidthRef.current = splitChatWidth
 
   const handleClientConsoleLog = useCallback((log: ConsoleLogEvent) => {
     const method = (console as any)[log.level] ?? console.log
@@ -965,21 +997,29 @@ export default function GadgetEditor({
     if (!visibleGadgets.some(g => g.id === urlWorkpieceId)) return
     openedWorkpieceParamRef.current = urlWorkpieceId
     setWorkspaceVisibility('open', urlWorkpieceId)
-    if (messengerMode) setInspector('gadget')
-  }, [workpiecesReady, urlWorkpieceId, visibleGadgets, setWorkspaceVisibility])
+    if (messengerMode) selectInspector('gadget')
+  }, [workpiecesReady, urlWorkpieceId, visibleGadgets, setWorkspaceVisibility, messengerMode, selectInspector])
 
   const openActivity = useCallback((initialView: ActivityView) => {
     setWorkspaceTransitionEnabled(true)
     setActivityClosing(false)
-    if (workspaceView?.mode !== 'activity') activityReturnViewRef.current = workspaceView
+    if (messengerMode) {
+      setInspector('none')
+      if (messenger?.agent) persistInspector(messenger.agent.id, 'none')
+      activityReturnViewRef.current = null
+    } else if (workspaceView?.mode !== 'activity') {
+      activityReturnViewRef.current = workspaceView
+    }
     setActivityView(initialView)
     setWorkspaceView({ mode: 'activity' })
-  }, [workspaceView])
+  }, [workspaceView, messengerMode, messenger?.agent])
 
   const closeWorkspacePane = useCallback(() => {
     if (messengerMode) {
       setInspector('none')
       if (messenger?.agent) persistInspector(messenger.agent.id, 'none')
+      setWorkspaceVisibility('closed')
+      return
     }
     if (workspaceView?.mode !== 'activity') {
       setWorkspaceVisibility('closed')
@@ -992,7 +1032,7 @@ export default function GadgetEditor({
     setActivityClosing(!returnShowsPane)
     setWorkspaceView(returnView)
     activityReturnViewRef.current = null
-  }, [workspaceView, setWorkspaceVisibility, hasAnyApps, simpleMode])
+  }, [workspaceView, setWorkspaceVisibility, hasAnyApps, simpleMode, messengerMode, messenger?.agent])
 
   // Ignore the initial listing, then open apps created by the active chat.
   useEffect(() => {
@@ -1013,20 +1053,12 @@ export default function GadgetEditor({
 
     setActiveTab('app')
     setWorkspaceVisibility('open', target.id)
-    if (messengerMode) setInspector('gadget')
+    if (messengerMode) selectInspector('gadget')
     navigateWorkspace({
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.id }),
       replace: true,
     })
-  }, [workpiecesReady, allGadgets, effectiveSelectedChatId, setWorkspaceVisibility, navigate, id])
-
-  useEffect(() => {
-    const handleResize = () => {
-      setChatWidth(width => clampChatWidth(width))
-    }
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
+  }, [workpiecesReady, allGadgets, effectiveSelectedChatId, setWorkspaceVisibility, navigate, id, messengerMode, selectInspector])
 
   // ── chat count / auto-switch ─────────────────────────────────────────────────
   const handleChatCountChange = useCallback((count: number, chatZeroExists: boolean) => {
@@ -1166,6 +1198,7 @@ export default function GadgetEditor({
     (e: ReactPointerEvent<HTMLDivElement>) => {
       if (!showFullEditor) return
       e.preventDefault()
+      resizeOffsetRef.current = e.clientX - e.currentTarget.getBoundingClientRect().left
       e.currentTarget.setPointerCapture(e.pointerId)
       setIsResizing(true)
     },
@@ -1174,18 +1207,19 @@ export default function GadgetEditor({
   const handleResizePointerMove = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
-      setChatWidth(clampChatWidth(e.clientX))
+      const bounds = editorContainerRef.current!.getBoundingClientRect()
+      setChatWidth(clampChatWidth(e.clientX - bounds.left - resizeOffsetRef.current, bounds.width))
     },
     [],
   )
   const handleResizePointerUp = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId)
-      }
+      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
+      e.currentTarget.releasePointerCapture(e.pointerId)
+      const bounds = editorContainerRef.current!.getBoundingClientRect()
       const width = e.type === 'pointercancel'
-        ? chatWidthRef.current
-        : clampChatWidth(e.clientX)
+        ? clampChatWidth(chatWidthRef.current, bounds.width)
+        : clampChatWidth(e.clientX - bounds.left - resizeOffsetRef.current, bounds.width)
       setChatWidth(width)
       persistChatWidth(width)
       setIsResizing(false)
@@ -1267,7 +1301,7 @@ export default function GadgetEditor({
     // Picking a gadget is a deliberate move to its view, so the turn must not pull the tab back.
     handleTabSelect('app')
     setWorkspaceVisibility('open', workpieceId)
-    if (messengerMode) setInspector('gadget')
+    if (messengerMode) selectInspector('gadget')
     const pendingChatId = workpieces.get(workpieceId)?.chatId
     navigateWorkspace({
       search: (prev: Record<string, unknown>) => ({
@@ -1276,7 +1310,7 @@ export default function GadgetEditor({
         w: workpieceId,
       }),
     })
-  }, [id, navigate, isAgentActive, setWorkspaceVisibility, workpieces, handleTabSelect])
+  }, [id, navigate, isAgentActive, setWorkspaceVisibility, workpieces, handleTabSelect, messengerMode, selectInspector])
 
   const handleRenameWorkpiece = useCallback(async (workpieceId: WorkpieceId, title: string) => {
     if (!overseer) return
@@ -1285,7 +1319,7 @@ export default function GadgetEditor({
     try {
       await target.setTitle(title)
     } catch {
-      toasts.add({ title: 'Failed to rename gadget', variant: 'error' })
+      toasts.add({ title: 'Failed to rename app', variant: 'error' })
     } finally {
       target[Symbol.dispose]()
     }
@@ -1450,7 +1484,7 @@ export default function GadgetEditor({
           group={messenger?.group}
           inspector={inspector}
           onInspectorChange={(next) => {
-            setInspector(next)
+            selectInspector(next)
             if (messenger?.agent) persistInspector(messenger.agent.id, next)
             if (next === 'gadget') {
               setWorkspaceVisibility('open', selectedGadgetId ?? undefined)
@@ -1459,6 +1493,7 @@ export default function GadgetEditor({
           onOpenActivity={openActivity}
           overseer={overseer?.stub ?? null}
           reconnecting={showReconnecting}
+          automationControl={!metadata.automationPaused && <AutomationPauseControl overseer={overseer.stub} metadata={metadata} />}
         />
       )}
       {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
@@ -1565,8 +1600,8 @@ export default function GadgetEditor({
           <WorkshopIconButton
             onClick={() => setBlueprintModalOpen(true)}
             disabled={!selectedGadgetStub}
-            title="Blueprints"
-            aria-label="Blueprints"
+            title="Templates"
+            aria-label="Templates"
           >
             <Blueprint size={16} />
           </WorkshopIconButton>
@@ -1585,11 +1620,12 @@ export default function GadgetEditor({
         </div>
         <div className="ml-1 flex shrink-0 items-center gap-2">
           <span className="md:hidden">{showReconnecting && <ReconnectingChip />}</span>
+          {!messengerMode && !metadata.automationPaused && <AutomationPauseControl overseer={overseer.stub} metadata={metadata} />}
           {/* Desktop reaches Export from the gadget pane's tab bar, which is hidden on phones. */}
           <span className="md:hidden">
             <GadgetExportMenu
               gadget={selectedGadgetStub}
-              gadgetTitle={selectedGadgetSummary?.title ?? 'Gadget'}
+              gadgetTitle={selectedGadgetSummary?.title ?? 'App'}
               chatId={previewChatId}
             />
           </span>
@@ -1684,7 +1720,7 @@ export default function GadgetEditor({
               onClick={() => setBlueprintModalOpen(true)}
               className={MENU_ITEM}
             >
-              Blueprints
+              Templates
             </DropdownMenu.Item>
             <DropdownMenu.Item
               disabled={!mobilePreviewActive}
@@ -1710,7 +1746,16 @@ export default function GadgetEditor({
       </div>
 
       {/* ═══ BODY ═════════════════════════════════════════════════════════════ */}
-      <div className="flex flex-1 min-h-0 relative overflow-hidden">
+      {metadata.automationPaused && (
+        <div role="status" className="shrink-0 border-b border-kumo-line bg-kumo-tint px-4 py-3 text-sm text-kumo-default">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-medium">Automation paused</p>
+            <AutomationPauseControl overseer={overseer.stub} metadata={metadata} />
+          </div>
+          <p className="mt-1 text-xs text-kumo-subtle">New bot turns, routines, hooks, and automatic approvals are stopped. Manual approvals remain available. In-flight external calls may finish; pausing does not roll back their effects.</p>
+        </div>
+      )}
+      <div ref={observeEditorContainer} className="flex flex-1 min-h-0 relative overflow-hidden">
 
         {isAgentActive && (
           <div
@@ -1728,7 +1773,7 @@ export default function GadgetEditor({
           className={`flex flex-col flex-shrink-0 max-md:!w-full ${showFullEditor ? 'max-md:hidden' : ''} ${workspaceTransitionClass} ${showFullEditor ? 'border-r border-kumo-line' : ''}`}
           style={{
             width: showFullEditor
-              ? chatWidth
+              ? splitChatWidth
               : `calc(100% - ${outputRailWidth}px)`,
           }}
         >
@@ -1739,6 +1784,8 @@ export default function GadgetEditor({
                   key={id}
                   workspaceId={id}
                   overseer={overseer.stub}
+                  automationPaused={metadata.automationPaused}
+                  canDecideProposals={!metadata.owner && !isUseOnly}
                   selectedChatId={effectiveSelectedChatId}
                   onNavigateToChat={navigateToChat}
                   onChatChangesChange={setChatChanges}
@@ -1762,7 +1809,7 @@ export default function GadgetEditor({
                   threadChrome={messengerMode}
                   hideComputerOverlay={messengerMode}
                   onComputerAttention={() => {
-                    setInspector('computer')
+                    selectInspector('computer')
                     if (messenger?.agent) persistInspector(messenger.agent.id, 'computer')
                   }}
                   onPendingComputerTakeover={setPendingComputerTakeover}
@@ -1808,13 +1855,13 @@ export default function GadgetEditor({
         <div
           className={`flex flex-shrink-0 min-w-0 overflow-hidden bg-kumo-base max-md:!w-full max-md:!opacity-100 ${!showFullEditor ? 'max-md:hidden' : ''} ${workspaceTransitionClass}`}
           style={{
-            width: showFullEditor ? `calc(100% - ${chatWidth}px - 1px)` : 0,
+            width: showFullEditor ? `calc(100% - ${splitChatWidth}px - 1px)` : 0,
             opacity: showFullEditor ? 1 : 0,
           }}
         >
           <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <div
-            className={`hidden flex-shrink-0 items-center gap-2 border-b border-kumo-line px-3 md:flex ${messengerMode && inspector !== 'gadget' ? '!hidden' : ''}`}
+            className={`hidden flex-shrink-0 items-center gap-2 border-b border-kumo-line px-3 md:flex ${messengerMode && inspector !== 'gadget' && !paneShowsActivity ? '!hidden' : ''}`}
             style={{ height: TABBAR_H }}
           >
             <div className="flex min-w-0 flex-1 items-center overflow-hidden">
@@ -1835,32 +1882,32 @@ export default function GadgetEditor({
               )}
             </div>
 
-            <div className="flex flex-shrink-0 items-center gap-1.5">
-              <div className="flex items-center rounded-lg border border-kumo-line p-0.5">
-                {paneShowsActivity
-                  ? ACTIVITY_TABS.map(tab => (
-                    <PaneTab
-                      key={tab.value}
-                      active={activityView === tab.value}
-                      label={tab.label}
-                      count={tab.value === 'review' ? pendingActionCount : undefined}
-                      onClick={() => setActivityView(tab.value)}
-                    />
-                  ))
-                  : rightTabs(selectedGadgetSummary?.output).map(tab => (
-                    <PaneTab
-                      key={tab.value}
-                      active={activeTab === tab.value}
-                      label={tab.label}
-                      onClick={() => handleTabSelect(tab.value)}
-                    />
-                  ))}
-              </div>
+            <div className="hide-scrollbar flex min-w-0 items-center overflow-x-auto rounded-lg border border-kumo-line p-0.5">
+              {paneShowsActivity
+                ? ACTIVITY_TABS.map(tab => (
+                  <PaneTab
+                    key={tab.value}
+                    active={activityView === tab.value}
+                    label={tab.label}
+                    count={tab.value === 'review' ? pendingActionCount : undefined}
+                    onClick={() => setActivityView(tab.value)}
+                  />
+                ))
+                : rightTabs(selectedGadgetSummary?.output).map(tab => (
+                  <PaneTab
+                    key={tab.value}
+                    active={activeTab === tab.value}
+                    label={tab.label}
+                    onClick={() => handleTabSelect(tab.value)}
+                  />
+                ))}
+            </div>
 
+            <div className="flex flex-shrink-0 items-center gap-1.5">
               {!paneShowsActivity && (
                 <GadgetExportMenu
                   gadget={selectedGadgetStub}
-                  gadgetTitle={selectedGadgetSummary?.title ?? 'Gadget'}
+                  gadgetTitle={selectedGadgetSummary?.title ?? 'App'}
                   chatId={previewChatId}
                 />
               )}
@@ -1879,7 +1926,7 @@ export default function GadgetEditor({
               )}
 
               <WorkshopIconButton
-                aria-label={paneShowsActivity ? 'Close activity' : 'Close gadget pane'}
+                aria-label={paneShowsActivity ? 'Close activity' : 'Close app pane'}
                 title="Close"
                 onClick={closeWorkspacePane}
               >
@@ -1889,12 +1936,12 @@ export default function GadgetEditor({
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {messengerMode && inspector !== 'gadget' && inspector !== 'none' && (
+            {messengerMode && !paneShowsActivity && inspector !== 'gadget' && inspector !== 'none' && (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="flex h-12 shrink-0 items-center justify-between border-b border-kumo-line px-3">
                   <span className="text-[13px] font-medium text-kumo-default">
                     {inspector === 'computer' ? 'Computer'
-                      : inspector === 'files' ? 'Files'
+                      : inspector === 'files' ? 'Apps & documents'
                       : inspector === 'skills' ? 'Skills'
                       : inspector === 'memory' ? 'Memory'
                       : inspector === 'routines' ? 'Routines'
@@ -1929,7 +1976,7 @@ export default function GadgetEditor({
                       selectedId={selectedGadgetId}
                       onSelect={(workpieceId) => {
                         handleSelectWorkpiece(workpieceId)
-                        setInspector('gadget')
+                        selectInspector('gadget')
                         if (messenger?.agent) persistInspector(messenger.agent.id, 'gadget')
                       }}
                     />
@@ -1943,14 +1990,26 @@ export default function GadgetEditor({
                         agent={agentProfile}
                         authenticatedApi={authenticatedApi}
                         onUpdated={setAgentProfile}
+                        overseer={overseer?.stub}
+                        workspaceId={id}
+                        isOwner={metadata.id === id && !metadata.owner && !isUseOnly}
                       />
                     </div>
                   )}
                 </div>
               </div>
             )}
+            {messengerMode && paneShowsActivity && (
+              <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-3 md:hidden">
+                <PaneLabel icon={Pulse} title="Activity" />
+                <WorkshopButton onClick={closeWorkspacePane} className="shrink-0 gap-1.5">
+                  <ArrowLeft size={15} aria-hidden="true" />
+                  Back to chat
+                </WorkshopButton>
+              </div>
+            )}
             {paneShowsActivity && (
-              <div className="flex h-11 items-center gap-1 overflow-x-auto border-b border-kumo-line px-2 md:hidden">
+              <div className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-kumo-line px-2 md:hidden">
                 {ACTIVITY_TABS.map(tab => (
                   <PaneTab
                     key={tab.value}
@@ -1979,7 +2038,7 @@ export default function GadgetEditor({
               tabIndex={isGadgetFullscreen ? -1 : undefined}
               role={isGadgetFullscreen ? 'dialog' : undefined}
               aria-modal={isGadgetFullscreen ? true : undefined}
-              aria-label={isGadgetFullscreen ? 'Gadget full screen' : undefined}
+              aria-label={isGadgetFullscreen ? 'App full screen' : undefined}
               className={
                 activeTab !== 'app' || previewMode
                   ? 'hidden'

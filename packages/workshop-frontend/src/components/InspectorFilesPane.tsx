@@ -14,14 +14,14 @@ export default function InspectorFilesPane({
     return (
       <div className="flex h-full items-center justify-center px-6 text-center">
         <p className="m-0 text-[13px] leading-[18px] text-kumo-subtle">
-          No gadgets yet. Ask the bot to build something and it will show up here.
+          No results yet. Ask the bot to create an app or document and it will show up here.
         </p>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col gap-0.5 p-2">
+    <div className="flex h-full flex-col gap-0.5 overflow-y-auto p-2">
       {gadgets.map((gadget) => {
         const selected = gadget.id === selectedId
         return (
@@ -29,7 +29,8 @@ export default function InspectorFilesPane({
             key={gadget.id}
             type="button"
             onClick={() => onSelect(gadget.id)}
-            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
+            aria-current={selected ? 'page' : undefined}
+            className={`flex w-full shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
               selected ? 'bg-kumo-brand/10' : 'hover:bg-kumo-well'
             }`}
           >
