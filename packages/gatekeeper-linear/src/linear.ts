@@ -103,7 +103,7 @@ const WORKSPACE_RESOURCE: SupportedResource = {
   title: "Linear Workspace",
   description:
     "Read and manage every team and issue in a Linear workspace. This is the broadest option — " +
-    "connect a single team or issue instead to limit what a Gadget can access.",
+    "connect a single team or issue instead to limit what an app can access.",
 };
 
 const TEAM_RESOURCE: SupportedResource = {

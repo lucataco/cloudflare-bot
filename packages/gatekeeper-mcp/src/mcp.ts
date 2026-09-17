@@ -176,7 +176,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#1a1d21",
       tagline: "Connect any Model Context Protocol server",
       description:
-        "Connect a Model Context Protocol server and use its tools from a Gadget. Reads happen " +
+        "Connect a Model Context Protocol server and use its tools from an app. Reads happen " +
         "straight away. Anything that writes waits for your approval.",
     };
   }

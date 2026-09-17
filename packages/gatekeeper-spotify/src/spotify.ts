@@ -467,7 +467,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       description:
         "Connect your Spotify account so Cloudflare OS can search the catalog, read and edit your " +
         "library and playlists, and control playback on your devices. Grant whole-account access " +
-        "or scope a Gadget to a single playlist.",
+        "or limit an app's access to a single playlist.",
     };
   }
 
