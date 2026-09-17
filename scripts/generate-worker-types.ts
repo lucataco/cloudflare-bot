@@ -63,10 +63,7 @@ async function ownsGlobalProps(pkgDir: string): Promise<boolean> {
 }
 
 function rewriteMainModule(text: string): string {
-  return text.replace(
-    /mainModule:\s*typeof import\("\.\/\.wrangler\/validate\/src\/([^"]+)"\)/g,
-    'mainModule: typeof import("./src/$1")',
-  );
+  return text.replaceAll('import("./.wrangler/validate/src/', 'import("./src/');
 }
 
 function stripProjectHeader(text: string): string {
@@ -172,7 +169,12 @@ async function generateOne(pkgDir: string): Promise<void> {
   }
 }
 
-const dirs = await packageDirs();
+// Optional package selection avoids regenerating unrelated runtimes when adding one connector.
+const selectedPackage = process.argv.find(arg => arg.startsWith('--package='))?.slice('--package='.length);
+const selectedService = process.argv.find(arg => arg.startsWith('--service='))?.slice('--service='.length);
+if (selectedService && !/^[a-z0-9-]+$/.test(selectedService)) throw new Error('Invalid service name');
+const dirs = selectedService ? [join(root, 'services', selectedService)]
+  : (await packageDirs()).filter(dir => !selectedPackage || dir === join(packagesDir, selectedPackage));
 if (dirs.length === 0) {
   console.error("no packages with wrangler.jsonc found");
   process.exit(1);

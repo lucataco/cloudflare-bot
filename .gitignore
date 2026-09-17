@@ -36,6 +36,9 @@ wrangler.dev.jsonc
 # Scratch output from scripts/preview (the PR-preview comment body).
 /output/
 
+# TanStack Router scratch/temp files.
+.tanstack/
+
 # macOS
 .DS_Store
 

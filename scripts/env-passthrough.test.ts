@@ -45,6 +45,10 @@ const EXPECTED: Record<string, ExpectedArea> = {
     forwarded: ["VITE_FRONTEND_ERROR_REPORTING"],
     injected: ["GATEKEEPER_APP_UNMINIFIED"],
   },
+  "packages/gatekeeper-localhost": {
+    // Runtime environment for the standalone desktop daemon, not a Worker/configurator build input.
+    external: ["HOME", "LANG", "PATH", "SYSTEMROOT"],
+  },
   "packages/gatekeeper-scheduler": {
     forwarded: ["VITE_FRONTEND_ERROR_REPORTING"],
     injected: ["GATEKEEPER_APP_UNMINIFIED"],

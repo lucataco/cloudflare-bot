@@ -1,5 +1,6 @@
 packages:
   - packages/*
+  - services/*
 
 # The toolchain versions every package shares. Declared once here so a bump is one edit rather than
 # needing to hand edit a bunch of different package.json files.
