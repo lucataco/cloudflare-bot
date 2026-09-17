@@ -17,7 +17,51 @@ Cloudflare OS provides three things in particular:
 
 We are making Cloudflare OS open source so that others can copy it and customize it for their own company. The idea is not that your company uses Cloudflare OS, but rather that you make it "*Your Company* OS".
 
+## Persistent bots, with boundaries you control
+
+Create a teammate, give it instructions and skills, and let routines bring work back to your inbox. Publish a bot from its settings to share a Blueprint; recipients choose **Add to my bots** to create an independent copy. Copies contain the profile, avatar, skills, routine definitions and suggested connector IDs, with an empty history, no connected accounts and paused routines. Hide/show and per-bot notification settings keep the roster manageable.
+
+To share a bot, open **More → Bot settings → Share bot → Publish public bot link**, then choose **Copy link** or **Send link** on supported mobile browsers. The same settings offer **Duplicate bot**, **Hide bot**, and **Notify me about this bot**. Restore hidden bots with **Show hidden bots** in the roster.
+
+The roster shows the latest assistant reply, unread updates, and **Idle / Working / Waiting / Blocked / Done** avatar states. Working and waiting avatars animate, with a reduced-motion alternative. Replies stay unread while the app is in the background; opening a thread never acknowledges its approval cards.
+
+| Design choice | Cloudflare OS | Grok Bot |
+| --- | --- | --- |
+| Isolation | Dedicated bot workspaces and per-workspace browser sessions; external access comes through explicitly assigned capabilities. Owners can intentionally share resources. | Bots in one account share a cloud computer, files and browser logins. |
+| Human review | Gatekeepers can simulate queued writes so the agent can continue planning while a human reviews; application of those writes remains gated. Browser handoffs and operations that need real results can still wait. | Ask-first actions stop for approval; Auto Review can allow matching actions to proceed. |
+| Models and hosting | Bring model providers and deploy in your own Cloudflare account. The runtime is open-source `workerd`; self-host deployment tooling is still in progress. | Cursor-managed model selection and Cursor-hosted computers; no on-premises or bring-your-own-image deployment. |
+| Reuse | Public bot Blueprints, downloadable archives, fresh copies and paused routines. | Public configuration share links that recipients add to Grok Bot. |
+| Mobile | Installable web app with inbox/approvals, bot chats, routine editing, history and computer views. Requires a network connection. | Companion mobile apps for chats, reviews and approvals. |
+
+Comparison checked September 16, 2026 against the official [shared-computer and hosting FAQ](https://docs.x.ai/grok-bot/security-faq), [approval behavior](https://docs.x.ai/grok-bot/approvals-security-and-privacy), and [bot sharing documentation](https://docs.x.ai/grok-bot/bots). Features and enterprise configurations can change.
+
+The create-bot flow also accepts a public `https://x.ai/bot/<shareId>` link. It previews the name and public description with source attribution; Grok’s public page does not expose skills, routines, private instructions or plugin IDs, so these must be configured separately.
+
+On mobile, use **Install app** in the sidebar, or Safari → Share → Add to Home Screen. Installation does not enable notifications: opt in separately in Attention. The service worker does not cache private chats or approval responses. Suggested tools in first-bot onboarding only rank teammates; they never grant access.
+
+## Desktop and review controls
+
+The optional Tauri shell adds native notifications, `Cmd/Ctrl+N`, and a menu-bar/tray entry. Pair
+the **Local computer** connector to introduce scoped desktop files, approved process execution,
+or desktop-network requests to a bot. Human browser handoffs support secure masked entry and an
+explicit Chrome-session cookie import. Manage standing rules at **Auto-review rules** and
+admin-required human review at `/admin/boundaries`.
+
+See [desktop setup, local pairing, secure entry and reference findings](docs/tier-2-desktop-and-trust.md).
+
+## Isolated computers and group teammates
+
+The optional Sandbox SDK runtime adds a shell and a checkpointed `/workspace` to each bot's Computer
+view. New groups support up to six concurrent bot authors, `@everyone`, and bounded asynchronous
+teammate handoffs. Messages accept six attachments, including Office documents, PDFs, and audio/video
+with supported models. [Tier 3 setup and limits](docs/tier-3-computers-groups-attachments.md) explains
+deployment of the separate container service, group authority, and provider compatibility.
+
 ## Quick Start
+
+For reproducible bot setup, import the root `agents.yaml` from **Create bot**. External agents can
+join the roster through the **Remote agent (Cap’n Web)** provider. See
+[declarative seeds and remote-agent setup](docs/agent-seeds-and-remote-agents.md).
 
 To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:
 

@@ -28,6 +28,18 @@ A blueprint does **not** capture:
 - AI chat history or edit history.
 - Live connections or credentials. Only the *shape* of each binding (its type, gatekeeper name, URL pattern, etc.) is recorded.
 
+## Bot Blueprints
+
+A Blueprint can carry `metadata.bot`, a `BotBlueprintProfile`: name, role/title, persistent description/instructions, public avatar, skill definitions, routine definitions and suggested connector vendor IDs. Its landing page offers **Add to my bots**, selecting a model from the recipient's own catalog.
+
+`publishAgentBlueprint` uses the same archive/import pipeline and public `/blueprint/<id>` URL as app Blueprints. The code snapshot is an empty Yjs document: no workspace files, conversations, learned memory, credentials, connected account IDs, approval policy, browser state or live hook IDs are exported. Metadata is public, including prose inside skills and routines, so the settings UI requires an explicit publish action after explaining the fields being shared. Delete the uploaded Blueprint from the owner's library to revoke the link; existing copies are independent.
+
+The roster's edit dialog and **More → Bot settings** share the same lifecycle controls. Publication snapshots the saved configuration. **Copy link** copies its public URL; **Send link** opens the native share sheet where supported. Recipients can preview before signing in, then choose their own default model (or choose later) and install the bot.
+
+`newAgentFromBlueprint` validates the untrusted definition, strips unknown fields and creates the bot, skills and routines atomically in the recipient's registry. All IDs and timestamps are fresh, all routines are paused, and account bindings are empty. Connector IDs are suggestions only. The bot payload is capped at 56 KiB to fit within the archive's 64 KiB metadata limit. Existing app archives without `bot` remain compatible. `duplicateAgent` uses the same installation mechanism without publishing.
+
+The optional Grok importer is a read-only preview of a public `https://x.ai/bot/<shareId>` page. It allows only that origin/path, rejects redirects, limits response size and time, and parses HTML without executing scripts. The current public page exposes a name and description, not full instructions, skills, routines or plugins. The UI states that limitation and fills editable fields before the normal create action; it does not bulk-copy a community catalog or install hidden configuration.
+
 ## Binding Annotations
 
 Before creating a blueprint, the author can optionally add **blueprint annotations** for the gadget's named bindings. This user-provided metadata controls how each required connection appears to someone creating a gadget from the blueprint:
