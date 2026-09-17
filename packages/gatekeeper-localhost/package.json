@@ -1,0 +1,20 @@
+{
+  "name": "@gadgets/gatekeeper-localhost",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "daemon": "node daemon/main.ts",
+    "export:chrome": "node daemon/export-chrome.ts",
+    "test:run": "node --test 'daemon/*.test.ts' && vitest run",
+    "deploy": "vp run --no-cache build:configurator && wrangler deploy"
+  },
+  "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": { "typescript": "catalog:", "wrangler": "catalog:", "@types/node": "26.1.0", "vitest": "catalog:", "@cloudflare/vitest-pool-workers": "catalog:" }
+}

@@ -291,6 +291,12 @@
             "GitHubGatekeeperImpl"
           ],
           "tag": "v0"
+        },
+        {
+          "new_sqlite_classes": [
+            "GitHubEventHookDriver"
+          ],
+          "tag": "v1-event-hooks"
         }
       ],
       "modules": [
@@ -519,6 +525,46 @@
       "shortName": "linear",
       "vars": {
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/linear"
+      }
+    },
+    "gatekeeper-localhost": {
+      "bindings": [],
+      "compatibilityDate": "2026-08-08",
+      "compatibilityFlags": [
+        "nodejs_compat",
+        "allow_irrevocable_stub_storage"
+      ],
+      "inputs": [],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "localhost.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "LocalDevice",
+            "LocalGatekeeper"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "localhost.js",
+          "r2Key": "blobs/modules/b4a9a3ca45154f4cbdeaa51a78bce3d709d1258b6403173af5e7a6f2ba31bc97",
+          "sha256": "b4a9a3ca45154f4cbdeaa51a78bce3d709d1258b6403173af5e7a6f2ba31bc97",
+          "size": 62,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "localhost",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/localhost"
       }
     },
     "gatekeeper-mcp": {
@@ -768,6 +814,12 @@
             "SlackThreadGatekeeperImpl"
           ],
           "tag": "v0"
+        },
+        {
+          "new_sqlite_classes": [
+            "SlackEventHookDriver"
+          ],
+          "tag": "v1-event-hooks"
         }
       ],
       "modules": [
@@ -1112,6 +1164,12 @@
             "PendingLogin"
           ],
           "tag": "v2"
+        },
+        {
+          "new_sqlite_classes": [
+            "ComputerSessionImpl"
+          ],
+          "tag": "v3"
         }
       ],
       "modules": [

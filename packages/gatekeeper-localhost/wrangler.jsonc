@@ -1,0 +1,10 @@
+{
+  "name": "gatekeeper-localhost",
+  "main": ".wrangler/validate/src/localhost.ts",
+  "build": { "command": "pnpm exec capnweb-validate build --out .wrangler/validate", "watch_dir": "src" },
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat", "allow_irrevocable_stub_storage"],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LocalDevice", "LocalGatekeeper"] }],
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } }
+}

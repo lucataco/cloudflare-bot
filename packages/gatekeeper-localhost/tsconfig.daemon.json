@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "target": "ESNext", "lib": ["esnext"], "module": "NodeNext", "moduleResolution": "NodeNext", "types": ["node"], "allowImportingTsExtensions": true },
+  "include": ["daemon", "src/protocol.ts"]
+}
