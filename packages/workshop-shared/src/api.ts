@@ -132,6 +132,98 @@ export interface PublicApi extends RpcTarget {
   downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>>;
 }
 
+/** Canonical source categories in the owner's attention inbox. */
+export type AttentionKind = "run" | "action" | "proposal" | "connection" | "human" | "changes";
+
+/** Source state, independent of whether its current version was seen or delivered as a notification. */
+export type AttentionState = "pending" | "accepting" | "resolved" | "finished" | "failed" | "incomplete" | "canceled";
+
+/** A retained owner-only attention item. IDs are navigation context, never approval authority. */
+export type AttentionItem = {
+  /** Stable workspace-qualified source identity. */
+  id: string;
+  /** Workspace containing the authoritative source. */
+  workspaceId: string;
+  /** Workspace-local source identity used for reconciliation. */
+  sourceId: string;
+  /** Category of the underlying canonical record. */
+  kind: AttentionKind;
+  /** Current projected source state; finished does not mean verified success. */
+  state: AttentionState;
+  /** Monotonic source version assigned by its workspace. */
+  version: number;
+  /** Owner-inbox ordering sequence assigned when this source version arrived. */
+  order: number;
+  /** Whether the owner acknowledged this exact version. */
+  seen: boolean;
+  /** Timestamp of the source transition, not a delivery watermark. */
+  updatedAt: Date;
+  /** Owning bot, joined from the owner's registry when one exists. */
+  agentId?: string;
+  /** Workspace label for in-app display only; never included in push payloads. */
+  workspaceTitle: string;
+  /** Conversation locator, absent for workspace-level actions. */
+  chatId?: number;
+  /** Transcript locator when the source is a message. */
+  sequence?: number;
+  /** Original logical task, when tracked. */
+  runId?: string;
+  /** Canonical action-log locator, when relevant. */
+  actionId?: number;
+  /** Kernel-observed execution stop reason, never model-prose interpretation. */
+  reason?: TaskRunDisposition["reason"];
+};
+
+/** A bounded page from the retained owner inbox, not an exhaustive approval inventory. */
+export type AttentionPage = {
+  /** Newest source versions first, at most 30. */
+  entries: AttentionItem[];
+  /** Exclusive ordering cursor for an older page. */
+  nextBeforeOrder?: number;
+  /** Unseen count within the retained inbox, not all historical sources. */
+  unseen: number;
+  /** Durable backfill or workspace projection is still outstanding. */
+  catchingUp: boolean;
+  /** Older items may have fallen outside retention; canonical requests remain in their workspaces. */
+  truncated: boolean;
+};
+
+/** Lightweight invalidation feed. Re-list after reconnect rather than trusting missed browser events. */
+export interface AttentionSubscriber extends RpcTarget {
+  /** A monotonic owner-inbox revision; callback delivery does not mark anything seen. */
+  changed(revision: number): void;
+}
+
+/** Browser-generated Web Push subscription, registered only through the authenticated owner API. */
+export type PushSubscriptionData = {
+  /** HTTPS push-service endpoint; validated against supported public push services. */
+  endpoint: string;
+  /** Browser-generated encryption keys, in base64url form. */
+  keys: {
+    /** P-256 receiver public key. */
+    p256dh: string;
+    /** Receiver authentication secret. Never returned in settings or logged. */
+    auth: string;
+  };
+};
+
+/** Public configuration and owner-controlled device receipts, excluding endpoints and private keys. */
+export type PushSettings = {
+  /** False until deployment VAPID configuration is complete. */
+  available: boolean;
+  /** Public application-server key for browser enrollment, only when available. */
+  applicationServerKey?: string;
+  /** At most five enrolled devices. Browser consent and per-bot preferences are separate gates. */
+  devices: {
+    /** Opaque owner-scoped device identifier for revocation. */
+    id: string;
+    /** Time this device was explicitly enrolled. */
+    createdAt: Date;
+    /** Latest transport outcome; acceptance by a push service does not prove display or reading. */
+    delivery: "idle" | "pending" | "accepted" | "failed";
+  }[];
+};
+
 /** Subscription callback for AuthenticatedApi.subscribeConnectedAccounts(). */
 export interface ConnectedAccountsSubscriber {
   /**
@@ -362,6 +454,23 @@ export const getAuthErrorCode = authErrors.getCode;
 
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
+  /** Read up to 30 retained owner-only attention items; pagination is stable across seen changes. */
+  listAttention(beforeOrder?: number): Promise<AttentionPage>;
+
+  /** Mark only the displayed source version seen. This never resolves, approves, or resumes work. */
+  markAttentionSeen(id: string, version: number): Promise<void>;
+
+  /** Subscribe to owner-inbox invalidations, including one initial notification. Dispose when unused. */
+  subscribeAttention(subscriber: RpcStub<AttentionSubscriber>): Promise<RpcStub<{}>>;
+
+  /** Deployment availability and this owner's registered devices; endpoints and secrets are omitted. */
+  getPushSettings(): Promise<PushSettings>;
+
+  /** Enroll this device after explicit browser permission. Existing history is never replayed as push. */
+  registerPushSubscription(subscription: PushSubscriptionData): Promise<{id: string}>;
+
+  /** Revoke an owner-owned device and its queued deliveries. */
+  removePushSubscription(id: string): Promise<void>;
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
 
@@ -464,9 +573,31 @@ export interface AuthenticatedApi extends RpcTarget {
   // --- Agent Shell APIs (feature flag: agentShell) ---
 
   /**
-   * List all agent profiles owned by this user. Returns agents sorted by creation time (newest first).
+   * List all owned profiles, including hidden bots and their owner-only roster projection.
+   * Sorted by creation time (newest first); subscribeAttention invalidates the projection.
    */
   listAgents(): Promise<AgentProfile[]>;
+
+  /** Create owned bots from agents.yaml once per stable key; preserve edits/deletions on rerun. */
+  seedAgents(yaml: string): Promise<{created: AgentProfile[]; skipped: string[]}>;
+
+  /** Read administrator-enforced human-review scopes. These never grant automatic approval. */
+  getAutoReviewBoundaries(): Promise<import('./auto-review').AutoReviewBoundary[]>;
+
+  /** Read the public name and description from an x.ai share page; does not create a bot. */
+  previewGrokBot(url: string): Promise<BotBlueprintProfile>;
+
+  /** Copy a bot into a fresh workspace, with skills and paused routines but no history or grants. */
+  duplicateAgent(id: string): Promise<AgentProfile>;
+
+  /** Publish a portable bot snapshot as a public Blueprint; returns its share ID. */
+  publishAgentBlueprint(id: string): Promise<string>;
+
+  /** Install a bot Blueprint with paused routines and no connected accounts. */
+  newAgentFromBlueprint(blueprintId: string, defaultModelId: string | null): Promise<AgentProfile>;
+
+  /** Mark only the displayed reply timestamp read; never acknowledges approvals. */
+  markAgentRead(id: string, replyTimestamp: number): Promise<void>;
 
   /**
    * Create a new agent profile with the given properties. Returns the created agent with a
@@ -488,6 +619,8 @@ export interface AuthenticatedApi extends RpcTarget {
     avatar?: AvatarImage | null;
     defaultBindings?: number[];
     notifyOnUpdates?: boolean;
+    /** Hide from the roster without stopping automation or deleting history. */
+    hidden?: boolean;
   }): Promise<AgentProfile>;
 
   /**
@@ -520,7 +653,7 @@ export interface AuthenticatedApi extends RpcTarget {
 
   listGroups(): Promise<Group[]>;
   createGroup(name: string, memberAgentIds: string[]): Promise<Group>;
-  updateGroup(id: string, updates: { name?: string; memberAgentIds?: string[]; }): Promise<Group>;
+  updateGroup(id: string, updates: { name?: string; memberAgentIds?: string[]; multiAuthor?: boolean }): Promise<Group>;
   deleteGroup(id: string): Promise<void>;
   getGroupByWorkspaceId(workspaceId: string): Promise<Group | null>;
 
@@ -993,6 +1126,10 @@ export type AdminFormat = {
  * driven). Each setter throws on invalid input.
  */
 export interface AdminApi {
+  /** Read authoritative human-review boundaries, independent of the soft configuration KV mirror. */
+  getAutoReviewBoundaries(): Promise<import('./auto-review').AutoReviewBoundary[]>;
+  /** Atomically replace human-review boundaries. Users cannot override a matching boundary. */
+  setAutoReviewBoundaries(boundaries: import('./auto-review').AutoReviewBoundary[]): Promise<void>;
   /** Read all admin-managed settings for the admin UI in one call. */
   getSettings(): Promise<AdminSettingsView>;
 
@@ -1204,7 +1341,7 @@ export type CloudflareAccountOption = {
 };
 
 /** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "capnweb";
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
@@ -1234,7 +1371,8 @@ export type AiModelConfig = {
   /**
    * URL of the API. If not specified, use the default for the provider. Overriding the URL is
    * useful in order to use AI proxy products like Cloudflare's AI gateway, or even to use an
-   * alternative provider that provides a compatible API.
+   * alternative provider that provides a compatible API. Required for "capnweb": an HTTPS
+   * WebSocket-upgrade endpoint implementing RemoteAgentEndpoint, using apiToken as optional bearer auth.
    */
   apiUrl?: string;
 };
@@ -1288,6 +1426,7 @@ export const SUGGESTED_MODELS: Record<
   },
   "ollama": {
   },
+  "capnweb": {},
 };
 
 /**
@@ -1311,6 +1450,9 @@ export type GadgetMetadata = {
 
   /** Total cost of AI inference in dollars, if known. */
   totalCost?: number;
+
+  /** Workspace automation is paused. Absent on older servers and workspace-list snapshots. */
+  automationPaused?: boolean;
 
   /** Whether the user has pinned this gadget to the top of their list. */
   pinned?: boolean;
@@ -1391,6 +1533,70 @@ export type AgentSkill = {
   updated: Date;
 };
 
+/** Creation-only draft proposed by a bot. It carries no authority to save or activate anything. */
+export type AgentProposalDraft = {
+  /** Save an ordinary routine, paused; activation remains a separate owner action. */
+  kind: "routine";
+  /** The exact name, standalone task and schedule the owner is asked to review. */
+  value: Pick<AgentRoutine, "name" | "prompt" | "schedule">;
+} | {
+  /** Save reusable instructions as an ordinary per-bot skill, not a new permission grant. */
+  kind: "skill";
+  /** The exact name, usage description and instructions the owner is asked to review. */
+  value: Pick<AgentSkill, "name" | "description" | "body">;
+};
+
+/** Historical creation receipt. It is not a statement about current activation or configuration. */
+export type AgentProposalReceipt = {
+  /** Original creation time, unchanged when a lost response is recovered. */
+  createdAt: Date;
+  /** The artifact had already been deleted when this receipt was recovered; it was not recreated. */
+  missing: boolean;
+};
+
+/**
+ * Durable proposal in a bot's dedicated workspace. Drafting only stages this record for the chat
+ * step barrier. Only the workspace owner can decide it; neither a model nor a build collaborator
+ * may save it. Accepted routine proposals create paused routines. Decisions do not resume a bot,
+ * enable a schedule, alter workspace pause, grant connections, or change browser/approval policy.
+ */
+export type AgentProposal = {
+  /** Transcript discriminator. */
+  type: "agentProposal";
+  /** Server-generated identity, stable across replay and decision retries. */
+  proposalId: string;
+  /** Server-resolved proposing bot; never selected by the model or the decision caller. */
+  agentId: string;
+  /** Bot name at proposal time, for display only. */
+  agentName: string;
+  /** Stable server-allocated artifact ID. This identifier is not an access capability. */
+  artifactId: string;
+  /** Bot-authored rationale, not an enforced restriction or trusted authorization statement. */
+  reason: string;
+  /** Immutable proposed fields; changes require a new proposal or later ordinary editing. */
+  draft: AgentProposalDraft;
+} & ({
+  /** No owner decision has been recorded. */
+  state: "pending";
+} | {
+  /** Acceptance is durable, but cross-object creation has not yet been confirmed. Safe to retry. */
+  state: "accepting";
+  /** Time the owner chose acceptance. */
+  decidedAt: Date;
+} | {
+  /** Creation has been confirmed; repeated acceptance returns this historical receipt. */
+  state: "accepted";
+  /** Time the owner chose acceptance. */
+  decidedAt: Date;
+  /** Original artifact creation, including deletion detected during recovery. */
+  receipt: AgentProposalReceipt;
+} | {
+  /** The owner declined. No artifact is created by this proposal. */
+  state: "denied";
+  /** Time the owner declined. */
+  decidedAt: Date;
+});
+
 export type AgentMemoryNote = {
   id: string;
   agentId: string;
@@ -1398,6 +1604,35 @@ export type AgentMemoryNote = {
   created: Date;
 };
 
+/** Portable bot definition. Connector IDs are suggestions, never account capabilities. */
+export type BotBlueprintProfile = {
+  /** Display name. */
+  name: string;
+  /** Short role description. */
+  title: string;
+  /** Persistent instructions for the copied bot. */
+  description: string;
+  /** Public avatar; no account identity is copied. */
+  avatar?: AvatarImage;
+  /** Reusable instructions, excluding database IDs and timestamps. */
+  skills: Pick<AgentSkill, "name" | "description" | "body">[];
+  /** Routine definitions; installed paused, without hooks or execution history. */
+  routines: Pick<AgentRoutine, "name" | "prompt" | "schedule">[];
+  /** Suggested connector vendors; recipients explicitly assign their own accounts. */
+  pluginIds: string[];
+};
+
+/** Owner-only roster projection; source workspaces remain authoritative. */
+export type AgentRosterState = {
+  /** Projected execution or attention state. */
+  presence: "idle" | "working" | "waiting" | "blocked" | "done";
+  /** Count of unseen retained attention items plus an unread latest reply. */
+  unreadCount: number;
+  /** Latest committed assistant reply, excluding reasoning and tool output. */
+  lastReply?: { /** Short display text. */ text: string; /** Unix time in milliseconds. */ timestamp: number };
+};
+
+/** A persistent bot and its dedicated workspace. */
 export type AgentProfile = {
   /** Unique identifier for this agent (randomly generated). */
   id: string;
@@ -1430,13 +1665,22 @@ export type AgentProfile = {
    * Defaults to true when omitted for backward compatibility.
    */
   notifyOnUpdates?: boolean;
+  /** Hidden bots remain accessible and keep running; defaults to false. */
+  hidden?: boolean;
+  /** Suggested connector vendors from an installed template, without granting access. */
+  pluginIds?: string[];
+  /** Owner-only display projection returned by listAgents. */
+  roster?: AgentRosterState;
   /** When this agent profile was created. */
   created: Date;
   /** When this agent profile was last updated. */
   updated: Date;
 };
 
+/** A same-owner bot roster sharing a workspace conversation, not its members' private workspaces. */
 export type Group = {
+  /** New groups run concurrent isolated authors; legacy groups can opt in through settings. */
+  multiAuthor?: boolean;
   id: string;
   name: string;
   memberAgentIds: string[];
@@ -1638,6 +1882,8 @@ export type CommitInfo = {
 export type ActionState = "pending" | "approved" | "rejected";
 
 export type ActionLogEntry = {
+  /** Originating logical task, stamped on the caller capability rather than inferred at delivery. */
+  runId?: string;
   /** Sequential ID number for the action. Counts up from when the workspace was created. */
   id: number;
 
@@ -1750,8 +1996,29 @@ export type AgentSpawnerConfig = {
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
+  /** Owner-only delegation policy and eligible local resources; omitted targets grant nothing. */
+  getNamedDelegationConfig(): Promise<NamedDelegationConfig>;
+
+  /** Replace the owner-configured targets/resources at the expected revision. Does not start work. */
+  setNamedDelegationConfig(targets: NamedDelegationTargetConfig[], expectedRevision: number): Promise<NamedDelegationConfig>;
+
+  /** Read a receipt and bounded current result in this workspace; never resumes either task. */
+  getNamedDelegation(id: string): Promise<NamedDelegationResult>;
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
+
+  /** Read the durable workspace-wide automation fence. */
+  getAutomationPaused(): Promise<boolean>;
+
+  /**
+   * Owner only. Persist the automation fence before stopping live agent turns. While paused,
+   * new turns, hooks, routine firings and automatic approvals cannot start. Manual approvals
+   * remain available but do not resume agents. Queued prompts and per-chat queue pauses survive.
+   * Resuming permits eligible queues, automatic approvals and future triggers; canceled turns
+   * are not replayed. Scheduled firings while paused are skipped, not queued for catch-up.
+   * External calls already in flight may finish; pausing does not roll back their effects.
+   */
+  setAutomationPaused(paused: boolean): Promise<void>;
 
   /**
    * Get metadata describing this workspace and subscribe to changes.
@@ -2005,6 +2272,21 @@ export interface Overseer extends RpcTarget {
   acceptConnectionRequest(requestId: string, result: {gatekeeperId: WorkpieceId}): Promise<void>;
 
   /**
+   * Owner-only confirmation of a persisted routine/skill proposal. Creates the artifact once;
+   * routines are saved paused, never activated. A repeated acceptance returns the original
+   * receipt without overwriting edits or recreating deleted artifacts. An interrupted accepting
+   * decision is resumed by retrying this same ID. Opposite decisions are rejected. An already
+   * authorized creation may finish after its chat is deleted, but must not recreate that chat.
+   */
+  acceptAgentProposal(proposalId: string): Promise<AgentProposal>;
+
+  /**
+   * Owner-only rejection of a pending proposal. Repeated rejection is a no-op; an accepting or
+   * accepted proposal cannot be rejected. Does not save an artifact or restart the agent.
+   */
+  denyAgentProposal(proposalId: string): Promise<AgentProposal>;
+
+  /**
    * Deny an agent's pending connection request. Updates the inline card. Does NOT resume the agent:
    * the turn stays ended so the user can decide what to tell the agent to do instead.
    */
@@ -2013,10 +2295,24 @@ export interface Overseer extends RpcTarget {
   /**
    * Approve an agent's pending computer human takeover request (a "computerHumanTakeover" chat
    * message). The user has completed the required step (password, 2FA, captcha, payment) in the
-   * ComputerView. This marks the request approved, updates the inline card, and resumes the agent
-   * so it can continue with the authenticated/completed session.
+   * ComputerView. Owner-only; requires an explicit setComputerControl(agentId, "agent") first.
+   * Marks the request approved and resumes the turn, without itself granting browser authority.
    */
   approveComputerHumanTakeover(requestId: string): Promise<void>;
+
+  /** Owner-only, one-shot secret entry into the requested browser's focused masked field.
+   * The value is transient: never stored in chats, logs, approvals or model input. Human control
+   * remains in force; the owner completes the form and separately resumes the bot. */
+  submitComputerSecret(requestId: string, value: string): Promise<void>;
+
+  /** Owner-only import of a bounded Chrome cookie export into this bot's browser while under
+   * human control. Cookie values never enter transcripts or model context. */
+  importComputerCookies(agentId: string, data: Uint8Array): Promise<void>;
+
+  /** Owner-only status of the separately introduced shell/files computer capability. */
+  getComputerWorkspaceAccess(agentId: string): Promise<{ available: boolean; enabled: boolean }>;
+  /** Explicitly enable shell/files access for this bot. Existing browser grants do not imply it. */
+  setComputerWorkspaceAccess(agentId: string, enabled: boolean): Promise<void>;
 
   /**
    * Subscribe to action adds/updates. Dispose the returned stub to unsubscribe.
@@ -2042,6 +2338,12 @@ export interface Overseer extends RpcTarget {
 
   /** List past AI chats. */
   listChats(): Promise<AiChatMetadata[]>;
+
+  /** List tracked logical tasks in a conversation, at most 30 per page, newest source first. */
+  listTaskRuns(chatId: number, beforeSequence?: number): Promise<TaskRunPage>;
+
+  /** Read up to 50 canonical evidence records for a task, newest first, including current decisions. */
+  getTaskRunEvidence(runId: string, beforeSequence?: number): Promise<TaskRunEvidencePage>;
 
   /**
    * List available models. The first listed model should be the default, unless the user has
@@ -2266,17 +2568,35 @@ export interface Overseer extends RpcTarget {
   /** Delete a chat thread. */
   deleteChat(chatId: number): Promise<void>;
 
+  /** Read the owner's browser grant for this agent's dedicated workspace. Owner-only. */
+  getComputerControl(agentId: string): Promise<ComputerControlMode>;
+
+  /**
+   * Owner-only explicit browser grant, valid only in this agent's dedicated workspace.
+   * "agent" grants full browser reads and actions, including authenticated sites and arbitrary
+   * writes, without per-action or per-origin approval. Sensitive workspaces cannot grant it.
+   * "human" excludes all agent browser access. "disabled" stops browser access and closes the
+   * running resource; it does not erase cookies/history or revoke website sessions.
+   */
+  setComputerControl(agentId: string, mode: ComputerControlMode): Promise<void>;
+
+  /**
+   * Owner-only browser capability for this agent's dedicated workspace. Reads require an enabled
+   * mode; manual actions require "human". Every call rechecks authority, including on old stubs.
+   */
   getComputerSession(agentId: string): Promise<RpcStub<ComputerSession>>;
 
+  /** Owner-only screenshot, subject to the same checks as getComputerSession().screenshot(). */
   computerScreenshot(agentId: string): Promise<Uint8Array>;
 
   /**
    * Request that any ongoing LLM session in the given chat immediately stop.
    *
-   * If an LLM is running, the session is canceled subscribers will receive a metadata update
-   * reflecting this before `stop()` returns.
+   * Cancellation is requested before this returns; metadata updates when the turn unwinds.
+   * This is not a workspace pause: queued work and future triggers remain eligible. Already
+   * dispatched calls may finish. Use setAutomationPaused() to hold new automation admission.
    *
-   * If no LLM is running, `stop()` does nothing and returns immediately.
+   * If no LLM is running, this does nothing and returns immediately.
    */
   stopAgent(chatId: number): Promise<void>;
 
@@ -2464,6 +2784,18 @@ export type ChatQueueItem = {
 };
 
 export type AiChatMetadata = {
+  /** Group authors currently executing in independent child conversations. */
+  activeAuthors?: AiChatAuthorInfo[];
+  /** Current group prompt's durable fan-out. */
+  groupRound?: { /** Parent logical task. */ id: string; /** Includes asynchronous handoffs. */ childChatIds: number[] };
+  /** Group-owned context assigned to an isolated author. */
+  groupParent?: { /** Shared timeline. */ chatId: number; /** Parent logical task. */ roundId: string;
+    /** Frozen peer identities, never private workspace capabilities. */ members: Pick<AgentProfile, 'id' | 'name'>[];
+    /** Original group attachments allowed in this author's prompt. */ attachmentIds: string[] };
+  /** Isolated named child task. Follow-up prompts belong in its parent conversation. */
+  namedDelegation?: NamedDelegationReceipt;
+  /** Most recently admitted logical task; historical tasks remain in listTaskRuns(). */
+  currentRunId?: string;
   id: number,
   title: string,
   started: Date,
@@ -2810,14 +3142,185 @@ export type AiChatAuthorInfo = {
   // `AuthenticatedApi.getAvatar(userId)`.
 };
 
+/** One explicit owner grant to a named target, using only source-workspace resource IDs. */
+export type NamedDelegationTargetConfig = {
+  /** Stable profile ID owned by the same user; names and group membership convey no authority. */
+  targetAgentId: string;
+  /** Explicit child binding names mapped to existing external gatekeeper resources. Empty means none. */
+  bindings: Record<string, WorkpieceId>;
+};
+
+/** Owner-only policy plus eligible resource choices. Neither reading nor saving starts a child. */
+export type NamedDelegationConfig = {
+  /** Compare-and-swap revision, rechecked at delegation admission. */
+  revision: number;
+  /** At most eight configured targets; default is an empty list. */
+  targets: NamedDelegationTargetConfig[];
+  /** External resources eligible for explicit selection; gadgets and spawners are excluded. */
+  resources: {
+    /** Source-workspace resource ID. */
+    id: WorkpieceId;
+    /** Display title, never authority. */
+    title: string;
+  }[];
+};
+
+/** Model-authored task data. Parent identity, payer, and scope are always supplied by the kernel. */
+export type NamedDelegationInput = {
+  /** Stable key within the logical parent task. Exact retries reuse its child; conflicting reuse fails. */
+  requestId: string;
+  /** One explicitly configured profile ID. */
+  targetAgentId: string;
+  /** Short child-conversation title. */
+  title: string;
+  /** Bounded task/context text. No history, attachments, or private target state is implicitly copied. */
+  prompt: string;
+  /** Subset of configured binding names. Omitted or empty forwards no resources. */
+  bindingNames?: string[];
+};
+
+/** Durable admission receipt; its ID is also the child TaskRun ID, not a bearer capability. */
+export type NamedDelegationReceipt = {
+  /** Stable child run/delegation identity. */
+  id: string;
+  /** Original logical parent task. */
+  parentRunId: string;
+  /** Original parent conversation, in the same workspace as the child. */
+  parentChatId: number;
+  /** Parent attempt that admitted the child. */
+  parentAttempt: number;
+  /** Parent transcript sequence recording admission. */
+  parentSequence: number;
+  /** Isolated child conversation, never the target profile's private conversation. */
+  childChatId: number;
+  /** Authorized target profile. */
+  targetAgentId: string;
+  /** Target name snapshotted at admission. */
+  targetName: string;
+};
+
+/** Read-only child evidence; execution completion is not verified task success. */
+export type NamedDelegationResult = {
+  /** Original receipt survives child deletion, preventing recreation on retry. */
+  receipt: NamedDelegationReceipt;
+  /** Current execution record, absent after child deletion. */
+  run?: TaskRun;
+  /** Bounded latest assistant response, treated as untrusted task output. */
+  response?: string;
+  /** Whether the child conversation has been deleted. */
+  deleted: boolean;
+  /** Durable cancellation fence; it never rolls back already dispatched effects. */
+  canceled: boolean;
+};
+
+/** Why execution stopped. These dispositions never assert verified task success. */
+export type TaskRunDisposition = {
+  /** Execution ended, awaits input, was canceled, failed, or stopped short. */
+  status: "finished" | "waiting" | "canceled" | "failed" | "incomplete";
+  /** Kernel-observed reason, not a conclusion parsed from model prose. */
+  reason: "model_stop" | "connection" | "proposal" | "human_takeover" | "action_approval" |
+    "user_stop" | "workspace_paused" | "execution_error" | "step_limit" | "unknown_tool" |
+    "output_limit" | "gave_up" | "callbacks_stalled" | "callbacks_resolved" |
+    "history_not_actionable" | "model_unavailable" | "usage_limit" | "interrupted";
+};
+
+/** The authority-bearing admission that originated a logical task, not a claim of success. */
+export type TaskRunSource = {
+  /** An ordinary prompt, a queued prompt, or a capability-scoped callback/spawner admission. */
+  type: "prompt" | "queue" | "callback" | "delegation";
+  /** Present only for new named delegations; legacy spawns do not acquire inferred parentage. */
+  parent?: {
+    /** Original logical parent task. */
+    runId: string;
+    /** Parent conversation in the same workspace. */
+    chatId: number;
+    /** Parent execution attempt that admitted this child. */
+    attempt: number;
+    /** Configured target profile, not authority to access its private workspace. */
+    targetAgentId: string;
+    /** Target display-name snapshot at admission. */
+    targetName: string;
+  };
+} | {
+  /** An owner-configured routine admission. */
+  type: "routine";
+  /** Stable owner-side routine identifier. */
+  routineId: string;
+  /** Revision of the routine used for this admission. */
+  revision: number;
+  /** Immutable callback registration identity. */
+  registrationId: string;
+  /** Scheduler identity, absent for non-scheduled event hooks. */
+  scheduleId?: string;
+  /** Stable scheduler occurrence identity across delivery retries. */
+  occurrenceId?: string;
+  /** Intended firing time, in milliseconds since epoch. */
+  scheduledTime?: number;
+};
+
+/** A workspace-owned logical task retained across execution, approval continuation, and compaction. */
+export type TaskRun = {
+  /** Server-generated identity, scoped to the workspace. */
+  id: string;
+  /** Conversation containing the source and evidence. */
+  chatId: number;
+  /** Sequence of the original admitted prompt or callback. */
+  sourceSequence: number;
+  /** Source metadata fixed at admission. */
+  source: TaskRunSource;
+  /** Admission time. */
+  startedAt: Date;
+  /** Most recent execution-state update, not a notification watermark. */
+  updatedAt: Date;
+  /** Execution attempt counter; authorized continuations retain the run ID. */
+  attempt: number;
+  /** Last committed message sequence attributed to this run. */
+  lastSequence: number;
+} & ({
+  /** The task is admitted or executing; neither state asserts completion. */
+  status: "admitted" | "running";
+  /** No stop reason exists while executing. */
+  reason?: never;
+} | TaskRunDisposition);
+
+/** A bounded page of logical tasks in one conversation, newest source first. */
+export type TaskRunPage = {
+  /** Canonical current execution records; legacy untracked work is not synthesized. */
+  runs: TaskRun[];
+  /** Exclusive source-sequence cursor for older tasks. */
+  nextBeforeSequence?: number;
+};
+
+/** A bounded page of durable task evidence. Application/acceptance is not verified task success. */
+export type TaskRunEvidencePage = {
+  /** Attributed transcript records with canonical action/proposal and output decisions. */
+  entries: {
+    /** Original record, with the same hydration as ordinary conversation history. */
+    message: AiChatMessage;
+    /** Current disposition of a code/output proposal; present only on changes records. */
+    changeState?: "proposed" | "merged" | "reverted";
+  }[];
+  /** Exclusive sequence cursor for older evidence. */
+  nextBeforeSequence?: number;
+};
+
 export type AiChatMessage = {
   chatId: number;
   sequence: number;
   timestamp: Date;
   author: AiChatAuthorInfo;
+  /** Originating logical task; absent for human edits and legacy untracked execution. */
+  runId?: string;
 } & AiChatMessageBody;
 
-export type AiChatMessageBody = {
+export type AiChatMessageBody = AgentProposal | {
+  /** An atomically admitted, isolated named child task. */
+  type: "namedDelegation";
+  /** Stable provenance and navigation receipt, never a capability. */
+  delegation: NamedDelegationReceipt;
+  /** Hydrated current child outcome, absent on persisted records. */
+  result?: NamedDelegationResult;
+} | {
   /** A regular chat message. */
   type: "message";
   message: string;
@@ -3126,6 +3629,10 @@ export type AiChatMessageBody = {
    */
   type: "computerHumanTakeover";
 
+  /** Optional masked entry request. Only its kind and delivery state enter the transcript. */
+  secretInput?: { /** Requested human-only value. */ kind: "password" | "otp" | "payment-confirmation";
+    /** An attempted delivery is not automatically retried. */ submitted: boolean };
+
   /** Unique id used by approveComputerHumanTakeover(). */
   requestId: string;
 
@@ -3206,6 +3713,20 @@ export type AiToolCall = {
   /** If the tool failed, the error. */
   error?: string;
 } & ({
+  /** Stage an isolated named child. Admission occurs only with the parent step's commit. */
+  toolName: "delegateToBot";
+  /** Task data and an optional narrowing of the owner-configured resource grant. */
+  input: NamedDelegationInput;
+  /** Stable receipt identity, available only after successful preparation. */
+  delegationId?: string;
+} | {
+  /** Read a previously admitted child's current status and bounded response without waiting. */
+  toolName: "getDelegationResult";
+  /** Receipt identity scoped by the kernel to this parent conversation. */
+  input: {id: string};
+  /** Recorded result used by replay; reading it does not repeat admission or resume work. */
+  result?: NamedDelegationResult;
+} | {
   /**
    * Any workpiece can potentially export files. Gadgets, in particular, export their source code
    * as files, but other workpieces may export other filesystems. Hence, a file is identified by
@@ -3348,6 +3869,105 @@ export type AiToolCall = {
    */
   output?: string;
 } | {
+  /** Navigate the owner's explicitly granted browser. The transcript grants no authority. */
+  toolName: "computerNavigate";
+  /** Arguments supplied to the navigation tool. */
+  input: {
+    /** Destination URL; may contain private data and must not be copied into audit labels. */
+    url: string;
+  };
+} | {
+  /** Capture a browser viewport. Screenshot bytes are not retained in this tool-call record. */
+  toolName: "computerScreenshot";
+  /** The screenshot tool takes no arguments. */
+  input: {};
+} | {
+  /** Click in the browser under the owner's full-control grant, not per-click approval. */
+  toolName: "computerClick";
+  /** Viewport coordinates supplied to the click tool. */
+  input: {
+    /** Horizontal coordinate in pixels. */
+    x: number;
+    /** Vertical coordinate in pixels. */
+    y: number;
+  };
+} | {
+  /** Type into the focused browser control. */
+  toolName: "computerType";
+  /** Arguments supplied to the typing tool. */
+  input: {
+    /** Typed text retained for model replay; must not be echoed into audit labels. */
+    text: string;
+  };
+} | {
+  /** Scroll the browser viewport. */
+  toolName: "computerScroll";
+  /** Requested scroll deltas, before runtime bounds are applied. */
+  input: {
+    /** Horizontal scroll amount in pixels. */
+    deltaX: number;
+    /** Vertical scroll amount in pixels. */
+    deltaY: number;
+  };
+} | {
+  /** Press a browser key; this may submit forms or perform other writes. */
+  toolName: "computerKey";
+  /** Arguments supplied to the keyboard tool. */
+  input: {
+    /** Browser keyboard key name or character. */
+    key: string;
+  };
+} | {
+  /** Wait before the next browser interaction. */
+  toolName: "computerWait";
+  /** Arguments supplied to the wait tool. */
+  input: {
+    /** Requested milliseconds, before clamping to zero through 10,000. */
+    ms: number;
+  };
+} | {
+  /** Request human-only browser control; the outcome is a separate computerHumanTakeover message. */
+  toolName: "computerRequestHuman";
+  /** Arguments supplied to the human-takeover tool. */
+  input: {
+    /** Explanation shown to the owner for the requested interaction. */
+    reason: string;
+    /** Optional kind of masked, human-only entry. The secret value is never a tool argument. */
+    secretKind?: "password" | "otp" | "payment-confirmation";
+  };
+} | {
+  /** Read sanitized browser metadata without granting access or launching a browser. */
+  toolName: "computerGetState";
+  /** The browser-state tool takes no arguments. */
+  input: {};
+} | {
+  /** A shell/files operation under the separately enabled per-bot computer capability. */
+  toolName: "computerWorkspace";
+  /** Exact operation submitted to the isolated computer. */
+  input: { /** Bounded command or file operation. */ operation: import('./computer').ComputerOperation };
+  /** Bounded recorded output, replayed without repeating shell/filesystem effects. */
+  output?: string;
+} | {
+  /** Store a fact in the agent's persistent memory. Replay must not repeat the write. */
+  toolName: "memoryWrite";
+  /** Arguments supplied to the memory-writing tool. */
+  input: {
+    /** Fact to remember. */
+    fact: string;
+  };
+} | {
+  /** Remove a memory note by ID or exact fact match. Replay must not repeat the deletion. */
+  toolName: "memoryForget";
+  /** Both fields are optional in the existing tool schema; missing both produces a no-op error. */
+  input: {
+    /** Memory note ID. A truthy ID takes precedence over fact matching. */
+    id?: string;
+    /** Exact fact text used when no truthy ID was supplied. */
+    fact?: string;
+  };
+  /** Existing tool-details marker for missing arguments or an unmatched note; no note was deleted. */
+  isError?: true;
+} | {
   /** This actually shouldn't ever appear in logs unless the agent misunderstands the tool. */
   toolName: "observeUserChanges";
   input: {};
@@ -3389,6 +4009,26 @@ export type AiToolCall = {
      */
     bindingName?: string;
   };
+  output?: string;
+} | {
+  /** Stage a routine draft for owner review; this does not save or enable a routine. */
+  toolName: "proposeRoutine";
+  /** Proposed routine fields and a display-only explanation; no caller-supplied target identity. */
+  input: Pick<AgentRoutine, "name" | "prompt" | "schedule"> & {
+    /** Why the bot is suggesting this routine. */
+    reason: string;
+  };
+  /** Recorded proposal status for replay; not an activation receipt. */
+  output?: string;
+} | {
+  /** Stage reusable instructions for owner review; this does not write a skill or memory. */
+  toolName: "proposeSkill";
+  /** Proposed skill fields and a display-only explanation; no caller-supplied target identity. */
+  input: Pick<AgentSkill, "name" | "description" | "body"> & {
+    /** Why these instructions should be reusable. */
+    reason: string;
+  };
+  /** Recorded proposal status for replay; not proof that a skill was saved. */
   output?: string;
 });
 
@@ -3832,15 +4472,41 @@ export type PreApprovableAction = {
   vendorId?: string;
 };
 
+/** Workspace-local browser authority. Absent persisted grants mean "disabled". */
+export type ComputerControlMode = "disabled" | "human" | "agent";
+
+/** Browser metadata, not a grant of access to the browser. */
+export type ComputerSessionState = {
+  /** The agent profile ID, not the browser Durable Object ID. */
+  agentId: string;
+  /** HTTP(S) origin and path, or about:blank; credentials, query and fragment are omitted. */
+  currentUrl: string | null;
+  /** Time of the latest successful browser operation. */
+  lastActivityAt: Date;
+};
+
+/** Revocable browser access. Agent mode is coarse full control, not write-safe observation. */
 export interface ComputerSession extends RpcTarget {
+  /** Run a bounded shell/files operation under the separately enabled workspace grant.
+   * Mutations acknowledge only after /workspace is checkpointed; commands are never retried. */
+  workspace(operation: import('./computer').ComputerOperation): Promise<import('./computer').ComputerResult>;
+  /** Navigate to an HTTP(S) URL or about:blank. May cause writes on the destination site. */
   navigate(url: string): Promise<void>;
+  /** Capture the viewport; agent screenshots are forbidden during human control or lockdown. */
   screenshot(): Promise<Uint8Array>;
+  /** Click within the viewport. Arbitrary clicks may perform consequential writes. */
   click(x: number, y: number): Promise<void>;
+  /** Type text into the focused control. Text must not be echoed into audit labels. */
   type(text: string): Promise<void>;
+  /** Scroll by bounded pixel deltas. */
   scroll(deltaX: number, deltaY: number): Promise<void>;
+  /** Press a browser keyboard key. This can submit forms or perform other writes. */
   key(key: string): Promise<void>;
+  /** Wait for a finite duration, clamped to 0 through 10,000 milliseconds. */
   wait(ms: number): Promise<void>;
-  getState(): Promise<{ agentId: string; currentUrl: string | null; lastActivityAt: Date }>;
+  /** Read sanitized metadata without launching a browser. Still requires current authority. */
+  getState(): Promise<ComputerSessionState>;
+  /** Release the running browser, preserving saved state. Not a revocation; use disabled mode. */
   close(): Promise<void>;
 }
 
@@ -4003,6 +4669,8 @@ export function blueprintScreenshotUrl(id: string, metadata: { screenshot?: true
  * three locations: Gadget DO, User DO, and KV.
  */
 export type BlueprintMetadata = {
+  /** Portable bot snapshot. When present, the landing page installs a bot instead of an app. */
+  bot?: BotBlueprintProfile;
   title: string;
   description: string;  // longer-form description of what the blueprint does
   author: AiChatAuthorInfo;

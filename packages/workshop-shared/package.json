@@ -3,6 +3,17 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
+    "./remote-agent": { "types": "./src/remote-agent.ts", "import": "./src/remote-agent.ts" },
+    "./attachments": { "types": "./src/attachments.ts", "import": "./src/attachments.ts" },
+    "./computer": { "types": "./src/computer.ts", "import": "./src/computer.ts" },
+    "./auto-review": {
+      "types": "./src/auto-review.ts",
+      "import": "./src/auto-review.ts"
+    },
+    "./workflow-starters": {
+      "types": "./src/workflow-starters.ts",
+      "import": "./src/workflow-starters.ts"
+    },
     "./api": {
       "types": "./src/api.ts",
       "import": "./src/api.ts"
