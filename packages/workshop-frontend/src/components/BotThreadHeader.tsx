@@ -10,6 +10,7 @@ import {
   Folder,
   Gear,
   Pulse,
+  ShieldCheck,
   Users,
 } from '@phosphor-icons/react'
 import type { AgentProfile, Group } from '@gadgets/workshop-shared/api'
@@ -30,6 +31,7 @@ const inspectorActions = [
   { pane: 'skills', label: 'Skills', icon: Book },
   { pane: 'memory', label: 'Memory', icon: Brain },
   { pane: 'routines', label: 'Routines', icon: Clock },
+  { pane: 'audit', label: 'Audit log', icon: ShieldCheck },
   { pane: 'settings', label: 'Bot settings', icon: Gear },
 ] as const
 

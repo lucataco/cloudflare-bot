@@ -5,6 +5,7 @@ export const INSPECTOR_TABS = [
   'skills',
   'memory',
   'routines',
+  'audit',
   'settings',
 ] as const
 

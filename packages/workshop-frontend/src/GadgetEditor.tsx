@@ -74,6 +74,7 @@ import { ComputerView } from './components/ComputerView'
 import SkillsList from './components/SkillsList'
 import MemoryList from './components/MemoryList'
 import RoutinesList from './components/RoutinesList'
+import ToolCallAuditPane from './components/ToolCallAuditPane'
 import AgentSettingsPane from './components/AgentSettingsPane'
 import InspectorFilesPane from './components/InspectorFilesPane'
 import {
@@ -896,7 +897,7 @@ export default function GadgetEditor({
   const hasAnyApps = allGadgets.length > 0
   const showingActivity = workspaceView?.mode === 'activity'
   const messengerListPane = inspector === 'skills' || inspector === 'memory'
-    || inspector === 'routines' || inspector === 'files' || inspector === 'settings'
+    || inspector === 'routines' || inspector === 'audit' || inspector === 'files' || inspector === 'settings'
   const messengerPane = messengerMode && (
     inspector === 'gadget' || inspector === 'computer' || messengerListPane
   )
@@ -1945,6 +1946,7 @@ export default function GadgetEditor({
                       : inspector === 'skills' ? 'Skills'
                       : inspector === 'memory' ? 'Memory'
                       : inspector === 'routines' ? 'Routines'
+                      : inspector === 'audit' ? 'Audit log'
                       : inspector === 'settings' ? 'Settings'
                       : 'Pane'}
                   </span>
@@ -1984,6 +1986,13 @@ export default function GadgetEditor({
                   {inspector === 'skills' && agentProfile && <div className="h-full overflow-y-auto"><SkillsList agent={agentProfile} /></div>}
                   {inspector === 'memory' && agentProfile && <div className="h-full overflow-y-auto"><MemoryList agent={agentProfile} /></div>}
                   {inspector === 'routines' && agentProfile && <div className="h-full overflow-y-auto"><RoutinesList agent={agentProfile} /></div>}
+                  {inspector === 'audit' && (
+                    overseer && effectiveSelectedChatId !== null
+                      ? <ToolCallAuditPane overseer={overseer.stub} chatId={effectiveSelectedChatId} />
+                      : <p className="px-4 py-6 text-center text-[12px] text-kumo-inactive">
+                          Open a chat to see its tool-call audit.
+                        </p>
+                  )}
                   {inspector === 'settings' && agentProfile && (
                     <div className="h-full overflow-y-auto">
                       <AgentSettingsPane
