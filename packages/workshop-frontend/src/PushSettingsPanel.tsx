@@ -72,7 +72,7 @@ export default function PushSettingsPanel() {
             await enableBrowserPush(api, load.ownerId, settings, scope.current.controller.signal)
             return 'This browser is enrolled. Push-service acceptance does not confirm display or reading.'
           })}>{enabled ? 'Enabled in this browser' : 'Enable in this browser'}</WorkshopButton>
-        <WorkshopButton disabled={busy} onClick={() => void run(() => disableBrowserPush(api, load.ownerId))}>Disable in this browser</WorkshopButton>
+        <WorkshopButton disabled={busy || (!enabled && !local?.enabled)} onClick={() => void run(() => disableBrowserPush(api, load.ownerId))}>Disable in this browser</WorkshopButton>
         <WorkshopButton disabled={busy} onClick={refresh}>Refresh devices</WorkshopButton>
       </div>
       <h3 className="mt-5 text-sm font-medium text-kumo-default">Enrolled devices ({settings.devices.length}/5)</h3>

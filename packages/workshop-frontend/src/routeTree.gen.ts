@@ -16,7 +16,6 @@ import { Route as AttentionRouteImport } from './routes/attention'
 import { Route as AutoReviewRouteImport } from './routes/auto-review'
 import { Route as BlueprintsRouteImport } from './routes/blueprints'
 import { Route as ComputersRouteImport } from './routes/computers'
-import { Route as ContextRouteImport } from './routes/context'
 import { Route as ExploreRouteImport } from './routes/explore'
 import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
 import { Route as OutputsRouteImport } from './routes/outputs'
@@ -68,11 +67,6 @@ const BlueprintsRoute = BlueprintsRouteImport.update({
 const ComputersRoute = ComputersRouteImport.update({
   id: '/computers',
   path: '/computers',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ContextRoute = ContextRouteImport.update({
-  id: '/context',
-  path: '/context',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ExploreRoute = ExploreRouteImport.update({
@@ -169,7 +163,6 @@ export interface FileRoutesByFullPath {
   '/auto-review': typeof AutoReviewRoute
   '/blueprints': typeof BlueprintsRoute
   '/computers': typeof ComputersRoute
-  '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
   '/outputs': typeof OutputsRoute
@@ -196,7 +189,6 @@ export interface FileRoutesByTo {
   '/auto-review': typeof AutoReviewRoute
   '/blueprints': typeof BlueprintsRoute
   '/computers': typeof ComputersRoute
-  '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
   '/outputs': typeof OutputsRoute
@@ -224,7 +216,6 @@ export interface FileRoutesById {
   '/auto-review': typeof AutoReviewRoute
   '/blueprints': typeof BlueprintsRoute
   '/computers': typeof ComputersRoute
-  '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
   '/outputs': typeof OutputsRoute
@@ -253,7 +244,6 @@ export interface FileRouteTypes {
     | '/auto-review'
     | '/blueprints'
     | '/computers'
-    | '/context'
     | '/explore'
     | '/gatekeepers'
     | '/outputs'
@@ -280,7 +270,6 @@ export interface FileRouteTypes {
     | '/auto-review'
     | '/blueprints'
     | '/computers'
-    | '/context'
     | '/explore'
     | '/gatekeepers'
     | '/outputs'
@@ -307,7 +296,6 @@ export interface FileRouteTypes {
     | '/auto-review'
     | '/blueprints'
     | '/computers'
-    | '/context'
     | '/explore'
     | '/gatekeepers'
     | '/outputs'
@@ -335,7 +323,6 @@ export interface RootRouteChildren {
   AutoReviewRoute: typeof AutoReviewRoute
   BlueprintsRoute: typeof BlueprintsRoute
   ComputersRoute: typeof ComputersRoute
-  ContextRoute: typeof ContextRoute
   ExploreRoute: typeof ExploreRoute
   GatekeepersRoute: typeof GatekeepersRoute
   OutputsRoute: typeof OutputsRoute
@@ -404,13 +391,6 @@ declare module '@tanstack/react-router' {
       path: '/computers'
       fullPath: '/computers'
       preLoaderRoute: typeof ComputersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/context': {
-      id: '/context'
-      path: '/context'
-      fullPath: '/context'
-      preLoaderRoute: typeof ContextRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/explore': {
@@ -543,7 +523,6 @@ const rootRouteChildren: RootRouteChildren = {
   AutoReviewRoute: AutoReviewRoute,
   BlueprintsRoute: BlueprintsRoute,
   ComputersRoute: ComputersRoute,
-  ContextRoute: ContextRoute,
   ExploreRoute: ExploreRoute,
   GatekeepersRoute: GatekeepersRoute,
   OutputsRoute: OutputsRoute,
