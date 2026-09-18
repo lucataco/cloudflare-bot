@@ -514,7 +514,7 @@ function AutoApprovalPanel({
         <p className="mt-1 max-w-xs text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
           {loadError
             ? 'The current rules may be incomplete. Try loading them again.'
-            : 'No action categories are listed in the current catalog. Eligible requests may still offer Allow always when you review them.'}
+            : 'No action categories are listed in the current catalog. Eligible requests may still offer Always when you review them.'}
         </p>
         {loadError && (
           <WorkshopButton className="mt-4" onClick={() => void refresh()}>

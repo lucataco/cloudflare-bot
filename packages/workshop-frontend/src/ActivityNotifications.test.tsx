@@ -3,6 +3,7 @@
 
 import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import { entry, flushFrames, makeOverseer, makeTestRoot } from './action-test-harness'
 import ActivityNotifications from './ActivityNotifications'
 import { PENDING_CHECKING_COPY, PENDING_ERROR_COPY, type ActivityView } from './Activity'
@@ -170,5 +171,29 @@ describe('ActivityNotifications', () => {
     expect(details.open).toBe(true)
     expect(document.querySelector('img, image, audio, video, source, track, iframe, object, embed, link[rel="preload"], link[rel="prefetch"]')).toBeNull()
     expect(details.querySelector<HTMLAnchorElement>('a[href="https://example.com/details"]')?.rel).toBe('noopener noreferrer')
+  })
+
+  it('offers Always for an auto-approvable action and confirms the standing rule', async () => {
+    const server = makeOverseer()
+    const setAutoApprovedActionKind =
+      vi.fn<(gatekeeperId: number, actionKind: ActionKind) => Promise<void>>(async () => {})
+    Object.assign(server.overseer, { setAutoApprovedActionKind })
+    await view.render(<ActivityNotifications overseer={server.overseer} onViewActivity={onViewActivity} pendingOnly />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, {
+      gatekeeperId: 12, resourceTitle: 'Finance',
+      description: { title: 'Send', description: '', implementsRevert: false, autoApprovable: true,
+        actionKind: { tag: 'message.send', label: 'Send messages' } },
+    })] })
+    await click('Needs approval: 1 request')
+    await click('Always')
+    const dialog = document.querySelector('[role="dialog"]')!
+    expect(dialog.textContent).toContain('Send messages')
+    expect(setAutoApprovedActionKind).not.toHaveBeenCalled()
+    await act(async () => {
+      [...dialog.querySelectorAll('button')]
+        .find(candidate => candidate.textContent?.trim() === 'Enable auto-approval')!.click()
+    })
+    expect(setAutoApprovedActionKind).toHaveBeenCalledWith(12, { tag: 'message.send', label: 'Send messages' })
   })
 })

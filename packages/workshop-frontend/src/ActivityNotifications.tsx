@@ -4,7 +4,8 @@ import { ArrowRight, Pulse } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { CountBadge } from './components/CountBadge'
-import { ResolveButton } from './components/ResolveButton'
+import { AlwaysApproveButton, ResolveButton } from './components/ResolveButton'
+import AutoApproveConfirmDialog from './components/AutoApproveConfirmDialog'
 import { WorkshopButton } from './components/WorkshopControls'
 import {
   ActionApprovalDetails,
@@ -14,7 +15,9 @@ import {
   type ActivityView,
 } from './Activity'
 import { useActions } from './useActions'
+import { useAlwaysApproveTag } from './useAlwaysApproveTag'
 import { useResolveAction } from './useResolveAction'
+import type { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 
 interface ActivityNotificationsProps {
   overseer: RpcStub<Overseer>
@@ -32,7 +35,15 @@ export default function ActivityNotifications({
 }: ActivityNotificationsProps) {
   const [open, setOpen] = useState(false)
   const [processing, setProcessing] = useState<Set<number>>(new Set())
+  const [confirmAutoApprove, setConfirmAutoApprove] = useState<{
+    actionId: number
+    gatekeeperId: number
+    resourceTitle: string
+    resourceUrl?: string
+    actionKind: ActionKind
+  } | null>(null)
   const resolveAction = useResolveAction(overseer, setProcessing)
+  const { alwaysApproveTag, isTagAutoApproved } = useAlwaysApproveTag(overseer, setProcessing)
   const { status, pending } = useActions(overseer)
 
   useEffect(() => {
@@ -47,7 +58,8 @@ export default function ActivityNotifications({
   if (pendingOnly && pending.length === 0) return null
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <>
+      <Popover open={open} onOpenChange={setOpen}>
       <Popover.Trigger
         render={
           pendingOnly ? (
@@ -99,6 +111,18 @@ export default function ActivityNotifications({
           <div className="max-h-[min(58vh,420px)] overflow-y-auto pb-1">
             {pending.slice(0, PREVIEW_LIMIT).map((action, index) => {
               const isProcessing = processing.has(action.id)
+              const autoApproveTarget =
+                action.type === 'action' && action.gatekeeperId !== undefined &&
+                action.description.actionKind !== undefined &&
+                action.description.autoApprovable === true
+                  ? {
+                      actionId: action.id,
+                      gatekeeperId: action.gatekeeperId,
+                      resourceTitle: action.resourceTitle,
+                      resourceUrl: action.resourceUrl,
+                      actionKind: action.description.actionKind,
+                    }
+                  : undefined
               return (
                 <div
                   key={action.id}
@@ -116,6 +140,16 @@ export default function ActivityNotifications({
                       Review details
                     </button>
                     <div className="mt-1 flex flex-wrap items-center justify-end gap-2 [&>button]:min-h-11 [&>button]:min-w-11">
+                      {autoApproveTarget &&
+                        !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag) && (
+                        <AlwaysApproveButton
+                          disabled={isProcessing}
+                          onClick={() => {
+                            setOpen(false)
+                            setConfirmAutoApprove(autoApproveTarget)
+                          }}
+                        />
+                      )}
                       <ResolveButton
                         tone="deny"
                         disabled={isProcessing}
@@ -151,5 +185,23 @@ export default function ActivityNotifications({
         </div>
       </Popover.Content>
     </Popover>
+    {confirmAutoApprove && (
+      <AutoApproveConfirmDialog
+        open
+        actionKind={confirmAutoApprove.actionKind}
+        gatekeeperId={confirmAutoApprove.gatekeeperId}
+        resourceTitle={confirmAutoApprove.resourceTitle}
+        resourceUrl={confirmAutoApprove.resourceUrl}
+        isProcessing={processing.has(confirmAutoApprove.actionId)}
+        onOpenChange={(next) => { if (!next) setConfirmAutoApprove(null) }}
+        onConfirm={() => {
+          const { actionId, gatekeeperId, actionKind } = confirmAutoApprove
+          void alwaysApproveTag(actionId, gatekeeperId, actionKind).then(ok => {
+            if (ok) setConfirmAutoApprove(null)
+          })
+        }}
+      />
+    )}
+    </>
   )
 }

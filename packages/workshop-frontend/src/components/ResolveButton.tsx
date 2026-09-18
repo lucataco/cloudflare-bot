@@ -43,7 +43,7 @@ export function AlwaysApproveButton({
       disabled={disabled}
       className="flex h-6 cursor-pointer items-center rounded-md px-2 text-[12px] font-medium tracking-[-0.15px] text-kumo-inactive transition-colors enabled:hover:bg-kumo-tint enabled:hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-40"
     >
-      Allow always
+      Always
     </button>
   )
 }

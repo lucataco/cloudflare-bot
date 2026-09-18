@@ -73,7 +73,7 @@ async function click(label: string, root: ParentNode = document) {
 
 function alwaysButtons() {
   return [...document.querySelectorAll<HTMLButtonElement>('button')]
-    .filter(button => button.textContent?.trim() === 'Allow always')
+    .filter(button => button.textContent?.trim() === 'Always')
 }
 
 function serverWithRules(catalog: Awaited<ReturnType<Overseer['listPreApprovableActions']>> = []) {
@@ -163,7 +163,7 @@ describe.each(['activity', 'chat'] as const)('%s approval requests', surface => 
 
   it('confirms the category, not the specific title, and cancellation has no effects', async () => {
     const server = await renderRequests(surface)
-    await click('Allow always')
+    await click('Always')
     const dialog = document.querySelector('[role="dialog"]')!
     expect(dialog.textContent).toContain(category.label)
     expect(dialog.textContent).not.toContain(title)
@@ -180,13 +180,13 @@ describe.each(['activity', 'chat'] as const)('%s approval requests', surface => 
     expect(server.setAutoApprovedActionKind).not.toHaveBeenCalled()
     expect(server.approveAction).not.toHaveBeenCalled()
     expect(server.rejectAction).not.toHaveBeenCalled()
-    await click('Allow always')
+    await click('Always')
     await click('Enable auto-approval')
     expect(server.setAutoApprovedActionKind).toHaveBeenCalledExactlyOnceWith(12, category)
     expect(server.approveAction).not.toHaveBeenCalled()
     expect(server.onAutoApproveChange).toHaveBeenCalledOnce()
     expect(document.querySelector('[role="dialog"]')).toBeNull()
-    expect(document.body.textContent).not.toContain('Allow always')
+    expect(document.body.textContent).not.toContain('Always')
   })
 
   it.each([
@@ -196,7 +196,7 @@ describe.each(['activity', 'chat'] as const)('%s approval requests', surface => 
     { overrides: {}, fields: { gatekeeperId: undefined } },
   ])('does not offer a rule for an ineligible request: %j', async ({ overrides, fields }) => {
     await renderRequests(surface, [request(47, overrides, fields)])
-    expect(document.body.textContent).not.toContain('Allow always')
+    expect(document.body.textContent).not.toContain('Always')
     expect(control('Allow once')).toBeDefined()
     expect(control('Deny')).toBeDefined()
   })
@@ -230,7 +230,7 @@ describe.each(['activity', 'chat'] as const)('%s approval requests', surface => 
     expect(document.querySelector('dd a')).toBeNull()
     expect(document.querySelector('a[href^="javascript:"]')).toBeNull()
     expect(document.body.textContent).toContain('Full details with unsafe and safe.')
-    await click('Allow always')
+    await click('Always')
     expect(document.querySelector('[role="dialog"] a')).toBeNull()
   })
 
@@ -328,7 +328,7 @@ describe('Activity auto-approval rules', () => {
   it('does not equate an absent catalog with nothing being auto-approvable', async () => {
     await renderPanel(serverWithRules())
     expect(document.body.textContent).toContain('No auto-approval options listed')
-    expect(document.body.textContent).toContain('Eligible requests may still offer Allow always')
+    expect(document.body.textContent).toContain('Eligible requests may still offer Always')
     expect(document.body.textContent).not.toContain('Nothing can run automatically')
   })
 })
