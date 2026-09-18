@@ -26,6 +26,7 @@ export const botBlueprintSchema = z.object({
   skills: z.array(z.object({name, description: text, body: text})).max(100),
   routines: z.array(z.object({name, prompt: text, schedule})).max(100),
   pluginIds: z.array(z.string().min(1).max(200)).max(100),
+  starters: z.array(z.string().trim().min(1).max(2_000)).max(20).optional(),
 });
 
 /** Validate untrusted archive/KV data and strip all non-portable fields before installation. */

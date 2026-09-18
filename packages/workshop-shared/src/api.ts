@@ -619,6 +619,8 @@ export interface AuthenticatedApi extends RpcTarget {
     avatar?: AvatarImage | null;
     defaultBindings?: number[];
     notifyOnUpdates?: boolean;
+    /** Replace the empty-thread starting prompts; an empty array clears them. */
+    starters?: string[];
     /** Hide from the roster without stopping automation or deleting history. */
     hidden?: boolean;
   }): Promise<AgentProfile>;
@@ -1620,6 +1622,8 @@ export type BotBlueprintProfile = {
   routines: Pick<AgentRoutine, "name" | "prompt" | "schedule">[];
   /** Suggested connector vendors; recipients explicitly assign their own accounts. */
   pluginIds: string[];
+  /** Optional starting prompts shown in an empty thread; copied verbatim. */
+  starters?: string[];
 };
 
 /** Owner-only roster projection; source workspaces remain authoritative. */
@@ -1669,6 +1673,11 @@ export type AgentProfile = {
   hidden?: boolean;
   /** Suggested connector vendors from an installed template, without granting access. */
   pluginIds?: string[];
+  /**
+   * Optional starting prompts shown as suggestions in this bot's empty thread. Selecting one only
+   * seeds the composer draft; it grants no capability and sends nothing.
+   */
+  starters?: string[];
   /** Owner-only display projection returned by listAgents. */
   roster?: AgentRosterState;
   /** When this agent profile was created. */

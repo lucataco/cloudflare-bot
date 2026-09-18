@@ -18,4 +18,10 @@ describe('untrusted bot archive data', () => {
     expect(() => parseBotBlueprint({...bot, avatar: {url: 'javascript:alert(1)'}})).toThrow();
     expect(() => parseBotBlueprint({...bot, skills: Array.from({length: 3}, () => ({name: 'A', description: '', body: 'x'.repeat(30000)}))})).toThrow();
   });
+  it('accepts trimmed starting prompts and bounds them', () => {
+    expect(parseBotBlueprint({...bot, starters: ['  Plan my day  ']}).starters).toEqual(['Plan my day']);
+    expect(parseBotBlueprint(bot).starters).toBeUndefined();
+    expect(() => parseBotBlueprint({...bot, starters: Array.from({length: 21}, () => 'x')})).toThrow();
+    expect(() => parseBotBlueprint({...bot, starters: ['x'.repeat(2001)]})).toThrow();
+  });
 });

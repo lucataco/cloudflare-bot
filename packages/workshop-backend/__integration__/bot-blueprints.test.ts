@@ -44,6 +44,18 @@ describe("portable bot lifecycle", () => {
     expect((await api.listAgents()).find(a => a.id === source.id)?.avatar).toBeUndefined();
   });
 
+  it("copies suggested prompts through duplicate and public install", async () => {
+    using publicApi = await connect();
+    using owner = await account(publicApi);
+    const bot = await owner.createAgent("Planner", "Planner", "Plan the week", null);
+    await owner.updateAgent(bot.id, {starters: ["Plan my day", "Summarize my week"]});
+    const copy = await owner.duplicateAgent(bot.id);
+    expect(copy.starters).toEqual(["Plan my day", "Summarize my week"]);
+    const id = await owner.publishAgentBlueprint(bot.id);
+    const shared = await publicApi.getBlueprint(id);
+    expect(shared?.metadata.bot?.starters).toEqual(["Plan my day", "Summarize my week"]);
+  });
+
   it("publishes through Blueprints, downloads/reimports and installs into a separate owner", async () => {
     using publicApi = await connect();
     using owner = await account(publicApi);

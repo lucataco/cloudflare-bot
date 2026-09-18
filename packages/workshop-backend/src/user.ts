@@ -982,7 +982,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (account) pluginIds.add(account.vendorId);
     }
     return {name: agent.name, title: agent.title, description: agent.description, avatar: agent.avatar,
-      pluginIds: [...pluginIds],
+      pluginIds: [...pluginIds], starters: agent.starters,
       skills: [...this.storage.skills.list()].filter(s => s.agentId === id)
         .map(({name, description, body}) => ({name, description, body})),
       routines: [...this.storage.routines.list()].filter(r => r.agentId === id)
@@ -1020,6 +1020,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const now = new Date();
     const agent: AgentRecord = {id: crypto.randomUUID(), workspaceId, name: bot.name,
       title: bot.title, description: bot.description, avatar: bot.avatar, pluginIds: bot.pluginIds,
+      starters: bot.starters,
       defaultModelId, defaultBindings: [], notifyOnUpdates, created: now, updated: now};
     this.storage.gadgets.put({id: workspaceId, title: bot.name, created: now, lastActive: now});
     this.storage.agents.put(agent);
@@ -1074,6 +1075,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       avatar?: AvatarImage | null;
       defaultBindings?: number[];
       notifyOnUpdates?: boolean;
+      starters?: string[];
       hidden?: boolean;
     }
   ): Promise<AgentProfile> {
@@ -1093,6 +1095,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       workspaceId: agent.workspaceId,
       defaultBindings: updates.defaultBindings !== undefined ? updates.defaultBindings : agent.defaultBindings,
       notifyOnUpdates: updates.notifyOnUpdates !== undefined ? updates.notifyOnUpdates : agent.notifyOnUpdates,
+      starters: updates.starters !== undefined
+        ? updates.starters.map(value => value.trim()).filter(Boolean).slice(0, 20)
+        : agent.starters,
       created: agent.created,
       updated: new Date(),
     };

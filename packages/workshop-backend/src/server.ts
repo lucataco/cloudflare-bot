@@ -429,6 +429,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       avatar?: AvatarImage | null;
       defaultBindings?: number[];
       notifyOnUpdates?: boolean;
+      starters?: string[];
       hidden?: boolean;
     }
   ): Promise<AgentProfile> {
