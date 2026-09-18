@@ -47,3 +47,27 @@ it("rejects oversized batches before recording and propagates flush failures", a
     await expect(impl.auditToolCalls(1, author, calls)).rejects.toThrow("Disk failure");
   });
 });
+
+it("lists a chat's records newest first and pages by per-conversation sequence", async () => {
+  await runInDurableObject(env.TEST_OVERSEER.getByName(crypto.randomUUID()), async instance => {
+    const impl = instance["impl"];
+    for (let i = 0; i < 101; i++) await impl.auditToolCalls(1, author, calls);
+    for (let i = 0; i < 3; i++) await impl.auditToolCalls(2, author, calls);
+
+    const first = await impl.listToolCallAudits(1);
+    expect(first.entries).toHaveLength(100);
+    expect(first.nextBeforeSequence).toBe(1);
+    expect(first.entries[0].seq).toBe(100);
+    expect(first.entries.every((entry: {chatId: number}) => entry.chatId === 1)).toBe(true);
+
+    const second = await impl.listToolCallAudits(1, first.nextBeforeSequence);
+    expect(second.entries).toHaveLength(1);
+    expect(second.entries[0].seq).toBe(0);
+    expect(second.nextBeforeSequence).toBeUndefined();
+
+    const other = await impl.listToolCallAudits(2);
+    expect(other.entries).toHaveLength(3);
+    expect(other.nextBeforeSequence).toBeUndefined();
+    expect(other.entries.every((entry: {chatId: number}) => entry.chatId === 2)).toBe(true);
+  });
+});

@@ -9,7 +9,7 @@ import { type PreparedNamedDelegation, MAX_NAMED_CHILDREN, MAX_NAMED_TARGETS,
   MAX_NAMED_BINDINGS, MAX_DELEGATION_PROMPT_BYTES, MAX_DELEGATION_INSTRUCTIONS_BYTES,
   MAX_DELEGATION_RESULT_BYTES } from "./named-delegation";
 import type { AgentProposal, AgentProposalDraft } from "@gadgets/workshop-shared/api";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime,   AgentProfile, AgentRoutineSchedule, AgentSkill, ChatQueueItem } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime,   AgentProfile, AgentRoutineSchedule, AgentSkill, ChatQueueItem, ToolCallAuditPage } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -1238,6 +1238,17 @@ type CodeUpdate = {
  * migrateCodeLogToGit() over synthetic legacy workspaces built on mock storage with the real
  * schema.
  */
+/**
+ * Padded so lexicographic index-key order matches (chatId, seq) numeric order.
+ */
+function auditChatPrefix(chatId: number): string {
+  return `${chatId.toString().padStart(12, "0")}:`;
+}
+
+function auditChatSeqKey(chatId: number, seq: number): string {
+  return `${auditChatPrefix(chatId)}${seq.toString().padStart(16, "0")}`;
+}
+
 export function makeOverseerStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     singletons: {
@@ -1309,6 +1320,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       nextActionId: 0,
       nextChatId: 0,
       nextHookId: 0,
+      /** Next per-conversation tool-call audit sequence (see listToolCallAudits). */
+      nextAuditSeq: 0,
 
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
@@ -1328,7 +1341,17 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
     collections: {
       attentionSources: collection<AttentionProjection>()({ primaryKey: "sourceId" }),
-      toolCallAudits: collection<ToolCallAuditRecord>()({primaryKey: "id"}),
+      toolCallAudits: collection<ToolCallAuditRecord>()({
+        primaryKey: "id",
+        nonUniqueIndexes: {
+          // One padded string key per record, ordered by (chatId, seq). Sparse: records written
+          // before the audit sequence existed are not listed, so the index needs no backfill (and,
+          // being append-only, no later write can corrupt it). See auditChatSeqKey().
+          byChatSeq(record: ToolCallAuditRecord) {
+            return record.seq === undefined ? null : auditChatSeqKey(record.chatId, record.seq);
+          },
+        },
+      }),
 
       // READ-ONLY LEGACY: the pre-git-storage incremental code log, tightly-packed from version 1
       // (there's no entry for version 0, the starting empty state). Nothing writes it anymore --
@@ -3704,11 +3727,33 @@ class OverseerImpl implements AgentHooks {
         !/^[A-Za-z][A-Za-z0-9_]{0,99}$/.test(call.toolName))) {
       throw new AgentTurnError("Tool batch exceeds audit limits; no tools were executed.");
     }
-    this.storage.toolCallAudits.put({id: crypto.randomUUID(), chatId, modelId: author.id,
+    let seq = this.storage.nextAuditSeq.get();
+    this.storage.nextAuditSeq.put(seq + 1);
+    this.storage.toolCallAudits.put({id: crypto.randomUUID(), seq, chatId, modelId: author.id,
       agentProfileId: author.agentProfileId, execution, recordedAt: new Date(),
       calls: calls.map(({toolCallId, toolName}) => ({toolCallId, toolName}))});
     // SQL writes are synchronous but durable flushing isn't. Never dispatch on an unconfirmed row.
     await this.ctx.storage.sync();
+  }
+
+  /**
+   * Read a bounded page of the workspace's append-only pre-dispatch tool-call evidence for one
+   * conversation, newest first. Read-only: nothing here mutates or removes a record, so the audit
+   * trail stays append-only.
+   */
+  async listToolCallAudits(chatId: number, beforeSequence?: number): Promise<ToolCallAuditPage> {
+    const limit = 100;
+    const prefix = auditChatPrefix(chatId);
+    // Exclusive upper bound: keys strictly below the cursor are older records in this conversation.
+    const end = beforeSequence === undefined
+      ? undefined
+      : `${prefix}${beforeSequence.toString().padStart(16, "0")}`;
+    const entries = [...this.storage.toolCallAudits.byChatSeq.list({
+      prefix, ...(end === undefined ? {} : {end}), reverse: true, limit })];
+    const last = entries.at(-1);
+    return entries.length === limit && last?.seq !== undefined
+      ? {entries, nextBeforeSequence: last.seq}
+      : {entries};
   }
 
   // AgentHooks implementation: the agent step's persistence barrier (see the interface doc for
@@ -12826,6 +12871,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.getNamedDelegation(id);
   }
 
+  async listToolCallAudits(chatId: number, beforeSequence?: number): Promise<ToolCallAuditPage> {
+    this.impl.getChatMetaOrThrow(chatId);
+    return this.impl.listToolCallAudits(chatId, beforeSequence);
+  }
+
   async getTaskRunEvidence(runId: string, beforeSequence?: number): Promise<TaskRunEvidencePage> {
     const run = this.impl.storage.taskRuns.get(runId);
     if (!run || !this.impl.storage.chatMeta.get(run.chatId)) throw new Error("No such task run.");
@@ -13833,6 +13883,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
   async listTaskRuns(_chatId: number, _beforeSequence?: number): Promise<TaskRunPage> { this.#deny(); }
+  async listToolCallAudits(_chatId: number, _beforeSequence?: number): Promise<ToolCallAuditPage> { this.#deny(); }
   async getNamedDelegationConfig(): Promise<NamedDelegationConfig> { this.#deny(); }
   async setNamedDelegationConfig(_targets: NamedDelegationTargetConfig[], _expectedRevision: number): Promise<NamedDelegationConfig> { this.#deny(); }
   async getNamedDelegation(_id: string): Promise<NamedDelegationResult> { this.#deny(); }

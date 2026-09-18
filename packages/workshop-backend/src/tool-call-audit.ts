@@ -1,6 +1,8 @@
 /** Append-only pre-dispatch evidence. Admission is not evidence that a tool ran or succeeded. */
 export type ToolCallAuditRecord = {
   id: string;
+  /** Per-conversation sequence allocated at write time; absent on records written before it existed. */
+  seq?: number;
   chatId: number;
   modelId: string;
   agentProfileId?: string;

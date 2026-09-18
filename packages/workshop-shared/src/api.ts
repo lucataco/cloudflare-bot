@@ -2358,6 +2358,14 @@ export interface Overseer extends RpcTarget {
   getTaskRunEvidence(runId: string, beforeSequence?: number): Promise<TaskRunEvidencePage>;
 
   /**
+   * List up to 100 pre-dispatch tool-call audit records for one conversation, newest first.
+   * Records are append-only evidence that a model step's tool batch was durably admitted for
+   * dispatch. They contain tool names only — never arguments, results, prompts or credentials —
+   * and are not evidence that any tool ran or succeeded. `beforeSequence` pages to older records.
+   */
+  listToolCallAudits(chatId: number, beforeSequence?: number): Promise<ToolCallAuditPage>;
+
+  /**
    * List available models. The first listed model should be the default, unless the user has
    * chosen something else.
    */
@@ -3313,6 +3321,42 @@ export type TaskRunEvidencePage = {
     changeState?: "proposed" | "merged" | "reverted";
   }[];
   /** Exclusive sequence cursor for older evidence. */
+  nextBeforeSequence?: number;
+};
+
+/** Append-only pre-dispatch evidence for one model step's proposed tool batch. */
+export type ToolCallAuditEntry = {
+  /** Server-generated record id. */
+  id: string;
+  /** Conversation the batch belongs to. */
+  chatId: number;
+  /** Model/author that proposed the batch. */
+  modelId: string;
+  /** Bot profile that proposed the batch, when the author was a bot. */
+  agentProfileId?: string;
+  /** Logical task and attempt the batch was attributed to, when tracked. */
+  execution?: {
+    /** Logical task id. */
+    id: string;
+    /** Execution attempt counter. */
+    attempt: number;
+  };
+  /** When the batch was durably recorded, before dispatch. */
+  recordedAt: Date;
+  /** Proposed tool calls, excluding arguments, results, prompts and credentials. */
+  calls: {
+    /** Provider tool-call id. */
+    toolCallId: string;
+    /** Tool name. */
+    toolName: string;
+  }[];
+};
+
+/** A bounded page of pre-dispatch tool-call audit records for one conversation, newest first. */
+export type ToolCallAuditPage = {
+  /** Records newest first. */
+  entries: ToolCallAuditEntry[];
+  /** Exclusive per-conversation sequence cursor for older records. */
   nextBeforeSequence?: number;
 };
 
