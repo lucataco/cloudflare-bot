@@ -301,6 +301,22 @@ describe('automatic model wording across bot settings', () => {
     expect(document.querySelector('a[href^="/gatekeepers/"]')).toBeNull()
   })
 
+  it('offers the photo picker in the settings pane and saves a removal', async () => {
+    const withAvatar = { ...agent, avatar: { url: 'data:image/png;base64,AQID' } }
+    updateAgent.mockResolvedValue({ ...withAvatar, avatar: undefined })
+    const { overseer } = makeOverseer()
+    await view.render(<AgentSettingsPane agent={agent} authenticatedApi={authenticatedApi} overseer={overseer}
+      workspaceId={agent.workspaceId} isOwner />)
+    expect(button('Add photo')).toBeDefined()
+
+    view.cleanup()
+    await view.render(<AgentSettingsPane agent={withAvatar} authenticatedApi={authenticatedApi} overseer={overseer}
+      workspaceId={withAvatar.workspaceId} isOwner />)
+    await act(async () => button('Remove').click())
+    await act(async () => button('Save').click())
+    expect(updateAgent).toHaveBeenLastCalledWith(withAvatar.id, expect.objectContaining({ avatar: null }))
+  })
+
   it.each(['create dialog', 'settings pane'])('uses the same Automatic label in the %s', async surface => {
     if (surface === 'create dialog') {
       await view.render(<CreateAgentModal visible models={models} authenticatedApi={authenticatedApi} onCancel={() => {}} onSuccess={() => {}} />)

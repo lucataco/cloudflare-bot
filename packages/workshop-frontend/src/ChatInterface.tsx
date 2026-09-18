@@ -109,6 +109,7 @@ import {
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { WorkflowStarterCards, WorkflowStarterMenu } from "./components/workflows/WorkflowStarters";
 import AgentStarterCards from "./components/AgentStarterCards";
+import { AGENTS_CHANGED_EVENT } from "./agentsChanged";
 import type { ChatChangeRow } from "./otClient";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -4975,6 +4976,9 @@ function ChatInterface({
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const userPickedModelRef = useRef(false);
   const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
+  // Bumped by notifyAgentsChanged() so a profile edited from the settings pane (avatar, suggested
+  // prompts, etc.) is reflected here without a remount.
+  const [agentsChangedTick, setAgentsChangedTick] = useState(0);
   const [workflowSeed, setWorkflowSeed] = useState<{
     workspaceId: string | undefined; chatId: number | null; starter: { prompt: string }; nonce: number;
   } | null>(null);
@@ -4994,6 +4998,28 @@ function ChatInterface({
   useEffect(() => setRepeatTask(null), [workspaceId, selectedChatId]);
   const [currentGroup, setCurrentGroup] = useState<Group | null>(null);
   const [groupMemberAgents, setGroupMemberAgents] = useState<AgentProfile[]>([]);
+  // Refresh the workspace's agent profile when the roster notifies a change, so editing a bot's
+  // profile (avatar, suggested prompts, etc.) updates this thread without a remount. Groups resolve
+  // their member profile elsewhere, so leave that path to the group effect.
+  useEffect(() => {
+    const onAgentsChanged = () => setAgentsChangedTick(value => value + 1);
+    window.addEventListener(AGENTS_CHANGED_EVENT, onAgentsChanged);
+    return () => window.removeEventListener(AGENTS_CHANGED_EVENT, onAgentsChanged);
+  }, []);
+  useEffect(() => {
+    if (!workspaceId || currentGroup) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const profile = await authenticatedApi.getAgentByWorkspaceId(workspaceId);
+        if (!cancelled && profile) setCurrentAgentProfile(profile);
+      } catch {
+        // No agent profile for this workspace, or the capability isn't available.
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [authenticatedApi, workspaceId, agentsChangedTick, currentGroup]);
   const [selectedMemberAgentId, setSelectedMemberAgentId] = useState<string | null>(null);
   const [showComputer, setShowComputer] = useState(false);
   const { enabled: agentShellEnabled } = useUiFeatureFlag('agentShell');

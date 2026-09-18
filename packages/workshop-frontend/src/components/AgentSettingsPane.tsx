@@ -7,6 +7,8 @@ import { AccountsSubscriberAdapter, type AccountEvent } from '../accountsSubscri
 import { logRpcFailure } from '../rpcErrors'
 import DelegationSettings from './DelegationSettings'
 import BotProfileActions from './BotProfileActions'
+import AgentAvatarPicker from './AgentAvatarPicker'
+import type { AvatarImage } from '@gadgets/workshop-shared/gatekeeper'
 import { notifyAgentsChanged } from '../agentsChanged'
 
 export default function AgentSettingsPane({
@@ -29,6 +31,7 @@ export default function AgentSettingsPane({
   const [name, setName] = useState(agent.name)
   const [title, setTitle] = useState(agent.title)
   const [description, setDescription] = useState(agent.description)
+  const [avatar, setAvatar] = useState<AvatarImage | undefined>(agent.avatar)
   const [startersText, setStartersText] = useState((agent.starters ?? []).join('\n'))
   const [defaultModelId, setDefaultModelId] = useState<string | null>(agent.defaultModelId)
   const [notifyOnUpdates, setNotifyOnUpdates] = useState(agent.notifyOnUpdates ?? true)
@@ -45,6 +48,7 @@ export default function AgentSettingsPane({
     setName(agent.name)
     setTitle(agent.title)
     setDescription(agent.description)
+    setAvatar(agent.avatar)
     setStartersText((agent.starters ?? []).join('\n'))
     setDefaultModelId(agent.defaultModelId)
     setNotifyOnUpdates(agent.notifyOnUpdates ?? true)
@@ -119,6 +123,7 @@ export default function AgentSettingsPane({
     setLoading(true)
     try {
       const starters = startersText.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 20)
+      const avatarChanged = (avatar?.url ?? null) !== (agent.avatar?.url ?? null)
       const updated = await authenticatedApi.updateAgent(agent.id, {
         name: name.trim(),
         title: title.trim(),
@@ -126,12 +131,14 @@ export default function AgentSettingsPane({
         defaultModelId,
         defaultBindings: selectedAccountIds,
         notifyOnUpdates,
+        ...(avatarChanged ? { avatar: avatar ?? null } : {}),
         ...(starters.join('\n') !== (agent.starters ?? []).join('\n') ? { starters } : {}),
       })
       if (saveScope.current !== scope) return
       setName(updated.name)
       setTitle(updated.title)
       setDescription(updated.description)
+      setAvatar(updated.avatar)
       setStartersText((updated.starters ?? []).join('\n'))
       setDefaultModelId(updated.defaultModelId)
       setNotifyOnUpdates(updated.notifyOnUpdates ?? true)
@@ -160,6 +167,7 @@ export default function AgentSettingsPane({
         <span className="text-[12px] font-medium text-kumo-default">Name</span>
         <Input value={name} onChange={(e) => setName(e.target.value)} disabled={loading} />
       </label>
+      <AgentAvatarPicker avatar={avatar} disabled={loading} onChange={setAvatar} />
       <label className="flex flex-col gap-1.5">
         <span className="text-[12px] font-medium text-kumo-default">Job</span>
         <Input value={title} onChange={(e) => setTitle(e.target.value)} disabled={loading} />
