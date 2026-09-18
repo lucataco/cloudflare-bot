@@ -39,6 +39,7 @@ const publishAgentBlueprint = vi.fn<AuthenticatedApi['publishAgentBlueprint']>()
 const duplicateAgent = vi.fn<AuthenticatedApi['duplicateAgent']>()
 const subscriptionDispose = vi.fn<() => void>()
 const subscribeConnectedAccounts = vi.fn<AuthenticatedApi['subscribeConnectedAccounts']>()
+const listGatekeeperApps = vi.fn<AuthenticatedApi['listGatekeeperApps']>()
 let authenticatedApi: RpcStub<AuthenticatedApi>
 
 beforeEach(() => {
@@ -46,6 +47,7 @@ beforeEach(() => {
   updateAgent.mockReset().mockResolvedValue(agent)
   publishAgentBlueprint.mockReset().mockResolvedValue('public-id')
   duplicateAgent.mockReset().mockResolvedValue({ ...agent, id: 'copy', workspaceId: 'fresh-workspace' })
+  listGatekeeperApps.mockReset().mockResolvedValue([])
   subscribeConnectedAccounts.mockReset().mockImplementation(async () => new RpcStub(new class extends RpcTarget {
     [Symbol.dispose]() { subscriptionDispose() }
   }()))
@@ -56,6 +58,7 @@ beforeEach(() => {
       return subscribeConnectedAccounts(...args)
     }
     async listModels() { return models }
+    listGatekeeperApps(agentId?: string) { return listGatekeeperApps(agentId) }
     publishAgentBlueprint(id: string) { return publishAgentBlueprint(id) }
     duplicateAgent(id: string) { return duplicateAgent(id) }
   }() as AuthenticatedApi)
@@ -281,6 +284,21 @@ describe('automatic model wording across bot settings', () => {
     expect(updateAgent).toHaveBeenLastCalledWith(agent.id, expect.objectContaining({
       starters: ['Plan my day', 'Summarize my week'],
     }))
+  })
+
+  it("links an owner to the bot's per-agent apps and hides them from others", async () => {
+    listGatekeeperApps.mockResolvedValue([{ id: 'context', title: 'Context & Skills' }])
+    const { overseer } = makeOverseer()
+    await view.render(<AgentSettingsPane agent={agent} authenticatedApi={authenticatedApi} overseer={overseer}
+      workspaceId={agent.workspaceId} isOwner />)
+    flushFrames()
+    expect(listGatekeeperApps).toHaveBeenCalledWith(agent.id)
+    expect(document.querySelector<HTMLAnchorElement>('a[href="/gatekeepers/context?agentId=bot-1"]')?.textContent)
+      .toBe('Context & Skills')
+    await view.render(<AgentSettingsPane agent={agent} authenticatedApi={authenticatedApi} overseer={overseer}
+      workspaceId={agent.workspaceId} isOwner={false} />)
+    flushFrames()
+    expect(document.querySelector('a[href^="/gatekeepers/"]')).toBeNull()
   })
 
   it.each(['create dialog', 'settings pane'])('uses the same Automatic label in the %s', async surface => {

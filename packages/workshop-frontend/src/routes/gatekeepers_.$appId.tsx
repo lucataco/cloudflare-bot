@@ -12,12 +12,16 @@ import { useGatekeeperApps } from '../useGatekeeperApps'
  * nesting inside the /gatekeepers connectors page's component.
  */
 export const Route = createFileRoute('/gatekeepers_/$appId')({
+  validateSearch: (search: Record<string, unknown>): { agentId?: string } => (
+    typeof search.agentId === 'string' && search.agentId ? { agentId: search.agentId } : {}
+  ),
   component: GatekeeperApp,
 })
 
 function GatekeeperApp() {
   const { appId } = Route.useParams()
+  const { agentId } = Route.useSearch()
   const app = useGatekeeperApps().find((a) => a.id === appId)
   useDocumentTitle(app?.title ?? 'App')
-  return <GatekeeperAppPage appId={appId} />
+  return <GatekeeperAppPage appId={appId} agentId={agentId} />
 }

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, Input, Textarea, Select, Checkbox, useKumoToastManager } from '@cloudflare/kumo'
-import type { AgentProfile, AiChatAuthorInfo, Overseer } from '@gadgets/workshop-shared/api'
+import type { AgentProfile, AiChatAuthorInfo, GatekeeperAppInfo, Overseer } from '@gadgets/workshop-shared/api'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { AccountsSubscriberAdapter, type AccountEvent } from '../accountsSubscriber'
@@ -34,6 +34,7 @@ export default function AgentSettingsPane({
   const [notifyOnUpdates, setNotifyOnUpdates] = useState(agent.notifyOnUpdates ?? true)
   const [models, setModels] = useState<AiChatAuthorInfo[]>([])
   const [connectedAccounts, setConnectedAccounts] = useState<AccountEvent[]>([])
+  const [agentApps, setAgentApps] = useState<GatekeeperAppInfo[]>([])
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>(agent.defaultBindings ?? [])
   const saveScope = useRef<object | null>(null)
 
@@ -63,6 +64,22 @@ export default function AgentSettingsPane({
       .catch((err: unknown) => logRpcFailure('Failed to load models:', err))
     return () => { cancelled = true }
   }, [authenticatedApi])
+
+  // Per-agent management apps (e.g. this bot's own Context Library). Plain data, so safe in state.
+  // Best-effort: a deployment or session without the capability must not break bot settings.
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const apps = await authenticatedApi.listGatekeeperApps(agent.id)
+        if (!cancelled) setAgentApps(apps)
+      } catch (err) {
+        if (!cancelled) logRpcFailure('Failed to load bot apps:', err)
+      }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [authenticatedApi, agent.id])
 
   useEffect(() => {
     let cancelled = false
@@ -217,6 +234,20 @@ export default function AgentSettingsPane({
       <Button disabled={loading || !name.trim() || !title.trim()} onClick={() => { void handleSave() }}>
         {loading ? 'Saving…' : 'Save'}
       </Button>
+      {isOwner && agentApps.length > 0 && (
+        <div className="flex flex-col gap-2 border-t border-kumo-line pt-3">
+          <span className="text-[12px] font-medium text-kumo-default">Apps</span>
+          {agentApps.map((app) => (
+            <a
+              key={app.id}
+              href={`/gatekeepers/${encodeURIComponent(app.id)}?agentId=${encodeURIComponent(agent.id)}`}
+              className="inline-flex min-h-9 items-center justify-center rounded-md border border-kumo-line bg-kumo-base px-3 text-[13px] font-medium text-kumo-default transition-colors hover:bg-kumo-tint focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-ring"
+            >
+              {app.title}
+            </a>
+          ))}
+        </div>
+      )}
       {isOwner && overseer && workspaceId === agent.workspaceId && <DelegationSettings
         authenticatedApi={authenticatedApi} overseer={overseer} workspaceId={workspaceId}
         sourceAgentId={agent.id} isOwner={isOwner}

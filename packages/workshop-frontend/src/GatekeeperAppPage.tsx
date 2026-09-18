@@ -11,9 +11,11 @@ function disposeFrame(frame: GatekeeperUiFrame | null) {
 
 /**
  * Renders a gatekeeper's full-page management app (a sandboxed SPA the gatekeeper serves).
- * Fetches the app frame (iframe HTML + `ui` capability) from the backend and hosts it.
+ * Fetches the app frame (iframe HTML + `ui` capability) from the backend and hosts it. When
+ * `agentId` is given, opens that bot's own account (e.g. its Context Library) instead of the
+ * user-global one.
  */
-export default function GatekeeperAppPage({ appId }: { appId: string }) {
+export default function GatekeeperAppPage({ appId, agentId }: { appId: string; agentId?: string }) {
   const { authenticatedApi } = useAuthenticatedApi()
   // Wrap the frame in an object: it holds a `ui` RPC stub, and we never want useState's setter to
   // treat a stored value as an updater function.
@@ -24,7 +26,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
     let cancelled = false
     let acquired: GatekeeperUiFrame | null = null
     authenticatedApi
-      .getGatekeeperApp(appId)
+      .getGatekeeperApp(appId, agentId)
       .then((frame) => {
         if (!frame) {
           if (!cancelled) setError('This app is not available on this deployment.')
@@ -48,7 +50,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
       cancelled = true
       disposeFrame(acquired)
     }
-  }, [authenticatedApi, appId])
+  }, [authenticatedApi, appId, agentId])
 
   if (error) {
     return (
