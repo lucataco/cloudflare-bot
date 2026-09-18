@@ -107,8 +107,8 @@ import {
   OutputFormatOffer,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import type { WorkflowStarter } from "@gadgets/workshop-shared/workflow-starters";
 import { WorkflowStarterCards, WorkflowStarterMenu } from "./components/workflows/WorkflowStarters";
+import AgentStarterCards from "./components/AgentStarterCards";
 import type { ChatChangeRow } from "./otClient";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -4976,12 +4976,13 @@ function ChatInterface({
   const userPickedModelRef = useRef(false);
   const [currentAgentProfile, setCurrentAgentProfile] = useState<AgentProfile | null>(null);
   const [workflowSeed, setWorkflowSeed] = useState<{
-    workspaceId: string | undefined; chatId: number | null; starter: WorkflowStarter; nonce: number;
+    workspaceId: string | undefined; chatId: number | null; starter: { prompt: string }; nonce: number;
   } | null>(null);
   useEffect(() => setWorkflowSeed(null), [workspaceId, selectedChatId]);
-  const selectWorkflowStarter = (starter: WorkflowStarter) => setWorkflowSeed((previous) => ({
+  const selectWorkflowStarter = (starter: { prompt: string }) => setWorkflowSeed((previous) => ({
     workspaceId, chatId: selectedChatId, starter, nonce: (previous?.nonce ?? 0) + 1,
   }));
+  const selectAgentStarter = (prompt: string) => selectWorkflowStarter({ prompt });
   const activeWorkflowSeed = workflowSeed?.workspaceId === workspaceId && workflowSeed?.chatId === selectedChatId
     ? workflowSeed : null;
   const [repeatTask, setRepeatTask] = useState<{
@@ -7736,6 +7737,10 @@ function ChatInterface({
                   {currentAgentProfile?.workspaceId === workspaceId && !currentGroup && (
                     <WorkflowStarterCards onSelect={selectWorkflowStarter} />
                   )}
+                  {currentAgentProfile?.workspaceId === workspaceId && !currentGroup &&
+                    !!currentAgentProfile.starters?.length && (
+                    <AgentStarterCards starters={currentAgentProfile.starters} onSelect={selectAgentStarter} />
+                  )}
                 </div>
               </div>
               <div className="flex-shrink-0">
@@ -7951,6 +7956,12 @@ function ChatInterface({
                     {currentMessages.length === 0 && !isAgentActive && !namedChild &&
                       currentAgentProfile?.workspaceId === workspaceId && !currentGroup && (
                       <WorkflowStarterCards onSelect={selectWorkflowStarter} />
+                    )}
+
+                    {currentMessages.length === 0 && !isAgentActive && !namedChild &&
+                      currentAgentProfile?.workspaceId === workspaceId && !currentGroup &&
+                      !!currentAgentProfile.starters?.length && (
+                      <AgentStarterCards starters={currentAgentProfile.starters} onSelect={selectAgentStarter} />
                     )}
 
                     {displayEntries.map((entry, entryIndex) => {

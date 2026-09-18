@@ -8,6 +8,8 @@ import { AccountsSubscriberAdapter, AccountEvent } from '../accountsSubscriber'
 import { logRpcFailure } from '../rpcErrors'
 import { openOAuthPopup } from '../openOAuthPopup'
 import BotProfileActions from './BotProfileActions'
+import AgentAvatarPicker from './AgentAvatarPicker'
+import type { AvatarImage } from '@gadgets/workshop-shared/gatekeeper'
 
 interface EditAgentModalProps {
   visible: boolean
@@ -34,6 +36,7 @@ export default function EditAgentModal({
   const [name, setName] = useState('')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [avatar, setAvatar] = useState<AvatarImage | undefined>(undefined)
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -47,6 +50,7 @@ export default function EditAgentModal({
       setName(agent.name)
       setTitle(agent.title)
       setDescription(agent.description)
+      setAvatar(agent.avatar)
       setDefaultModelId(agent.defaultModelId)
       setSelectedAccountIds(agent.defaultBindings ?? [])
       setNotifyOnUpdates(agent.notifyOnUpdates ?? true)
@@ -113,6 +117,7 @@ export default function EditAgentModal({
         name: name.trim(),
         title: title.trim(),
         description: description.trim(),
+        avatar: avatar ?? null,
         defaultModelId,
         defaultBindings: selectedAccountIds,
         notifyOnUpdates,
@@ -208,6 +213,8 @@ export default function EditAgentModal({
             error={errors.name}
           />
         </div>
+
+        <AgentAvatarPicker avatar={avatar} disabled={loading} onChange={setAvatar} />
 
         {/* Title */}
         <div>

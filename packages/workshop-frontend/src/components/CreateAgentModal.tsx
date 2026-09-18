@@ -9,6 +9,8 @@ import { AccountsSubscriberAdapter, AccountEvent } from '../accountsSubscriber'
 import { logRpcFailure } from '../rpcErrors'
 import { openOAuthPopup } from '../openOAuthPopup'
 import { FIRST_BOT_SUGGESTIONS } from './botRolePresets'
+import AgentAvatarPicker from './AgentAvatarPicker'
+import type { AvatarImage } from '@gadgets/workshop-shared/gatekeeper'
 
 interface CreateAgentModalProps {
   visible: boolean
@@ -31,6 +33,7 @@ export default function CreateAgentModal({
   const [name, setName] = useState('')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [avatar, setAvatar] = useState<AvatarImage | undefined>(undefined)
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -44,6 +47,7 @@ export default function CreateAgentModal({
       setName('')
       setTitle('')
       setDescription('')
+      setAvatar(undefined)
       setDefaultModelId(null)
       setErrors({})
       setAdvancedOpen(false)
@@ -111,7 +115,7 @@ export default function CreateAgentModal({
         title.trim(),
         description.trim() || '',
         defaultModelId,
-        undefined,
+        avatar,
         selectedAccountIds,
         notifyOnUpdates
       )
@@ -203,6 +207,8 @@ export default function CreateAgentModal({
             error={errors.name}
           />
         </div>
+
+        <AgentAvatarPicker avatar={avatar} disabled={loading} onChange={setAvatar} />
 
         {/* Title */}
         <div>

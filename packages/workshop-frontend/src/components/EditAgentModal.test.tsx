@@ -211,7 +211,7 @@ describe('EditAgentModal with real Kumo controls', () => {
     await act(async () => button('Save Changes').click())
     expect(updateAgent).toHaveBeenCalledExactlyOnceWith(agent.id, {
       name: agent.name, title: agent.title, description: agent.description,
-      defaultModelId, defaultBindings: [], notifyOnUpdates: true,
+      avatar: null, defaultModelId, defaultBindings: [], notifyOnUpdates: true,
     })
     expect(onSuccess).toHaveBeenCalledExactlyOnceWith(profile)
     expect(onCancel).not.toHaveBeenCalled()
@@ -264,6 +264,23 @@ describe('automatic model wording across bot settings', () => {
     await view.render(<AgentSettingsPane agent={agent} authenticatedApi={authenticatedApi} overseer={overseer}
       workspaceId="other-workspace" isOwner />)
     expect(document.querySelector('[aria-label="Named delegation"]')).toBeNull()
+  })
+
+  it('saves edited suggested prompts and sends none when untouched', async () => {
+    const { overseer } = makeOverseer()
+    updateAgent.mockResolvedValue({ ...agent, starters: ['Plan my day', 'Summarize my week'] })
+    await view.render(<AgentSettingsPane agent={agent} authenticatedApi={authenticatedApi} overseer={overseer}
+      workspaceId={agent.workspaceId} isOwner />)
+    await act(async () => button('Save').click())
+    expect(updateAgent).toHaveBeenLastCalledWith(agent.id, expect.not.objectContaining({ starters: expect.anything() }))
+    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Suggested prompts"]')!
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      .call(textarea, 'Plan my day\n\n  Summarize my week  ')
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await act(async () => button('Save').click())
+    expect(updateAgent).toHaveBeenLastCalledWith(agent.id, expect.objectContaining({
+      starters: ['Plan my day', 'Summarize my week'],
+    }))
   })
 
   it.each(['create dialog', 'settings pane'])('uses the same Automatic label in the %s', async surface => {

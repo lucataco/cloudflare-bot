@@ -29,6 +29,7 @@ export default function AgentSettingsPane({
   const [name, setName] = useState(agent.name)
   const [title, setTitle] = useState(agent.title)
   const [description, setDescription] = useState(agent.description)
+  const [startersText, setStartersText] = useState((agent.starters ?? []).join('\n'))
   const [defaultModelId, setDefaultModelId] = useState<string | null>(agent.defaultModelId)
   const [notifyOnUpdates, setNotifyOnUpdates] = useState(agent.notifyOnUpdates ?? true)
   const [models, setModels] = useState<AiChatAuthorInfo[]>([])
@@ -43,6 +44,7 @@ export default function AgentSettingsPane({
     setName(agent.name)
     setTitle(agent.title)
     setDescription(agent.description)
+    setStartersText((agent.starters ?? []).join('\n'))
     setDefaultModelId(agent.defaultModelId)
     setNotifyOnUpdates(agent.notifyOnUpdates ?? true)
     setSelectedAccountIds(agent.defaultBindings ?? [])
@@ -99,6 +101,7 @@ export default function AgentSettingsPane({
     if (!scope || loading || !name.trim() || !title.trim()) return
     setLoading(true)
     try {
+      const starters = startersText.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 20)
       const updated = await authenticatedApi.updateAgent(agent.id, {
         name: name.trim(),
         title: title.trim(),
@@ -106,11 +109,13 @@ export default function AgentSettingsPane({
         defaultModelId,
         defaultBindings: selectedAccountIds,
         notifyOnUpdates,
+        ...(starters.join('\n') !== (agent.starters ?? []).join('\n') ? { starters } : {}),
       })
       if (saveScope.current !== scope) return
       setName(updated.name)
       setTitle(updated.title)
       setDescription(updated.description)
+      setStartersText((updated.starters ?? []).join('\n'))
       setDefaultModelId(updated.defaultModelId)
       setNotifyOnUpdates(updated.notifyOnUpdates ?? true)
       setSelectedAccountIds(updated.defaultBindings ?? [])
@@ -145,6 +150,20 @@ export default function AgentSettingsPane({
       <label className="flex flex-col gap-1.5">
         <span className="text-[12px] font-medium text-kumo-default">Description</span>
         <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} disabled={loading} />
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-[12px] font-medium text-kumo-default">Suggested prompts</span>
+        <Textarea
+          aria-label="Suggested prompts"
+          value={startersText}
+          onChange={(e) => setStartersText(e.target.value)}
+          rows={3}
+          disabled={loading}
+          placeholder="One starting prompt per line"
+        />
+        <span className="text-xs leading-5 text-kumo-subtle">
+          Shown as suggestions in an empty thread. Selecting one only fills the composer draft; nothing runs or connects.
+        </span>
       </label>
       <label className="flex items-center gap-2">
         <Checkbox
