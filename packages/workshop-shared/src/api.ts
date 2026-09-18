@@ -886,16 +886,19 @@ export interface AuthenticatedApi extends RpcTarget {
   /**
    * List the gatekeepers that expose a full-page management UI (VendorDescription.providesUi) and are
    * available to this user. The Workshop renders a nav entry + page per entry. Independent of whether
-   * the gatekeeper is a singleton.
+   * the gatekeeper is a singleton. When `agentId` is given, only that bot's per-agent accounts are
+   * listed (e.g. its own Context Library); when omitted, the user-global accounts are listed and
+   * per-agent duplicates are collapsed to one entry per vendor.
    */
-  listGatekeeperApps(): Promise<GatekeeperAppInfo[]>;
+  listGatekeeperApps(agentId?: string): Promise<GatekeeperAppInfo[]>;
 
   /**
    * Get the app frame (self-contained iframe HTML + the gatekeeper's `ui` capability) for the given
-   * gatekeeper id, or null if there is no such UI-providing gatekeeper. The Workshop hosts the HTML
+   * gatekeeper id, or null if there is no such UI-providing gatekeeper. When `agentId` is given, the
+   * bot's own per-agent account is opened instead of the user-global one. The Workshop hosts the HTML
    * in a sandboxed iframe and exposes `ui` to it over a MessagePort RPC session.
    */
-  getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null>;
+  getGatekeeperApp(id: string, agentId?: string): Promise<GatekeeperUiFrame | null>;
 
   // --- Deployment admin ---
 

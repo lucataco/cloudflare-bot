@@ -884,25 +884,32 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // The management apps available to the current user: their connected accounts that declare a
   // top-level UI (AccountDescription.providesUi). The app id is the gatekeeper's routing id (its
   // vendor id, e.g. "context"), so each app is hosted at /gatekeepers/<vendorId>. UI-providing
-  // accounts are auto-provisioned singletons (one per vendor), so the vendor id identifies them.
-  async listGatekeeperApps(): Promise<GatekeeperAppInfo[]> {
+  // accounts are auto-provisioned singletons (one per vendor, or one per vendor+bot for per-agent
+  // accounts), so the vendor id identifies them. With an agentId, only that bot's accounts are
+  // listed; without one, per-agent duplicates collapse to a single entry per vendor.
+  async listGatekeeperApps(agentId?: string): Promise<GatekeeperAppInfo[]> {
     // listProvidedAccounts provisions auto-provisioned accounts first (idempotent), so their apps
     // appear in the nav even before the user opens a gadget — in a single round trip.
-    let accounts = await this.#user.listProvidedAccounts();
-    return accounts
-        .filter((account: (typeof accounts)[number]) => account.description.providesUi)
-        .map((account: (typeof accounts)[number]) => ({
-          id: account.vendorId,
-          title: account.description.providesUi!.title,
-          icon: account.description.providesUi!.icon,
-        }));
+    let accounts = await this.#user.listProvidedAccounts(agentId);
+    let seen = new Set<string>();
+    let apps: GatekeeperAppInfo[] = [];
+    for (let account of accounts) {
+      if (!account.description.providesUi || seen.has(account.vendorId)) continue;
+      seen.add(account.vendorId);
+      apps.push({
+        id: account.vendorId,
+        title: account.description.providesUi.title,
+        icon: account.description.providesUi.icon,
+      });
+    }
+    return apps;
   }
 
-  async getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null> {
+  async getGatekeeperApp(id: string, agentId?: string): Promise<GatekeeperUiFrame | null> {
     // Self-sufficient: listProvidedAccounts provisions auto-provisioned accounts first (idempotent),
     // so a direct URL load of /gatekeepers/$id works without racing the Header's listGatekeeperApps.
     let user = this.#user;  // one stub for both calls
-    let accounts = await user.listProvidedAccounts();
+    let accounts = await user.listProvidedAccounts(agentId);
     let app = accounts.find((account: (typeof accounts)[number]) => account.vendorId === id && account.description.providesUi);
     if (!app) return null;
     // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
